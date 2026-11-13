@@ -1,59 +1,42 @@
 # ADR-0012 — سقف الاتصالات بالتصميم (hyper-util + PermitStream)
 
-**الحالة: مقترح — بانتظار موافقة المالك. لا شيء من هذا منفَّذ.** (AGENTS §8: قرار معماري جديد = ADR «مقترح» ثم موافقة المالك.) إن قُبل يحلّ جزئياً محل بند «مُقاس لا بالتصميم» في ADR-0011 §1 ويُعلَّم ADR-0011 «استُبدل جزئياً بـ0012». سياسة القياس نفسها (لا تخطٍّ صامت، حدود المُعيِّن، اختبار المُعيِّن السلبي) تبقى سارية.
+**الحالة: مقترح — غير مقبول، وغير منفَّذ.** موافقة المالك (2026-11-13 10:12 الكويت) تخص **موعد** البند في PLAN (آخر P1 أو أول P2، بعد B1–B4) فقط؛ هذا الـADR والتبعيات الجديدة يحتاجان موافقة صريحة (AGENTS §3.1، §8). إن قُبل يحلّ جزئياً محل بند «مُقاس لا بالتصميم» في ADR-0011 §1، وتبقى سياسة القياس وحدودها سارية.
 
-## السياق
-- ADR-0011 قرّر سقفاً **مُقاساً** على مقابس النواة (`SocketWatch`/`SockDiag`) مع تخفيف زمني: `pool_max_idle_per_host(0)` و`sleep(2ms)` بعد إسقاط الـbody. هذا ليس ضماناً: hyper يغلق الـfd في مهمة خلفية بعد إسقاط الـbody، فقد يتصل الجديد قبل إغلاق القديم، والـ2ms مجرد رهان على الجدولة.
-- فشل متقطع مُسجَّل (حلقة الـ200 تحت الحمل، التشغيل 90: `PEAK conns=8 client_sockets=9`، `/tmp/cap200_FAIL_90.log`). وللمسار نفسه دليل مباشر: في اختبار `g5_one_connection` (سقف 1) بعد `drop(resp)` ما زال القياس يُظهر مقبسين في ~50% من الجولات تحت الحمل، أي أن الإسقاط لا يعني إغلاق الـfd.
-- محاولات التشخيص بالهوية (inode+منفذ محلي لكل مقطع، `diag_hunt_for_cap_overshoot`، فرع `p1/conn-cap-diag`): **2300 تشغيل مُجهَّز بلا تكرار للفشل** (`/tmp/hunt2.log` 800، `/tmp/hunt3.log` 1500)؛ فالسبب «إغلاق fd متأخر في hyper» **مرجَّح لا مُثبَت بالهوية** (انظر `docs/../reports/diagnosis.md`).
-- `connector_layer` في reqwest لا يكفي (راجَعنا reqwest 0.12.28 `src/connect.rs:1288-1305`): `Conn` داخل `mod sealed` وحقوله `pub(super)` بلا constructor عام، فالطبقة تستطيع حجز permit قبل الاتصال لكن لا تستطيع ربطه بـDrop الـstream. و`ConcurrencyLimitLayer` يحدّ مرحلة الاتصال لا عمر المقبس. كما أن `connect_timeout` طبقة خارجية فانتظار الـpermit كان سيُحسب منها.
+## السياق (السبب **مرجَّح** لا مُثبَت)
+- فشل واحد في 90 جولة تحت حمل ≈3× الأنوية: `client_sockets=9` مع سقف 8 (`/tmp/cap200_FAIL_90.log`). **السبب المرجَّح (probable):** hyper يغلق الـfd في مهمة خلفية بعد إسقاط الرد/الجسم، فيتصل البديل قبل إغلاق القديم؛ `ResponseOpened` يتأخر عن الـconnect الفعلي. لم يُلتقط الـinode بالهوية في 2300 تشغيل مُجهَّز (`/workspace/projects/reports/diagnosis.md`، قسم Hunt 3).
+- دليل مباشر على أن «أُسقط الرد» لا يعني «أُغلق المقبس»: اختبار سقف 1 (`g5_one_connection`) يُظهر مقبسين في ~50% من الجولات بعد `drop(resp)` (مُتجاهَل `#[ignore]` ومُسجَّل في STATUS).
+- `connector_layer` في reqwest 0.12.28 لا يكفي: `Conn` مغلق (`src/connect.rs:1288-1305`) فلا يمكن ربط permit بـDrop الـstream.
+- الـ2ms (ADR-0011) رهان زمني، لا ضمان.
 
 ## القرار المقترح
-تحميل المقاطع (والـprobe) عبر **`hyper-util` legacy `Client`** مع connector خاص:
-1. `Semaphore` بعدد permits = السقف. الـconnector يحجز `acquire_owned()` **قبل إنشاء أي مقبس**، **بلا مهلة** (انتظار الـpermit لا يُحسب من `connect_timeout`)، ثم يتصل داخل `tokio::time::timeout(connect_timeout, …)`.
-2. يُغلَّف المقبس: `struct PermitStream { io: Io, _permit: OwnedSemaphorePermit }` ويطبّق `hyper::rt::Read/Write` و`Connection`. **ترتيب الحقول مقصود: `io` قبل `_permit`** (Rust يُسقط بترتيب التعريف) فيُغلق الـfd ثم يُحرَّر الـpermit. وفي دالة connect الـasync يُعرَّف الـpermit أولاً ليُسقط أخيراً عند فشل/إلغاء الاتصال.
-3. الـpermit يعيش **طول عمر المقبس لا الطلب**: يُحرَّر عند `close(fd)` الفعلي في مهمة اتصال hyper، فلا سباق بين «انتهى الرد» و«أُغلق المقبس». بعدها يُحذف `sleep(2ms)`.
-4. `pool_max_idle_per_host(0)` يبقى (مقبس خامل يحجز permit فيحجب الطلبات الجديدة). نتيجة checkout سباقية قد تُكمل اتصالاً في الخلفية ممسكاً permit حتى يسقط: داخل السقف، لكن يُختبر.
-5. `http1_only` وALPN يعرض `http/1.1` فقط. مع HTTP/2 يصير الـpermit لكل مقبس لا لكل مقطع ويتغير معنى السقف.
+عميل `hyper-util` (legacy `Client`) + connector خاص:
+1. `Semaphore(cap)`؛ الـconnector يحجز `acquire_owned()` **قبل أي مقبس**، بلا مهلة، ثم `timeout(connect_timeout, connect+TLS)` (انتظار الـpermit لا يُحسب من مهلة الاتصال).
+2. `PermitStream { io, _permit }` (**`io` قبل `_permit`**) يطبّق `hyper::rt::Read/Write`؛ الـpermit يُحرَّر عند `close(fd)` الفعلي.
+3. `http1_only`، ALPN `http/1.1` فقط، `Accept-Encoding: identity`، `set_happy_eyeballs_timeout(None)` (مقبس واحد لكل permit)، لا `try_clone`/`into_std`، لا `SO_LINGER>0`.
+4. الـprobe يمر على العميل نفسه (وإلا يصير الحقيقي cap+1 حتى يُغلق مقبس الـprobe).
+5. `drop(resp)` قبل أي طلب جديد وقبل `sleep` إعادة المحاولة (مُنفَّذ على `p1/drop-resp`)؛ وإلا deadlock عند السقف 1. تُحذف الـ2ms بعد التنفيذ.
 
-## ما نفقده من reqwest وما نبقيه
+### التعارض مع PLAN:86 (إعادة استعمال الاتصال) و`pool_max_idle_per_host(0)`
+PLAN:86 «يُنظر في إعادة استعمال الاتصال داخل السقف»؛ هذا الـADR يثبّت **عدم الإعادة في الإصدار الأول** (`pool_max_idle_per_host(0)`): مقبس خامل في pool يمسك permit فيحجب طلباً جديداً (deadlock) ما لم يُملك الاتصال الخامل لعامل واحد. الإعادة تحسين لاحق بقياس، لا شرط. فلا تعارض في الترتيب: v1 بلا إعادة، والبند في PLAN يبقى «يُنظر».
+**كلفة المصافحة (قياس محلي، loopback، rustls TLS1.3، شهادة ECDSA مولَّدة بـrcgen، reqwest مع pool=0):** 2.24 ms/طلب https مقابل 0.55 ms/طلب http (اتصال جديد لكل طلب) ⇒ **≈1.7 ms زيادة TLS للطلب** تسلسلياً، و≈0.31 ms/طلب عند تواز 8 (400 طلب، بعد إحماء). هذا CPU فقط؛ على الشبكة الحقيقية تُضاف ≈2 RTT (TCP+TLS1.3) لكل مقطع، **ولم تُقَس على الإنترنت**. المصافحة على SChannel (Windows) **لم تُقَس**. القياس مؤقت (لم يُلتزم ملفه).
+
+## ما نفقده/نبقيه من reqwest
 | الجانب | الخطة |
 |---|---|
-| TLS | Linux: `tokio-rustls`. **Windows حالياً `native-tls-alpn` (SChannel) لا rustls** (`crates/eid-engine/Cargo.toml:24-27`، ADR-0010) فعلى Windows `tokio-native-tls` (يبقى SChannel)؛ توحيد rustls قرار منفصل. الـhandshake يجري والـpermit ممسوك؛ وفشله يُسقط TCP أولاً. |
-| Proxy | يضيع الدعم الجاهز. **الافتراضي الحالي `use_system_proxy = true` (`config.rs:69`)**، فالاستبدال بلا بروكسي = تراجع سلوك لمستخدمين خلف بروكسي شركة/مدرسة، لا مجرد «ميزة ناقصة». `hyper-util` 0.1.21 فيه `client-proxy` و`client-proxy-system` (`Matcher::from_system()`) و`Tunnel` لـCONNECT. الحد الأدنى المقترح: CONNECT لـhttps، وhttp-proxy بصيغة absolute-form (`Connected::proxy(true)`)، مع إبقاء الافتراضي `true`. **قرار للمالك** (سؤال 3). |
-| Redirects | الـprobe يمشي حلقة تحويلات صغيرة يدوية بـ`redirect_verdict` (نقية، مُختبَرة). **أمن (AGENTS §6.3):** بيانات الدخول `basic_auth` تذهب **فقط إلى الـorigin الأصلي** (نفس scheme+host+port)؛ عند أي تحويل لـorigin مختلف يُحذف `Authorization` (reqwest يفعل ذلك اليوم؛ الحلقة اليدوية يجب أن تفعله ويُختبر: خادمان، الثاني لا يرى `Authorization`، وهو اختبار `g1_transfer` الحالي يُنقل كما هو للعميل الجديد). `Location` النسبي يُحَلّ على الـURL الحالي. المقاطع **لا** ترسل بيانات الدخول إلى `final_url` إن اختلف الـorigin؛ إن اختلف تُعاد عبر الـorigin الأصلي أو يُعتبر خطأ «تغيّر السلوك» (3xx في مقطع = خطأ). |
-| Timeouts | `connect_timeout` داخل الـconnector بعد الـpermit؛ `stall_timeout` قائم حول `stream.next()`؛ **`header_timeout` معرّف في `config.rs:42` لكنه غير مستخدم** اليوم فيُلفّ حول `send` هنا (يتقاطع مع M3 في المراجعة). |
-| Cookies/gzip/… | لا نستعملها أصلاً (`Accept-Encoding: identity`). |
-| تبعيات | مباشرة جديدة: hyper، hyper-util، http-body-util، tokio-rustls/tokio-native-tls. تحديث `docs/DEPENDENCIES.md` ونجاح `cargo deny` شرط. |
+| **الأمن: التحويلات وبيانات الدخول** (AGENTS §6.3) | حلقة تحويلات يدوية في الـprobe: `basic_auth` فقط للـorigin الأصلي (scheme+host+port)؛ **يُحذف `Authorization` عند أي تغيّر في الـorigin** ولا يعود؛ `Location` النسبي يُحَلّ على الـURL الحالي؛ **يُمنع https→http** (`redirect_verdict`)؛ يُحترم `max_redirects` (10). المقاطع تستعمل `final_url` **بلا بيانات دخول إن اختلف الـorigin**؛ أي 3xx في مقطع = خطأ «تغيّر السلوك». المحرك الحالي سليم (reqwest يحذفها): `cross_origin_redirect_drops_credentials`. |
+| **الشهادات** (parity) | Linux: نفس جذور reqwest الحالي (`rustls-tls` = webpki-roots) + `Config::extra_root_certs_pem`؛ Windows: مخزن النظام عبر SChannel + نفس `extra_root_certs_pem`. SNI والتحقق من اسم المضيف من الـURL (تُرفض الشهادات الخاطئة قبل إرسال أي طلب HTTP كما اليوم). `user_agent` من `Config` و`Accept-Encoding: identity`. |
+| **TLS على Windows** | `tokio-native-tls` (يبقى SChannel، ADR-0010)؛ توحيد rustls قرار منفصل. الـhandshake والـpermit ممسوك؛ فشله يُسقط TCP أولاً. |
+| **Proxy** | **الافتراضي الحالي `use_system_proxy = true` (`config.rs:69`)**؛ الاستبدال بلا بروكسي **تراجع سلوك** لمن خلف بروكسي. `hyper-util` فيه `client-proxy-system` (`Matcher::from_system()`) و`Tunnel` (CONNECT). **قرار للمالك** (سؤال 2). |
+| Timeouts | `connect_timeout` داخل الـconnector بعد الـpermit؛ `stall_timeout` قائم؛ `header_timeout` (غير مستخدم اليوم، M3) يُلفّ حول `send`. |
+| تبعيات | مباشرة جديدة: hyper، hyper-util، http-body-util، tokio-rustls/tokio-native-tls؛ تحديث `DEPENDENCIES.md` ونجاح `cargo deny`. |
 
-## فخاخ يجب أن يغطيها التنفيذ
-1. **الـprobe:** رده يُمرَّر للمقطع 0 كـ`first`، وهو اليوم `reqwest::Response` بمقبس **خارج الـpermit** فيصير السقف الحقيقي cap+1 حتى يُغلق. الحل: الـprobe يمر على العميل نفسه.
-2. **`drop(resp)` قبل أي طلب جديد** (تصليح مستقل نُفِّذ على `p1/drop-resp`): 416 في `probe` (`download.rs` ≈689)، ومحاولة single-stream (≈1088)، و`send_retrying`. بدونه يحدث **deadlock** عند السقف 1 لأن العامل يمسك permit وينتظر ثانياً. ويجب إسقاط الـResponse قبل `sleep` إعادة المحاولة.
-3. **Happy Eyeballs:** `HttpConnector` يطلق محاولة ثانية بالتوازي بعد 300ms (مقبسان على permit واحد). الحل `set_happy_eyeballs_timeout(None)` (محاولات متتالية) أو حلقة connect خاصة؛ والـpermit قبل أول مقبس ويبقى عبر كل المحاولات. (الاختبارات الحالية على `127.0.0.1` فقط.)
-4. **لا `try_clone`/`into_std`** في الـconnector (المقابس تُنشأ `SOCK_CLOEXEC`/بلا وراثة مقبض على Windows فلا يرثها yt-dlp). اختبار: تشغيل عملية فرعية أثناء التحميل وعدم تغيّر عدد المقابس.
-5. **لا `SO_LINGER > 0`** (يحجز `close` داخل async). الافتراضي يعيد فوراً والمقبس اليتيم inode=0 فلا يُعدّ.
-6. **الإلغاء/الفشل:** مقبس غير مكتمل يسقط قبل الـpermit.
-7. **Windows:** لا `SockDiag` هناك؛ الدليل هناك هو اختبار الـpermit الحتمي. قياس `GetExtendedTcpTable` لاحقاً وحالات FIN_WAIT المنسوبة للعملية لا تُقارن مباشرة بـSOCK_DIAG. يُكتب في STATUS: قياس المقابس على Windows لم يُختبر.
+## خطة التراجع (Windows)
+الكود الجديد في وحدة واحدة (`capped_client`) خلف `Config::client_backend` (`Reqwest` | `Capped`) لإصدار واحد على الأقل: الافتراضي يبقى reqwest + الـ2ms حتى ينجح على Windows (CI + P8 اليدوي: التحميل، شهادة خاطئة مرفوضة، بروكسي إن لزم، قياس الـpermits). فشل على Windows ⇒ يبقى الافتراضي القديم على Windows ويُسجَّل دَين؛ التراجع الكامل = `git revert` لالتزام الوحدة. قياس مقابس Windows (`GetExtendedTcpTable`) لاحق؛ الدليل هناك عدّاد permits حتمي.
 
-## خطة الاختبار
-1. **حتمي:** connector وهمي يُرجع stream بعلم Drop؛ `available_permits()` لا يعود إلا بعد Drop الـstream، والطلب cap+1 ينتظر حتى ذلك.
-2. **الثابت:** في كل عيّنة: مقابس النواة ≤ permits المحجوزة، والذروة ≤ السقف.
-3. **سقف = 1** يمر على: 416، إعادة محاولة (429/503 + انقطاع body + stall)، تحويل في الـprobe، إلغاء، والـprobe نفسه، مع مهلة صريحة (الفشل = تعليق).
-4. Happy Eyeballs: خادم على `::1` بطيء القبول؛ لا مقبسان لنفس الـpermit.
-5. يبقى اختبار `SockDiag` الصارم كما هو (دليل مستقل) وحلقة الـ200 تحت الحمل مع طباعة البذرة؛ تُحذف الـ2ms.
-6. اختبار عملية فرعية (نقطة 4 أعلاه) على Linux؛ ما يخص Windows يُسجَّل «لم يُختبر على Windows الحقيقي».
-
-## البدائل
-- إبقاء الوضع (مقاس + 2ms): رخيص لكن متقطع (فشل 1/90 تحت حمل شديد) ولا يمكن إثباته.
-- تخفيف إضافي (رفع الـ2ms): رهان زمني لا يُغلق الباب.
-- فرع reqwest: غير ممكن بلا تعديل المكتبة (`Conn` مغلق).
-
-## العواقب
-+ سقف حتمي على المقابس الفعلية على ويندوز ولينكس بلا `cfg` خارج `eid-platform`.
-− إعادة كتابة طبقة HTTP (≈ مئات الأسطر) وتبعيات جديدة وفقدان بروكسي/تحويلات reqwest الجاهزة.
-− يتقاطع مع B3/M3 في `docs/reviews/P1.md`: يُفضَّل حسم سلوك مسار «بلا validators» (B3) قبل بناء العميل الجديد، وبعد موافقة المالك فقط.
+## اختبارات ستُضاف إلى `required_tests.txt` (لا يُحذف شيء)
+`permit_is_held_until_the_stream_drops` · `request_cap_plus_one_waits_for_stream_drop` · `kernel_sockets_never_exceed_reserved_permits` (unix) · `one_connection_probe_416_fallback_never_holds_two_sockets` (يخرج من `#[ignore]`) · `one_connection_retry_429_503_cancel_redirect_paths` · `happy_eyeballs_never_opens_two_sockets_per_permit` · `child_process_does_not_inherit_download_sockets` (unix) · `redirect_cross_origin_strips_authorization` · `redirect_relative_location_resolved` · `redirect_https_to_http_blocked` · `redirect_respects_max_redirects` · `tls_sni_and_hostname_verified` · `user_agent_and_identity_encoding_sent` · `windows_cap_by_permit_counter` (cfg windows، NOT TESTED حتى Windows الحقيقي) + الموجود في `g4_tls`. **شرط القبول:** 200 جولة تحت حمل بلا أي فشل وبلا أي `sleep`؛ `SockDiag` الصارم يبقى كما هو؛ والثابت «مقابس النواة ≤ permits المحجوزة».
 
 ## أسئلة للمالك
-1. هل يُقدَّم البند (PLAN P2 `conn-cap-by-construction`) إلى آخر P1، أم يبقى دَيناً موثّقاً؟
-2. Windows: `tokio-native-tls` (SChannel) أم توحيد rustls؟
-3. البروكسي: الافتراضي الحالي `use_system_proxy = true`. هل يُقبل فقدان بروكسي النظام في أول إصدار بالعميل الجديد، أم يُشترط CONNECT + `Matcher::from_system()` من اليوم الأول؟
+1. قبول الـADR والتبعيات الجديدة (موعده: آخر P1/أول P2 بعد B1–B4).
+2. البروكسي: هل يُقبل فقدان بروكسي النظام في أول إصدار بالعميل الجديد، أم يُشترط CONNECT + `from_system()` من اليوم الأول؟
+3. Windows: `tokio-native-tls` (SChannel) أم توحيد rustls؟
