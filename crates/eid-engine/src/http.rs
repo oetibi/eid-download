@@ -33,7 +33,7 @@ pub fn build_client(cfg: &Config) -> Result<reqwest::Client> {
         .user_agent(cfg.user_agent.clone())
         .default_headers(h)
         .connect_timeout(cfg.connect_timeout)
-        .pool_max_idle_per_host(64)
+        .pool_max_idle_per_host(0)
         .pool_idle_timeout(Duration::from_secs(60));
     for pem in &cfg.extra_root_certs_pem {
         let cert = reqwest::Certificate::from_pem(pem)

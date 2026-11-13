@@ -347,6 +347,11 @@ impl Ctx {
         };
         self.emit(Event::ResponseOpened { seg });
         let r = self.stream_segment(seg, resp).await;
+        // hyper closes the socket asynchronously in its connection task after the body is
+        // dropped; give it a moment so a replacement connection does not overlap the old
+        // socket (ADR-0011: real-socket cap). Cost: 2 ms per response, i.e. per segment.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
         self.emit(Event::ResponseClosed { seg });
         r
     }
