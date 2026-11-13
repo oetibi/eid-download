@@ -1,11 +1,14 @@
-# Expensive (Windows minutes count 2x on private repos): NOT on every push.
-# Runs on pull_request, version tags and manual dispatch only.
+# Expensive (Windows minutes count 2x on private repos): NOT on every push to every branch.
+# Runs on pull_request, pushes to main (merge results, owner-approved 2026-11-13), version tags
+# and manual dispatch.
 name: ci-windows
 on:
   pull_request:
     paths-ignore: ['docs/**', '**/*.md', 'LICENSE*']
   push:
+    branches: [main]
     tags: ['v*']
+    paths-ignore: ['docs/**', '**/*.md', 'LICENSE*']
   workflow_dispatch:
 permissions:
   contents: read
