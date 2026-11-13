@@ -252,9 +252,15 @@ async fn retry_after_429_respected_and_403_lowers_connections() {
     assert!(srv.stats("/f.bin").peak_concurrent <= 3 + 1);
 }
 
+/// Real-time smoke test of the limiter (the precise one is the virtual-time test). The job is
+/// timed in PHASES from engine events with their arrival `Instant`s: start, `Started`, first
+/// `ResponseOpened`, last `ResponseClosed`, `Finished`, return. The 1.5-4 s smoke bound applies
+/// to the TRANSFER phase (first `ResponseOpened` -> last `ResponseClosed`): total time and the
+/// finalize overhead (hash, fsync, rename, checkpoints, antivirus on Windows) are REPORT-ONLY.
+/// The lower bound is strict: it proves the limiter really limits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn limiter_real_time_smoke_bounded() {
-    // 2 MiB at 1 MiB/s ~ 2 s (smoke only; the precise test is the virtual-time one)
+    // 2 MiB at 1 MiB/s ~ 2 s
     let len = 2u64 << 20;
     let (_srv, url) = serve(
         "/lim.bin",
@@ -265,15 +271,73 @@ async fn limiter_real_time_smoke_bounded() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = fast_cfg(4);
     cfg.job_limit_bps = Some(1 << 20);
-    let t = Instant::now();
-    let (o, _) = get(&url, dir.path(), cfg).await.unwrap();
-    let secs = t.elapsed().as_secs_f64();
+    #[derive(Default)]
+    struct Marks {
+        started: Option<Instant>,
+        first_open: Option<Instant>,
+        last_close: Option<Instant>,
+        finished: Option<Instant>,
+    }
+    let marks = std::sync::Arc::new(std::sync::Mutex::new(Marks::default()));
+    let m2 = marks.clone();
+    let sink: eid_engine::EventSink = std::sync::Arc::new(move |e| {
+        let now = Instant::now();
+        let mut m = m2.lock().unwrap();
+        match e {
+            Event::Started { .. } => m.started = Some(now),
+            Event::ResponseOpened { .. } => {
+                m.first_open.get_or_insert(now);
+            }
+            Event::ResponseClosed { .. } => m.last_close = Some(now),
+            Event::Finished { .. } => m.finished = Some(now),
+            _ => {}
+        }
+    });
+    let t0 = Instant::now();
+    let o = eid_engine::download(
+        eid_engine::JobSpec {
+            url,
+            dir: dir.path().into(),
+            file_name: None,
+        },
+        cfg,
+        sink,
+        eid_engine::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let returned = Instant::now();
     assert_eq!(o.size, len);
-    // Lower bound strict: proves the limiter really limits. Upper bound loose (ADR-0011): slow
-    // 2-core CI runners add hashing/fsync/scheduling time. Rate accuracy is proven by the 5%
-    // virtual-time test `limiter_rate_within_5_percent_virtual_time`.
-    assert!(secs >= 1.5, "limiter did not slow the transfer: {secs:.2}s");
-    assert!(secs <= 4.0, "limiter stalled the transfer: {secs:.2}s");
+    let m = marks.lock().unwrap();
+    let at = |t: Option<Instant>| t.map(|t| t.duration_since(t0).as_secs_f64());
+    let (started, first_open, last_close, finished) = (
+        at(m.started),
+        at(m.first_open),
+        at(m.last_close),
+        at(m.finished),
+    );
+    let total = returned.duration_since(t0).as_secs_f64();
+    let first_open = first_open.expect("no ResponseOpened event: the transfer phase is unknown");
+    let last_close = last_close.expect("no ResponseClosed event: the transfer phase is unknown");
+    let transfer = last_close - first_open;
+    let fmt = |v: Option<f64>| v.map_or("n/a".to_string(), |v| format!("{v:.3}s"));
+    eprintln!(
+        "LIMITER PHASES start=0.000s started={} first_open={first_open:.3}s last_close={last_close:.3}s finished={} returned={total:.3}s | probe={} transfer={transfer:.3}s finalize={} total={total:.3}s (smoke bound applies to transfer only)",
+        fmt(started),
+        fmt(finished),
+        fmt(started.map(|s| first_open - s)),
+        fmt(finished.map(|f| f - last_close)),
+    );
+    // Lower bound strict: proves the limiter really limits. Upper bound loose (ADR-0011).
+    // Rate accuracy is proven by `limiter_rate_within_5_percent_virtual_time`.
+    assert!(
+        transfer >= 1.5,
+        "limiter did not slow the transfer: {transfer:.2}s"
+    );
+    assert!(
+        transfer <= 4.0,
+        "limiter stalled the transfer: {transfer:.2}s (total {total:.2}s)"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
