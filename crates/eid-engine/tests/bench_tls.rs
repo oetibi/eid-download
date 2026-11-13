@@ -29,28 +29,14 @@ fn new_ca(name: &str) -> Ca {
 
 enum Leaf {
     Valid(&'static str),
-    Expired(&'static str),
-    SelfSigned(&'static str),
 }
 
 /// Starts a one-file HTTPS server; returns (port, number of HTTP requests actually served).
 async fn tls_server(ca: &Ca, leaf: Leaf) -> (u16, Arc<AtomicUsize>) {
     let key = KeyPair::generate().unwrap();
-    let (name, expired, selfsigned) = match leaf {
-        Leaf::Valid(n) => (n, false, false),
-        Leaf::Expired(n) => (n, true, false),
-        Leaf::SelfSigned(n) => (n, false, true),
-    };
-    let mut p = CertificateParams::new(vec![name.to_string()]).unwrap();
-    if expired {
-        p.not_before = rcgen::date_time_ymd(2020, 1, 1);
-        p.not_after = rcgen::date_time_ymd(2021, 1, 1);
-    }
-    let cert = if selfsigned {
-        p.self_signed(&key).unwrap()
-    } else {
-        p.signed_by(&key, &ca.cert, &ca.key).unwrap()
-    };
+    let Leaf::Valid(name) = leaf;
+    let p = CertificateParams::new(vec![name.to_string()]).unwrap();
+    let cert = p.signed_by(&key, &ca.cert, &ca.key).unwrap();
     let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
     let cfg = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -105,10 +91,11 @@ async fn tls_server(ca: &Ca, leaf: Leaf) -> (u16, Arc<AtomicUsize>) {
 }
 
 fn cfg_trusting(ca: &Ca) -> eid_engine::Config {
-    let mut c = eid_engine::Config::default();
-    c.max_attempts = 2;
-    c.extra_root_certs_pem = vec![ca.cert.pem().into_bytes()];
-    c
+    eid_engine::Config {
+        max_attempts: 2,
+        extra_root_certs_pem: vec![ca.cert.pem().into_bytes()],
+        ..Default::default()
+    }
 }
 
 async fn plain_server() -> u16 {
