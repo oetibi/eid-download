@@ -156,7 +156,7 @@ impl SocketReport {
     /// The line printed next to every PEAK line: the real sampling period.
     pub fn describe(&self) -> String {
         format!(
-            "SAMPLER samples={} failed={} mean_interval_us={} max_interval_us={}",
+            "SAMPLER samples={} failed={} mean_interval_us={} max_gap_us={}",
             self.samples,
             self.failed,
             (self.elapsed.as_micros() as u64)
@@ -284,6 +284,12 @@ impl SocketWatch {
             started,
             thread: Some(thread),
         }
+    }
+
+    /// The most recent sampled count (0 before the first change). Lets a test wait for an EVENT
+    /// ("the sampler saw N sockets") instead of betting on timing.
+    pub fn current(&self) -> usize {
+        self.timeline.lock().unwrap().last().map_or(0, |x| x.1)
     }
 
     /// Stops sampling; Err if the watch was not trustworthy (see `validate_watch`).
