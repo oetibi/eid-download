@@ -76,3 +76,4 @@ shell_injection_posix_sh
 shell_injection_powershell
 shell_injection_cmd_exe
 unix:sockdiag_counts_client_sockets_by_ownership_and_sees_closes
+check_open_peeks_without_consuming_and_detects_close
