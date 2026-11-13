@@ -15,7 +15,7 @@ async fn sha256_matches_with_1_8_32_connections() {
     for conns in [1usize, 8, 32] {
         let dir = tempfile::tempdir().unwrap();
         let (srv, url) = serve("/f.bin", big(), Behavior::default()).await;
-        let (o, _) = get(&url, dir.path(), fast_cfg(conns)).await.unwrap();
+        let (o, log) = get(&url, dir.path(), fast_cfg(conns)).await.unwrap();
         assert_eq!(
             o.sha256.as_deref(),
             Some(want.as_str()),
@@ -31,10 +31,25 @@ async fn sha256_matches_with_1_8_32_connections() {
                 st.peak_concurrent
             );
         }
+        // The server's in-flight counter is NOT a valid cap measurement (it learns of a close
+        // late; CI run 43361242168 saw 9 while the client never had more than 8). The cap is
+        // asserted from the ENGINE's own events (ADR-0011); the server counter only has to
+        // prove real parallelism (> 1, above).
+        eprintln!(
+            "PEAK conns={conns} client_responses={} server={} workers={}",
+            log.peak_live_responses(),
+            st.peak_concurrent,
+            o.peak_workers
+        );
         assert!(
-            st.peak_concurrent <= conns,
-            "{conns}: peak {} exceeds cap",
-            st.peak_concurrent
+            log.peak_live_responses() <= conns,
+            "{conns}: engine had {} live responses",
+            log.peak_live_responses()
+        );
+        assert!(
+            o.peak_workers <= conns,
+            "{conns}: {} workers",
+            o.peak_workers
         );
         assert_eq!(
             only_files(dir.path()),
@@ -364,4 +379,23 @@ async fn length_change_during_download_is_detected() {
     let (o, _) = get(&url, dir.path(), cfg).await.unwrap();
     assert_eq!(sha_of_file(&o.path), b.sha256_hex());
     assert!(o.restarts >= 1);
+}
+
+/// Every `ResponseOpened` has a matching `ResponseClosed` (emitted after the body stream is
+/// dropped) and the live count never exceeds the cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn response_events_are_balanced_and_bounded_by_the_cap() {
+    let (_srv, url) = serve("/f.bin", big(), Behavior::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (o, log) = get(&url, dir.path(), fast_cfg(8)).await.unwrap();
+    let opened = log.count(|e| matches!(e, Event::ResponseOpened { .. }));
+    let closed = log.count(|e| matches!(e, Event::ResponseClosed { .. }));
+    assert!(opened >= 1, "no response events at all");
+    assert_eq!(opened, closed, "unbalanced response events");
+    assert!(
+        log.peak_live_responses() <= 8,
+        "live peak {}",
+        log.peak_live_responses()
+    );
+    assert!(o.peak_workers <= 8);
 }

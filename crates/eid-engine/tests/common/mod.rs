@@ -24,14 +24,37 @@ pub fn fast_cfg(connections: usize) -> Config {
 }
 
 #[derive(Clone, Default)]
-pub struct Log(pub Arc<Mutex<Vec<Event>>>);
+pub struct Log {
+    pub events: Arc<Mutex<Vec<Event>>>,
+    live: Arc<std::sync::atomic::AtomicUsize>,
+    peak_live: Arc<std::sync::atomic::AtomicUsize>,
+}
 impl Log {
+    /// Records events and, at emit time, the number of live responses (opened, not yet dropped).
     pub fn sink(&self) -> EventSink {
-        let l = self.0.clone();
-        Arc::new(move |e| l.lock().unwrap().push(e))
+        use std::sync::atomic::Ordering::SeqCst;
+        let l = self.events.clone();
+        let (live, peak) = (self.live.clone(), self.peak_live.clone());
+        Arc::new(move |e| {
+            match &e {
+                Event::ResponseOpened { .. } => {
+                    let n = live.fetch_add(1, SeqCst) + 1;
+                    peak.fetch_max(n, SeqCst);
+                }
+                Event::ResponseClosed { .. } => {
+                    live.fetch_sub(1, SeqCst);
+                }
+                _ => {}
+            }
+            l.lock().unwrap().push(e)
+        })
+    }
+    /// Highest number of simultaneously live responses as seen by the ENGINE.
+    pub fn peak_live_responses(&self) -> usize {
+        self.peak_live.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub fn count(&self, f: impl Fn(&Event) -> bool) -> usize {
-        self.0.lock().unwrap().iter().filter(|e| f(e)).count()
+        self.events.lock().unwrap().iter().filter(|e| f(e)).count()
     }
 }
 
