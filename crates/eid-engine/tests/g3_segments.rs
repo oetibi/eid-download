@@ -587,8 +587,7 @@ async fn socket_watch_catches_a_brief_cap_plus_one_peak() {
         let (base, addr, last_sampler) = (base.clone(), addr.clone(), last_sampler.clone());
         async move {
             let w = SocketWatch::start(&base).expect("supported platform");
-            // let the sampler take its first (zero) sample so the peak is a real change
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            // `start` returns only after the sampler's first sample: the peak is a real change
             let mut s: Vec<std::net::TcpStream> = (0..cap)
                 .map(|_| std::net::TcpStream::connect(&addr).unwrap())
                 .collect();
@@ -596,16 +595,28 @@ async fn socket_watch_catches_a_brief_cap_plus_one_peak() {
             tokio::time::sleep(Duration::from_millis(hold_ms)).await;
             drop(s);
             tokio::time::sleep(Duration::from_millis(3)).await;
-            let r = w.finish();
+            // `finish` (panic on an invalid watch) is for the ASSERTED 5 ms rounds only; the
+            // report-only loops use `finish_checked` and count "not measured".
+            let r = if hold_ms == 5 {
+                w.finish()
+            } else {
+                match w.finish_checked() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("sampler detection (report only): not measured: {e}");
+                        return None;
+                    }
+                }
+            };
             *last_sampler.lock().unwrap() = r.describe();
-            r.peak > cap
+            Some(r.peak > cap)
         }
     };
     const K: usize = 8;
     for round in 0..3 {
         let mut caught_after = None;
         for t in 1..=K {
-            if one_try(5).await {
+            if one_try(5).await == Some(true) {
                 caught_after = Some(t);
                 break;
             }
@@ -619,13 +630,15 @@ async fn socket_watch_catches_a_brief_cap_plus_one_peak() {
     eprintln!("(last try) {}", last_sampler.lock().unwrap());
     // report-only detection rates for shorter holds (never asserted)
     for hold_ms in [2u64, 1] {
-        let mut seen = 0;
+        let (mut seen, mut not_measured) = (0, 0);
         for _ in 0..30 {
-            if one_try(hold_ms).await {
-                seen += 1;
+            match one_try(hold_ms).await {
+                Some(true) => seen += 1,
+                Some(false) => {}
+                None => not_measured += 1,
             }
         }
-        eprintln!("sampler detection (report only): cap+1 held {hold_ms} ms caught {seen}/30");
+        eprintln!("sampler detection (report only): cap+1 held {hold_ms} ms caught {seen}/30 (not measured: {not_measured})");
     }
 }
 
@@ -720,4 +733,25 @@ async fn socket_watch_failure_paths_fail_instead_of_skipping() {
     tokio::time::sleep(Duration::from_millis(120)).await;
     let r = w.finish();
     assert!(r.samples > 0 && r.failed > 0, "{}", r.describe());
+}
+
+/// CI failure (run 43387076289) = `samples == 0`: `start` returned before the sampler thread
+/// took a single sample. `start` must now be a readiness barrier: even when the first kernel
+/// query is slow, a `finish_checked` right after `start` has at least one sample.
+#[test]
+fn socket_watch_start_returns_only_after_the_first_sample() {
+    let mut first = true;
+    let w = SocketWatch::start_with(
+        "http://127.0.0.1:9",
+        Box::new(move |_| {
+            if std::mem::take(&mut first) {
+                std::thread::sleep(Duration::from_millis(300)); // a starved/slow sampler
+            }
+            Some(0)
+        }),
+    );
+    let r = w
+        .finish_checked()
+        .expect("start must not return before the first sample");
+    assert!(r.samples >= 1, "{}", r.describe());
 }
