@@ -2,7 +2,7 @@
 name = "eid-engine"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+publish = false
 
 [features]
 # Crash/jitter injection used only by tests (EID_FAULT / EID_FAULT_AFTER env, set_jitter()).

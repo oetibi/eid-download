@@ -5,7 +5,7 @@ members = ["crates/eid-engine", "crates/eid-platform", "crates/eid-testserver", 
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-license = "Apache-2.0 OR MIT"   # PROPOSED, see docs/adr/0008-license.md (owner approval pending)
+# license undecided (docs/adr/0008-license.md): no LICENSE file and publish = false in every crate until the owner decides
 
 
 [workspace.lints.rust]
