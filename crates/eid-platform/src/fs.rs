@@ -130,6 +130,63 @@ fn apply_open_flags(o: &mut OpenOptions) {
     }
 }
 
+/// True if `f` is the very file `path` names right now (same device+inode on Unix, same volume
+/// serial + file index on Windows; `path` is not followed if it is a symlink). `false` when the
+/// path no longer exists or names another file: an advisory lock taken on `f` then protects an
+/// orphan, not the path (review M1: lock files are deleted while locked).
+pub fn handle_is_path(f: &File, path: &Path) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let a = f.metadata()?;
+        match std::fs::symlink_metadata(path) {
+            Ok(b) => Ok(a.dev() == b.dev() && a.ino() == b.ino()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+        fn id(f: &File) -> io::Result<(u32, u32, u32)> {
+            let mut i: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut i) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok((i.dwVolumeSerialNumber, i.nFileIndexHigh, i.nFileIndexLow))
+        }
+        let mut o = OpenOptions::new();
+        // read access, share everything (incl. delete) so this probe never blocks the owner
+        o.read(true)
+            .share_mode(7)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        match o.open(path) {
+            Ok(g) => Ok(id(f)? == id(&g)?),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// True if opening/locking a lock file failed because another party holds or is deleting it
+/// (Windows: access denied for a delete-pending file, sharing/lock violation). Always `false` on
+/// Unix. The engine maps this to "busy" instead of a generic I/O error (review M1).
+pub fn is_lock_contention(e: &io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(e.raw_os_error(), Some(5 | 32 | 33))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = e;
+        false
+    }
+}
+
 /// Open (creating if needed) a per-job LOCK file: owner-only, never follows a symlink, must be a
 /// plain single-link regular file. Used only for its advisory lock, never for data.
 pub fn open_or_create_lock_file(path: &Path) -> io::Result<File> {

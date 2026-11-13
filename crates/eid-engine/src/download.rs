@@ -46,15 +46,34 @@ impl JobLock {
     /// Take the lock for job `name` in `dir`; `Err(Busy)` if another job/process holds it.
     pub fn acquire(dir: &Path, name: &str) -> Result<JobLock> {
         let path = dir.join(format!("{name}{LOCK_SUFFIX}"));
-        let file = pfs::open_or_create_lock_file(&path).map_err(Error::io("open job lock"))?;
-        if !pfs::try_lock_exclusive(&file).map_err(Error::io("lock job"))? {
-            return Err(Error::Busy);
+        // The lock file is deleted while locked (end of a finished job). A process that opened the
+        // path BEFORE the deletion and locks AFTER the owner released would hold an ORPHAN inode
+        // while a third process creates and locks a fresh file at the same path: two owners.
+        // So after locking, the handle must still be the file the path names; else retry.
+        for _ in 0..32 {
+            let file = match pfs::open_or_create_lock_file(&path) {
+                Ok(f) => f,
+                Err(e) if pfs::is_lock_contention(&e) => return Err(Error::Busy),
+                Err(e) => return Err(Error::io("open job lock")(e)),
+            };
+            fault::hit("lock_after_open");
+            if !pfs::try_lock_exclusive(&file).map_err(Error::io("lock job"))? {
+                return Err(Error::Busy);
+            }
+            match pfs::handle_is_path(&file, &path) {
+                Ok(true) => {
+                    return Ok(JobLock {
+                        file,
+                        path,
+                        name: name.to_string(),
+                    })
+                }
+                Ok(false) => continue, // orphan inode: reopen the path
+                Err(e) if pfs::is_lock_contention(&e) => return Err(Error::Busy),
+                Err(e) => return Err(Error::io("verify job lock")(e)),
+            }
         }
-        Ok(JobLock {
-            file,
-            path,
-            name: name.to_string(),
-        })
+        Err(Error::Busy)
     }
 
     /// Lock for the job whose sidecar is `state_path` (`<name>.eid-state`).
@@ -73,7 +92,7 @@ impl JobLock {
     }
 
     /// Delete the lock file while still holding the lock (end of a finished job).
-    fn remove_file_keep_lock(&self) {
+    pub fn remove_file_keep_lock(&self) {
         let _ = std::fs::remove_file(&self.path);
         let _ = &self.file;
     }
