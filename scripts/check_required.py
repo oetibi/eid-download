@@ -4,6 +4,14 @@ executed and passed (not ignored, not missing). Exit 1 otherwise."""
 import re, subprocess, sys, pathlib
 root = pathlib.Path(__file__).resolve().parent.parent
 import platform
+
+# Windows consoles default to cp1252: printing the failure marker must never crash the checker
+# (CI run 43387076026). A failed check must stay visible AND exit non-zero.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 _win = platform.system() == "Windows"
 req = []
 not_tested = []
