@@ -464,15 +464,25 @@ async fn socket_watch_failure_paths_fail_instead_of_skipping() {
     );
     assert!(validate_watch(1000, 5, false).is_ok(), "healthy watch");
     // (4) a mostly working query with sporadic failures is still accepted and counted
-    let mut n = 0u32;
+    // Event-confirmed, not a fixed sleep: wait until the sampler has made 120 queries (so at
+    // least two of them failed) — a starved sampler thread only makes this slower, not flaky.
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let calls_in = calls.clone();
     let w = SocketWatch::start_with(
         url,
         Box::new(move |_| {
-            n += 1;
+            let n = calls_in.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             (!n.is_multiple_of(50)).then_some(0)
         }),
     );
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while calls.load(std::sync::atomic::Ordering::SeqCst) < 120 {
+        assert!(
+            Instant::now() < deadline,
+            "sampler made no progress in 10 s"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
     let r = w.finish();
     assert!(r.samples > 0 && r.failed > 0, "{}", r.describe());
 }
