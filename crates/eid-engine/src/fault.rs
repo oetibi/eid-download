@@ -11,7 +11,19 @@ mod imp {
     static JITTER: AtomicU64 = AtomicU64::new(0);
 
     pub fn hit(name: &str) {
-        if PANIC_AT.lock().unwrap().as_deref() == Some(name) {
+        let fire = {
+            let mut g = PANIC_AT.lock().unwrap_or_else(|e| e.into_inner());
+            match g.as_ref() {
+                Some((n, after))
+                    if n == name && PANIC_HITS.fetch_add(1, Ordering::SeqCst) + 1 >= *after =>
+                {
+                    *g = None; // one-shot: later resumes in the same process run normally
+                    true
+                }
+                _ => false,
+            }
+        };
+        if fire {
             panic!("fault point {name} reached (simulated crash)");
         }
         if let Ok(want) = std::env::var("EID_FAULT") {
@@ -26,13 +38,15 @@ mod imp {
             }
         }
     }
-    /// Test hook: PANIC (instead of abort) the next time fault point `name` is reached, so an
+    /// Test hook: PANIC (instead of abort) the `after`-th time fault point `name` is reached, so an
     /// in-process test can observe the on-disk state a crash at that point leaves behind.
     /// Process-global: use only from a test binary that runs a single such test.
-    pub fn set_panic_point(name: &str) {
-        *PANIC_AT.lock().unwrap() = Some(name.to_string());
+    pub fn set_panic_point(name: &str, after: u64) {
+        PANIC_HITS.store(0, Ordering::SeqCst);
+        *PANIC_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some((name.to_string(), after));
     }
-    static PANIC_AT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    static PANIC_AT: std::sync::Mutex<Option<(String, u64)>> = std::sync::Mutex::new(None);
+    static PANIC_HITS: AtomicU64 = AtomicU64::new(0);
     pub fn set_jitter(seed: u64) {
         JITTER.store(seed, Ordering::SeqCst);
     }
@@ -53,7 +67,7 @@ mod imp {
     #[inline(always)]
     pub fn hit(_name: &str) {}
     #[inline(always)]
-    pub fn set_panic_point(_name: &str) {}
+    pub fn set_panic_point(_name: &str, _after: u64) {}
     #[inline(always)]
     pub fn set_jitter(_seed: u64) {}
     #[inline(always)]

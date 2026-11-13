@@ -1301,10 +1301,33 @@ async fn download_inner(
         // is consumed, as ONE stream; a disconnect restarts the whole file (review B3).
         let can_resume = probe.etag.is_some() || probe.last_modified.is_some();
         let ranged_mode = probe.ranged && can_resume;
+        // Review B1: the NEW generation's state (zero frontier, new validators) replaces the old
+        // one — and the old backup is deleted — BEFORE the data is truncated. A crash anywhere
+        // after this point can no longer pair an old checkpoint's frontiers with new-generation
+        // data; a crash before it leaves old state + old data, which are still consistent.
+        let init = if ranged_mode {
+            make_state(
+                &info,
+                probe.total,
+                true,
+                Table::new(probe.total.unwrap()).snapshot(),
+            )
+        } else {
+            make_state(&info, probe.total, false, vec![])
+        };
+        let sp = f.state.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            state::save(&sp, &init)?;
+            state::remove_backup(&sp);
+            Ok(())
+        })
+        .await
+        .map_err(|e| Error::Network(e.to_string()))??;
         file.set_len(0).map_err(Error::io("truncate"))?;
         if let Some(t) = probe.total {
             pfs::preallocate(&file, t).map_err(Error::io("preallocate"))?;
         }
+        fault::hit("restart_truncated");
         let peaks: (u64, usize);
         let result: Result<u64> = if ranged_mode {
             let total = probe.total.unwrap();
@@ -1331,17 +1354,6 @@ async fn download_inner(
                 done_bytes: AtomicU64::new(0),
                 gate: Mutex::new(Instant::now()),
             });
-            // initial state so that even a crash before the first checkpoint is recoverable
-            let init = make_state(
-                &info,
-                Some(total),
-                true,
-                ctx.table.lock().unwrap().snapshot(),
-            );
-            let sp = state_path.clone();
-            tokio::task::spawn_blocking(move || state::save(&sp, &init))
-                .await
-                .map_err(|e| Error::Network(e.to_string()))??;
             let r = run_ranged(ctx.clone(), &info, &state_path, Some(probe.resp)).await;
             let peak = (
                 ctx.peak_buffered.load(Ordering::SeqCst),
@@ -1350,11 +1362,6 @@ async fn download_inner(
             peaks = peak;
             r.map(|_| total)
         } else {
-            let init = make_state(&info, probe.total, false, vec![]);
-            let sp = f.state.clone();
-            tokio::task::spawn_blocking(move || state::save(&sp, &init))
-                .await
-                .map_err(|e| Error::Network(e.to_string()))??;
             peaks = (0, 1);
             run_single(&net, &file, probe.resp, probe.total, job_limiter(&cfg)).await
         };

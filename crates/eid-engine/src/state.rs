@@ -207,6 +207,12 @@ pub fn load(path: &Path) -> Result<State> {
     }
 }
 
+/// Delete only the `.bak` generation (used when a restart replaces the state, so the backup can
+/// never certify data of a previous representation).
+pub fn remove_backup(path: &Path) {
+    let _ = std::fs::remove_file(bak_path(path));
+}
+
 pub fn remove_all(path: &Path) {
     for p in [path.to_path_buf(), bak_path(path), tmp_path(path)] {
         let _ = std::fs::remove_file(p);
