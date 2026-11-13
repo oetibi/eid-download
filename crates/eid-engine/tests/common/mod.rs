@@ -53,6 +53,9 @@ impl Log {
     pub fn peak_live_responses(&self) -> usize {
         self.peak_live.load(std::sync::atomic::Ordering::SeqCst)
     }
+    pub fn live_responses(&self) -> usize {
+        self.live.load(std::sync::atomic::Ordering::SeqCst)
+    }
     pub fn count(&self, f: impl Fn(&Event) -> bool) -> usize {
         self.events.lock().unwrap().iter().filter(|e| f(e)).count()
     }
