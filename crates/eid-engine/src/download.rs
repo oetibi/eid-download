@@ -1702,10 +1702,19 @@ async fn resume_inner(
                 match pfs::open_regular_nofollow_read(&fin) {
                     Ok(h) if h.metadata().is_ok_and(|m| m.len() == t) => {
                         let want = fz.sha256.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let r = sha256_handle(&h).map(|d| d == want);
+                        let fin2 = fin.clone();
+                        tokio::task::spawn_blocking(move || -> Result<bool> {
+                            let matches = sha256_handle(&h)? == want;
                             fault::hit("recovery_hashed");
-                            r
+                            // the name must STILL be the file we hashed before we may report
+                            // success (a swap during hashing is refused, state kept)
+                            if matches && !pfs::handle_is_path(&h, &fin2).unwrap_or(false) {
+                                return Err(Error::BadState(
+                                    "destination changed while it was being verified; state kept"
+                                        .into(),
+                                ));
+                            }
+                            Ok(matches)
                         })
                         .await
                         .map_err(|e| Error::Network(format!("hash task failed: {e}")))??
