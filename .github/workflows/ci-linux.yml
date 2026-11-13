@@ -27,7 +27,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: CPU count of this runner (context for the timing-sensitive socket tests)
+        run: nproc
       - run: cargo test --workspace --no-fail-fast
+      - name: kernel-socket tests alone, one at a time (ADR-0011: the sampler must not compete with other tests)
+        run: cargo test -p eid-engine --test g9_sockets -- --test-threads=1 --nocapture
       - run: python3 scripts/check_required.py
       - run: python3 scripts/check_required.py --release   # overflow/security tests in release mode
       - name: Windows target still compiles (compile-check only, never executed here)
