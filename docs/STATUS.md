@@ -61,6 +61,20 @@
 - **الإصلاح (الاختبار فقط، فرع `fix/abort-drain-test-deterministic`):** (1) كل استجابة تتوقف بعد 2 MiB لمدة 30 ث (`Stall`, `once:false`، مثل `kill_then_resume…`) فلا يمكن اكتمال التحميل خلال نافذة المراقبة؛ (2) فشل `state::load` يُعاد ولا يُعامل كـ0 مع حفظ آخر خطأ وآخر frontier؛ (3) عند انتهاء المهلة تطبع الرسالة آخر خطأ `load` وآخر frontier؛ (4) مسار الـsidecar معروف (`m4.bin.eid-state`) بدل مسح المجلد (المسح قد يقع في فجوة التدوير primary→`.bak` ويُفشل `unwrap`). **لم يتغير:** الشرط `frontier >= 1 << 20` (حرفياً)، مهلة الـ20 ث، تعطيل الـcheckpoint الدوري، فحص الاستئناف الدقيق (SHA)، المحرك (`src/` بلا تغيير)، `required_tests.txt`.
 - **نتائج محلية (Linux فقط):** x20 للاختبار 20/20 ناجح (~1 ث للواحد)، وضغط إضافي 3 جولات × 8 نسخ متزامنة (8 أنوية) كلها ناجحة؛ `cargo test --workspace` 150 ناجح و0 فاشل؛ `check_required` (debug وrelease) 96/96؛ fmt وclippy `-D warnings` وcargo check لـwindows-gnu نظيفة. **لم يُختبر على Windows الحقيقي؛ نتيجة ci-windows لهذا الفرع في وصف الـPR.**
 
+## دمج PR6 وPR7، وأول تشغيل ci-windows على push إلى main
+دُمجا في main: PR6 @ `fb829eb` ثم PR7 @ `77ce8da` (2026-11-13، موافقة المالك). `concurrency` لكل workflow على `github.ref` مع `cancel-in-progress`.
+
+| الحدث | الرأس | التشغيل | النتيجة | الوقت (توقيت الكويت) |
+|---|---|---|---|---|
+| أول ci-windows على push إلى main (دمج PR6) | `fb829eb` | `43418310530` | **cancelled** (التزامن: بدأ تشغيل `77ce8da` بعده بـ~4 دقائق) | بدأ 14:35، أُلغي 14:39 |
+| أول ci-linux على push بعد PR6 | `fb829eb` | `43418310554` | **cancelled** (نفس السبب) | بدأ 14:35، أُلغي 14:39 |
+| أول ci-windows اكتمل على push إلى main (دمج PR7) | `77ce8da` | `43418779357` (job `131863281120`) | **failure** | بدأ 14:39، اكتمل 14:48 (9د 2ث) |
+| ci-linux لنفس الرأس | `77ce8da` | `43418779334` (job `131863348467`) | **success** | بدأ 14:39، اكتمل 14:46 (6د 53ث) |
+
+- **ci-linux `43418779334`:** `check_required` debug **96/96** و`--release` **96/96**.
+- **ci-windows `43418779357`:** خطوة `cargo test --workspace --no-fail-fast` نجحت في نفس التشغيل؛ `check_required` فشل: `required: 82  ok: 81  bad: 1` — `limiter_real_time_smoke_bounded FAILED`. الرسالة: `limiter stalled the transfer: 6.51s (total 9.21s)`. سطر المراحل: `LIMITER PHASES start=0.000s started=0.017s first_open=1.032s last_close=7.539s finished=9.205s returned=9.205s | probe=1.014s transfer=6.508s finalize=1.666s total=9.205s` (حد الاختبار 1.5–4 ث على مرحلة النقل فقط). الاختبار غير الذي أصلحه PR7. **لم يُعَد التشغيل.** الحدّ لم يُوسَّع. لا إصلاح في هذا السجل الوثائقي.
+- أُضيفت في PLAN ثلاث بنود P1 مفتوحة من مراجعة Codex أثناء PR7 (`state::load` ليست للقراءة فقط؛ `stall_timeout` في `fast_cfg` 5 ث؛ `run_ranged` يتجاهل خطأ آخر checkpoint). لا يُنفَّذ إصلاح بالمحرّك إلا بعد موافقة المالك.
+
 ## لم يُختبر على Windows الحقيقي
 - **B4 (hard link) و M1 (`LockFileEx` وقفل الملف على Windows):** مُنفَّذان ويُبنيان (`cargo check --target x86_64-pc-windows-gnu --all-targets`) لكن **لم يُشغَّلا على Windows**. خطر معروف: قفل `LockFileEx` إلزامي — أي قراءة للـpart عبر مقبض آخر ستفشل؛ لذلك يجري الـhash عبر المقبض المقفول نفسه (`sha256_handle`).
 كل شيء. الصندوق الحالي Linux بدون Windows/Wine. ما يتحقق منه هنا: بناء المحرك وCLI والاختبارات على Linux و`cargo check`/بناء متقاطع لـWindows (إن نجح). الاختبارات على Windows تنتظر CI على windows-latest (يحتاج مستودع GitHub — لا نربط حساباً) ثم P8 يدوياً.
