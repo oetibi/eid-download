@@ -20,11 +20,12 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinSet;
-use tokio::time::Instant;
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -947,6 +948,7 @@ fn finalize_name(
 
 // ---------------------------------------------------------------- running a job
 
+#[derive(Clone)]
 struct JobInfo {
     url_clean: Url,
     name: String,
@@ -973,25 +975,118 @@ fn make_state(info: &JobInfo, total: Option<u64>, ranged: bool, segs: Vec<SegSta
     s
 }
 
-async fn checkpoint(ctx: &Ctx, info: &JobInfo, state_path: &Path) -> Result<()> {
-    // Snapshot FIRST, then make data durable, then persist: the snapshot can only claim bytes
-    // that were already written before the sync.
-    let snap = ctx.table.lock().unwrap().snapshot();
-    let st = make_state(info, Some(ctx.total), true, snap);
+/// Snapshot now, then `sync_data`, then save. The snapshot is taken immediately before the
+/// sync (inside the blocking task) so it can only claim bytes already written, and a coalesced
+/// request always persists the freshest table, not a queued one. The `spawn_blocking` is
+/// joined, never aborted.
+async fn persist_checkpoint(ctx: &Ctx, info: &JobInfo, state_path: &Path) -> Result<()> {
     let file = ctx.file.clone();
     let path = state_path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    let info = info.clone();
+    let total = ctx.total;
+    let table = ctx.table.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        let snap = table.lock().unwrap().snapshot();
+        let st = make_state(&info, Some(total), true, snap);
         fault::hit("before_sync");
+        fault::fail("before_sync").map_err(Error::io("sync data"))?;
         file.sync_data().map_err(Error::io("sync data"))?;
         fault::hit("after_sync");
         state::save(&path, &st)
     })
-    .await
-    .map_err(|e| Error::Network(format!("checkpoint task failed: {e}")))??;
+    .await;
+    match result {
+        Ok(r) => r?,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => {
+            return Err(Error::Network(format!("checkpoint task failed: {e}")));
+        }
+    }
     ctx.emit(Event::Checkpoint {
         done: ctx.done_bytes.load(Ordering::Relaxed),
     });
     Ok(())
+}
+
+struct CkptCtl {
+    notify: Arc<Notify>,
+    pending: Arc<AtomicBool>,
+    stop: CancellationToken,
+    handle: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl CkptCtl {
+    /// Request a checkpoint without blocking. Concurrent requests coalesce: at most one
+    /// checkpoint runs at a time, and the next run takes a fresh snapshot.
+    fn request(&self) {
+        self.pending.store(true, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+
+    /// Stop accepting new work, join the in-flight `spawn_blocking` (never abort it), then
+    /// return. Must be called before any later state write (final checkpoint, finalize /
+    /// `remove_all`, ServerChanged restart, cancel).
+    async fn join(mut self) -> Result<()> {
+        self.stop.cancel();
+        self.notify.notify_one();
+        match (&mut self.handle).await {
+            Ok(r) => r,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => Err(Error::Network(format!("checkpoint task failed: {e}"))),
+        }
+    }
+}
+
+impl Drop for CkptCtl {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        self.notify.notify_one();
+    }
+}
+
+/// One background checkpoint task for a `run_ranged` invocation.
+fn start_ckpt_task(
+    ctx: Arc<Ctx>,
+    info: JobInfo,
+    state_path: &Path,
+) -> (CkptCtl, mpsc::UnboundedReceiver<Error>) {
+    let notify = Arc::new(Notify::new());
+    let pending = Arc::new(AtomicBool::new(false));
+    let stop = CancellationToken::new();
+    let (err_tx, err_rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn({
+        let notify = notify.clone();
+        let pending = pending.clone();
+        let stop = stop.clone();
+        let path = state_path.to_path_buf();
+        async move {
+            loop {
+                if stop.is_cancelled() {
+                    break;
+                }
+                if pending.swap(false, Ordering::SeqCst) {
+                    if let Err(e) = persist_checkpoint(&ctx, &info, &path).await {
+                        return err_tx.send(e).map_err(|b| b.0);
+                    }
+                    continue;
+                }
+                tokio::select! {
+                    _ = notify.notified() => {}
+                    _ = stop.cancelled() => break,
+                }
+            }
+            Ok(())
+        }
+    });
+    (
+        CkptCtl {
+            notify,
+            pending,
+            stop,
+            handle,
+        },
+        err_rx,
+    )
 }
 
 fn job_limiter(cfg: &Config) -> Option<Arc<Limiter>> {
@@ -1020,8 +1115,12 @@ async fn run_ranged(
     let mut ramp = tokio::time::interval(ctx.cfg.ramp_interval.max(Duration::from_millis(1)));
     let mut ckpt = tokio::time::interval(ctx.cfg.checkpoint_interval.max(Duration::from_millis(5)));
     let mut prog = tokio::time::interval(Duration::from_millis(250));
+    ramp.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ckpt.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ckpt.reset();
     let mut fatal: Option<Error> = None;
+    let mut ckpt_closed = false;
+    let (ckpt_ctl, mut ckpt_err) = start_ckpt_task(ctx.clone(), info.clone(), state_path);
 
     // the first worker starts immediately
     {
@@ -1032,6 +1131,7 @@ async fn run_ranged(
         }
     }
     loop {
+        fault::coordinator_iteration(fatal.is_some());
         let complete = ctx.table.lock().unwrap().is_complete();
         if complete && set.is_empty() {
             break;
@@ -1079,9 +1179,14 @@ async fn run_ranged(
                 }
             }
             _ = ckpt.tick() => {
-                if let Err(e) = checkpoint(&ctx, info, state_path).await {
+                ckpt_ctl.request();
+            }
+            maybe_err = ckpt_err.recv(), if !ckpt_closed => {
+                if let Some(e) = maybe_err {
                     fatal.get_or_insert(e);
                     ctx.cancel.cancel();
+                } else {
+                    ckpt_closed = true;
                 }
             }
             _ = prog.tick() => {
@@ -1093,8 +1198,17 @@ async fn run_ranged(
         }
     }
     while set.join_next().await.is_some() {}
+    // Join the checkpoint task (and its spawn_blocking) BEFORE any further state write.
+    // Skipping this would let an in-flight checkpoint overwrite a new-generation restart
+    // state (B1) or recreate a state file after remove_all.
+    if let Err(e) = ckpt_ctl.join().await {
+        fatal.get_or_insert(e);
+    }
+    if let Ok(e) = ckpt_err.try_recv() {
+        fatal.get_or_insert(e);
+    }
     // final durable checkpoint (also on cancel/error) so resume loses as little as possible
-    let _ = checkpoint(&ctx, info, state_path).await;
+    let _ = persist_checkpoint(&ctx, info, state_path).await;
     if let Some(e) = fatal {
         return Err(e);
     }
@@ -1237,7 +1351,10 @@ pub async fn download(
     sink: EventSink,
     cancel: CancellationToken,
 ) -> Result<Outcome> {
-    supervised(cancel, move |c| download_inner(spec, cfg, sink, c, None)).await
+    supervised(cancel, move |c| {
+        download_inner(spec, cfg, sink, c, None, None)
+    })
+    .await
 }
 
 /// Run the job on its OWN task so that dropping/aborting the caller's future cannot abandon
@@ -1267,6 +1384,7 @@ async fn download_inner(
     sink: EventSink,
     cancel: CancellationToken,
     mut held: Option<JobLock>,
+    mut restart_reason: Option<String>,
 ) -> Result<Outcome> {
     let st = prepare(&spec)?;
     let client = http::build_client(&cfg)?;
@@ -1329,7 +1447,11 @@ async fn download_inner(
             make_state(&info, probe.total, false, vec![])
         };
         let sp = f.state.clone();
+        let restarting = restart_reason.is_some();
         tokio::task::spawn_blocking(move || -> Result<()> {
+            if restarting {
+                fault::fail("restart_state_write").map_err(Error::io("restart state write"))?;
+            }
             state::save(&sp, &init)?;
             state::remove_backup(&sp)?;
             Ok(())
@@ -1339,6 +1461,9 @@ async fn download_inner(
         file.set_len(0).map_err(Error::io("truncate"))?;
         if let Some(t) = probe.total {
             pfs::preallocate(&file, t).map_err(Error::io("preallocate"))?;
+        }
+        if let Some(reason) = restart_reason.take() {
+            sink(Event::Restarted { reason });
         }
         fault::hit("restart_truncated");
         let peaks: (u64, usize);
@@ -1389,9 +1514,8 @@ async fn download_inner(
             }
             Err(Error::ServerChanged) if restarts < cfg.max_restarts => {
                 restarts += 1;
-                sink(Event::Restarted {
-                    reason: "the file changed on the server or ranges stopped working".into(),
-                });
+                restart_reason =
+                    Some("the file changed on the server or ranges stopped working".into());
                 continue;
             }
             Err(e) => return Err(e),
@@ -1613,9 +1737,7 @@ async fn resume_inner(
     };
     let Some(part_file) = part_file else {
         let reason = restart_reason.unwrap_or("data file does not match the state");
-        sink(Event::Restarted {
-            reason: reason.to_string(),
-        });
+
         let _ = std::fs::remove_file(&part);
         state::remove_all(state_path);
         // the job lock is handed over, never released in between (review M1)
@@ -1629,6 +1751,7 @@ async fn resume_inner(
             sink,
             cancel,
             Some(lock),
+            Some(reason.to_string()),
         )
         .await;
     };
@@ -1707,9 +1830,6 @@ async fn resume_inner(
             .await
         }
         Err(Error::ServerChanged) => {
-            sink(Event::Restarted {
-                reason: "the file changed on the server".into(),
-            });
             drop(ctx);
             drop(file);
             let _ = std::fs::remove_file(&part);
@@ -1724,6 +1844,7 @@ async fn resume_inner(
                 sink,
                 cancel,
                 Some(lock),
+                Some("the file changed on the server".into()),
             )
             .await
         }

@@ -159,10 +159,28 @@ async fn cancel_at_many_points_leaves_no_orphans() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn kill_then_resume_requests_only_from_checkpointed_frontier() {
-    let (srv, url) = serve("/k.bin", content(2), slow()).await;
+    // The cancel is triggered by CHECKPOINTED progress (>= 5 MiB in the saved state). With a plain
+    // throttle the whole 16 MiB can finish before a slow checkpoint (Windows fsync/MoveFileEx,
+    // CI run 43407352362) makes that progress visible, and then `download` rightly returns Ok.
+    // So every response stalls after 2 MiB (4 connections => ~8 MiB written, then nothing moves
+    // for 30 s, far longer than any checkpoint): the job cannot finish before the cancel lands,
+    // whatever the checkpoint latency. No time bound is asserted.
+    let behavior = Behavior {
+        stall: Some(eid_testserver::Stall {
+            after_bytes: 2 << 20,
+            duration: Duration::from_secs(30),
+            once: false,
+        }),
+        ..Behavior::default()
+    };
+    let (srv, url) = serve("/k.bin", content(2), behavior).await;
     let dir = tempfile::tempdir().unwrap();
     let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 5 << 20).await;
-    assert!(matches!(r, Err(Error::Cancelled)));
+    assert!(
+        matches!(r, Err(Error::Cancelled)),
+        "expected Cancelled, got {:?}",
+        r.as_ref().map(|o| &o.path)
+    );
     let sp = state_file(dir.path()).unwrap();
     let st: State = state::load(&sp).unwrap();
     let done: u64 = st.segments.iter().map(|s| s.next - s.start).sum();

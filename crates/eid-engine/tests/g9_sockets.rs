@@ -252,7 +252,7 @@ async fn connection_cap_is_strict_by_real_sockets_engine_and_server() {
 /// Negative test for the sampler itself (ADR-0011), EVENT-CONFIRMED part (asserted; no timing
 /// bet): open cap+1 = 9 raw client sockets and keep them open UNTIL the sampler's timeline shows
 /// a count above the cap (2 s deadline: missing it fails the test), then close them and wait
-/// until the timeline is back at or below the cap (2 s deadline again). This proves the counting
+/// until the timeline is back to 0 (2 s deadline again). This proves the counting
 /// itself (ownership by inode, parsing, a close is seen) which is what the strict cap test
 /// depends on: its `<= cap` assertion would FAIL on such a peak. The hold is as long as the
 /// sampler needs, so a starved sampler thread can delay the test but never make it miss.
@@ -295,10 +295,10 @@ async fn socket_watch_sees_cap_plus_one_while_held_and_sees_it_closed() {
     );
     drop(held);
     let deadline = Instant::now() + Duration::from_secs(2);
-    while w.current() > cap {
+    while w.current() != 0 {
         assert!(
             Instant::now() < deadline,
-            "the sampler never saw the sockets close (still {})",
+            "the sampler never saw all sockets close (still {})",
             w.current()
         );
         tokio::time::sleep(Duration::from_millis(1)).await;

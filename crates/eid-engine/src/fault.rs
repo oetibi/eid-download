@@ -7,6 +7,15 @@
 #[cfg(feature = "test-faults")]
 mod imp {
     use std::sync::atomic::{AtomicU64, Ordering};
+    static DRAIN_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+    pub fn coordinator_iteration(draining: bool) {
+        if draining {
+            DRAIN_ITERATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn drain_iterations() -> u64 {
+        DRAIN_ITERATIONS.load(Ordering::Relaxed)
+    }
     static HITS: AtomicU64 = AtomicU64::new(0);
     static JITTER: AtomicU64 = AtomicU64::new(0);
 
@@ -122,6 +131,10 @@ mod imp {
 mod imp {
     #[inline(always)]
     pub fn hit(_name: &str) {}
+    pub fn coordinator_iteration(_draining: bool) {}
+    pub fn drain_iterations() -> u64 {
+        0
+    }
     #[inline(always)]
     pub fn set_panic_point(_name: &str, _after: u64) {}
     #[inline(always)]
@@ -141,4 +154,7 @@ mod imp {
     pub fn jitter() {}
 }
 
-pub use imp::{fail, hit, jitter, set_fail_point, set_jitter, set_panic_point, set_pause_point};
+pub use imp::{
+    coordinator_iteration, drain_iterations, fail, hit, jitter, set_fail_point, set_jitter,
+    set_panic_point, set_pause_point,
+};
