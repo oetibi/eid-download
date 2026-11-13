@@ -130,6 +130,22 @@ fn apply_open_flags(o: &mut OpenOptions) {
     }
 }
 
+/// Open (creating if needed) a per-job LOCK file: owner-only, never follows a symlink, must be a
+/// plain single-link regular file. Used only for its advisory lock, never for data.
+pub fn open_or_create_lock_file(path: &Path) -> io::Result<File> {
+    let mut o = OpenOptions::new();
+    o.read(true).write(true).create(true).truncate(false);
+    apply_open_flags(&mut o);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let f = o.open(path)?;
+    reject_if_not_plain(&f)?;
+    Ok(f)
+}
+
 /// Create a brand-new regular file (fails if anything exists at `path`, including a
 /// dangling symlink). Private (owner-only) permissions. This *claims* the name atomically.
 pub fn create_new_private(path: &Path) -> io::Result<File> {

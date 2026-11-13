@@ -28,6 +28,56 @@ use url::Url;
 
 pub const PART_SUFFIX: &str = ".eid-part";
 pub const STATE_SUFFIX: &str = ".eid-state";
+pub const LOCK_SUFFIX: &str = ".eid-lock";
+
+/// Exclusive ownership of one job (review M1): an advisory lock (`flock` / `LockFileEx`) on a
+/// STABLE per-job file `<name>.eid-lock` that exists independently of the part file, so it
+/// covers a missing part, restarts and finalization. Acquired BEFORE any state is read; held
+/// until the job ends (including across restarts). The file is deleted only at the very end of
+/// a successful finalization, while still locked.
+#[derive(Debug)]
+pub struct JobLock {
+    file: File,
+    path: PathBuf,
+    name: String,
+}
+
+impl JobLock {
+    /// Take the lock for job `name` in `dir`; `Err(Busy)` if another job/process holds it.
+    pub fn acquire(dir: &Path, name: &str) -> Result<JobLock> {
+        let path = dir.join(format!("{name}{LOCK_SUFFIX}"));
+        let file = pfs::open_or_create_lock_file(&path).map_err(Error::io("open job lock"))?;
+        if !pfs::try_lock_exclusive(&file).map_err(Error::io("lock job"))? {
+            return Err(Error::Busy);
+        }
+        Ok(JobLock {
+            file,
+            path,
+            name: name.to_string(),
+        })
+    }
+
+    /// Lock for the job whose sidecar is `state_path` (`<name>.eid-state`).
+    pub fn for_state_file(state_path: &Path) -> Result<JobLock> {
+        let fname = state_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(STATE_SUFFIX))
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| Error::InvalidInput("not a .eid-state file".into()))?;
+        let dir = match state_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        JobLock::acquire(dir, fname)
+    }
+
+    /// Delete the lock file while still holding the lock (end of a finished job).
+    fn remove_file_keep_lock(&self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = &self.file;
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -750,11 +800,12 @@ struct Files {
     part: PathBuf,
     state: PathBuf,
     file: File,
+    lock: JobLock,
 }
 
 /// Atomically claim a unique `<name>.eid-part` (create_new) and make sure no final file or
 /// stale state with that name exists.
-fn claim_files(dir: &Path, base: &str) -> Result<Files> {
+fn claim_files(dir: &Path, base: &str, held: &mut Option<JobLock>) -> Result<Files> {
     for n in 0..1000u32 {
         let cand = if n == 0 {
             base.to_string()
@@ -769,20 +820,34 @@ fn claim_files(dir: &Path, base: &str) -> Result<Files> {
             continue;
         }
         let part = dir.join(format!("{cand}{PART_SUFFIX}"));
+        // job ownership first (a lock already held by a restarting resume is reused as is)
+        let (lock, was_held) = match held.take() {
+            Some(l) if l.name == cand => (l, true),
+            other => {
+                *held = other;
+                match JobLock::acquire(dir, &cand) {
+                    Ok(l) => (l, false),
+                    Err(Error::Busy) => continue, // someone else owns this name
+                    Err(e) => return Err(e),
+                }
+            }
+        };
         match pfs::create_new_file(&part) {
             Ok(file) => {
-                // exclusive job ownership from the very first byte (review M1)
-                if !pfs::try_lock_exclusive(&file).map_err(Error::io("lock part file"))? {
-                    return Err(Error::Busy);
-                }
                 return Ok(Files {
                     name: cand,
                     part,
                     state,
                     file,
+                    lock,
                 });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if was_held {
+                    *held = Some(lock);
+                }
+                continue;
+            }
             Err(e) => {
                 return Err(Error::Io {
                     context: "create part file",
@@ -1159,7 +1224,7 @@ pub async fn download(
     sink: EventSink,
     cancel: CancellationToken,
 ) -> Result<Outcome> {
-    supervised(cancel, move |c| download_inner(spec, cfg, sink, c)).await
+    supervised(cancel, move |c| download_inner(spec, cfg, sink, c, None)).await
 }
 
 /// Run the job on its OWN task so that dropping/aborting the caller's future cannot abandon
@@ -1188,6 +1253,7 @@ async fn download_inner(
     cfg: Config,
     sink: EventSink,
     cancel: CancellationToken,
+    mut held: Option<JobLock>,
 ) -> Result<Outcome> {
     let st = prepare(&spec)?;
     let client = http::build_client(&cfg)?;
@@ -1211,7 +1277,10 @@ async fn download_inner(
             }
         };
         if files.is_none() {
-            files = Some(claim_files(&st.dir, &name)?);
+            files = Some(claim_files(&st.dir, &name, &mut held)?);
+            if let Some(old) = held.take() {
+                old.remove_file_keep_lock(); // handed-over lock for a name we did not end up using
+            }
         }
         let f = files.as_ref().unwrap();
         sink(Event::Started {
@@ -1227,16 +1296,17 @@ async fn download_inner(
             restarts,
         };
         let file = Arc::new(f.file.try_clone().map_err(Error::io("clone file handle"))?);
+        // Without a validator (ETag/Last-Modified) nothing proves that a later range request is
+        // served from the SAME representation as the first one, so only the original response
+        // is consumed, as ONE stream; a disconnect restarts the whole file (review B3).
+        let can_resume = probe.etag.is_some() || probe.last_modified.is_some();
+        let ranged_mode = probe.ranged && can_resume;
         file.set_len(0).map_err(Error::io("truncate"))?;
         if let Some(t) = probe.total {
             pfs::preallocate(&file, t).map_err(Error::io("preallocate"))?;
         }
         let peaks: (u64, usize);
-        // Without a validator (ETag/Last-Modified) nothing proves that a later range request is
-        // served from the SAME representation as the first one, so only the original response
-        // is consumed, as ONE stream; a disconnect restarts the whole file (review B3).
-        let can_resume = probe.etag.is_some() || probe.last_modified.is_some();
-        let result: Result<u64> = if probe.ranged && can_resume {
+        let result: Result<u64> = if ranged_mode {
             let total = probe.total.unwrap();
             let state_path = f.state.clone();
             let table = Arc::new(Mutex::new(Table::new(total)));
@@ -1342,6 +1412,7 @@ fn finish(
         part,
         state: state_path,
         file: f0,
+        lock,
         ..
     } = files;
     // The digest is always computed: the finalization record below needs it so that a crash
@@ -1369,6 +1440,8 @@ fn finish(
     let _ = pfs::sync_dir(dir);
     drop(f0);
     drop(file);
+    lock.remove_file_keep_lock();
+    drop(lock);
     sink(Event::Finished { size });
     Ok(Outcome {
         path: dest,
@@ -1401,7 +1474,23 @@ async fn resume_inner(
     sink: EventSink,
     cancel: CancellationToken,
 ) -> Result<Outcome> {
-    let st = state::load(state_path)?;
+    // Job ownership FIRST: before the state is read, and independent of the part file, so it
+    // also covers a missing part, restarts and finalization (review M1).
+    let lock = JobLock::for_state_file(state_path)?;
+    let st = match state::load(state_path) {
+        Ok(st) => st,
+        Err(e) => {
+            if !state_path.exists() {
+                lock.remove_file_keep_lock(); // we created it just now; nothing to protect
+            }
+            return Err(e);
+        }
+    };
+    if st.file_name != lock.name {
+        return Err(Error::BadState(
+            "file name in the state does not match the state file name".into(),
+        ));
+    }
     let dir = state_path
         .parent()
         .map(|p| {
@@ -1414,15 +1503,6 @@ async fn resume_inner(
         .unwrap_or(Path::new("."))
         .to_path_buf();
     let part = dir.join(format!("{}{}", st.file_name, PART_SUFFIX));
-    // Exclusive job ownership BEFORE anything is read, restarted or deleted: a second resume (or
-    // a resume racing the original job) gets `Busy` instead of corrupting the other's state and
-    // data (review M1). The lock lives as long as this handle (and its clones) stay open.
-    let locked_part = pfs::open_regular_nofollow(&part).ok();
-    if let Some(f) = &locked_part {
-        if !pfs::try_lock_exclusive(f).map_err(Error::io("lock part file"))? {
-            return Err(Error::Busy);
-        }
-    }
     // Crash after the final rename but before the state was removed: the job is already done,
     // but ONLY if the state carries the finalization record written before the rename and the
     // recorded destination still has exactly the recorded content. A same-size file that merely
@@ -1447,6 +1527,7 @@ async fn resume_inner(
                     }
                 }
                 state::remove_all(state_path);
+                lock.remove_file_keep_lock();
                 sink(Event::Finished { size: t });
                 return Ok(Outcome {
                     path: fin,
@@ -1469,12 +1550,8 @@ async fn resume_inner(
     } else {
         None
     };
-    let mut locked_part = locked_part;
     let part_file = if restart_reason.is_none() {
-        let f = match locked_part.take() {
-            Some(f) => f,
-            None => pfs::open_regular_nofollow(&part).map_err(Error::io("open part file"))?,
-        };
+        let f = pfs::open_regular_nofollow(&part).map_err(Error::io("open part file"))?;
         let len = f.metadata().map_err(Error::io("stat part"))?.len();
         let max_done = st.segments.iter().map(|s| s.next).max().unwrap_or(0);
         if len < max_done || st.total.is_some_and(|t| len > t) {
@@ -1486,14 +1563,14 @@ async fn resume_inner(
         None
     };
     let Some(part_file) = part_file else {
-        drop(locked_part);
         let reason = restart_reason.unwrap_or("data file does not match the state");
         sink(Event::Restarted {
             reason: reason.to_string(),
         });
         let _ = std::fs::remove_file(&part);
         state::remove_all(state_path);
-        return download(
+        // the job lock is handed over, never released in between (review M1)
+        return download_inner(
             JobSpec {
                 url: st.url.clone(),
                 dir,
@@ -1502,6 +1579,7 @@ async fn resume_inner(
             cfg,
             sink,
             cancel,
+            Some(lock),
         )
         .await;
     };
@@ -1563,6 +1641,7 @@ async fn resume_inner(
                 part: part_name,
                 state: state_path.to_path_buf(),
                 file: f0,
+                lock,
             };
             finish(
                 &cfg,
@@ -1585,7 +1664,7 @@ async fn resume_inner(
             drop(file);
             let _ = std::fs::remove_file(&part);
             state::remove_all(state_path);
-            download(
+            download_inner(
                 JobSpec {
                     url: st.url.clone(),
                     dir,
@@ -1594,6 +1673,7 @@ async fn resume_inner(
                 cfg,
                 sink,
                 cancel,
+                Some(lock),
             )
             .await
         }

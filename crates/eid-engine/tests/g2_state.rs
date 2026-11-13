@@ -125,7 +125,7 @@ async fn cancel_at_many_points_leaves_no_orphans() {
             assert!(
                 matches!(
                     n.as_str(),
-                    "c.bin.eid-part" | "c.bin.eid-state" | "c.bin.eid-state.bak"
+                    "c.bin.eid-part" | "c.bin.eid-state" | "c.bin.eid-state.bak" | "c.bin.eid-lock"
                 ),
                 "delay {delay_ms}: orphan/unexpected file {n:?} in {names:?}"
             );
@@ -564,4 +564,89 @@ async fn aborting_the_caller_drains_the_job_and_persists_a_final_checkpoint() {
         }
     };
     assert_eq!(sha_of_file(&o.path), content(41).sha256_hex());
+}
+
+/// Review M1 (root): ownership must not depend on the part file. Someone holding the job's lock
+/// file makes `resume` fail with `Busy` even when the part is missing (the restart path), and
+/// nothing is deleted or restarted behind the owner's back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn job_lock_covers_a_missing_part_and_restart_path() {
+    let (_srv, url) = serve("/m1b.bin", content(32), slow()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 2 << 20).await;
+    assert!(matches!(r, Err(Error::Cancelled)));
+    let sp = state_file(dir.path()).unwrap();
+    let part = dir.path().join("m1b.bin.eid-part");
+    std::fs::remove_file(&part).unwrap(); // part gone: the old part-file lock cannot help
+                                          // another process owns the job: it holds the per-job lock file
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.path().join("m1b.bin.eid-lock"))
+        .unwrap();
+    lock.try_lock()
+        .expect("test must be able to take the job lock");
+    let r = resume(&sp, fast_cfg(4)).await;
+    assert!(
+        matches!(r, Err(Error::Busy)),
+        "got {:?}",
+        r.map(|(o, _)| o.path)
+    );
+    assert!(
+        sp.exists(),
+        "state must be untouched while another owner holds the job"
+    );
+    assert!(
+        !part.exists(),
+        "no restart may begin behind the owner's back"
+    );
+    drop(lock);
+    let (o, _) = resume(&sp, fast_cfg(4)).await.unwrap();
+    assert_eq!(sha_of_file(&o.path), content(32).sha256_hex());
+    assert_eq!(
+        only_files(dir.path()),
+        vec!["m1b.bin".to_string()],
+        "lock file cleaned up"
+    );
+}
+
+/// Review M1: a resume that takes the restart path (part missing) keeps ownership for the whole
+/// restarted transfer: a second resume is refused instead of racing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_path_keeps_the_job_lock_for_its_whole_transfer() {
+    let (srv, url) = serve("/m1c.bin", content(33), slow()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 2 << 20).await;
+    assert!(matches!(r, Err(Error::Cancelled)));
+    let sp = state_file(dir.path()).unwrap();
+    std::fs::remove_file(dir.path().join("m1c.bin.eid-part")).unwrap();
+    srv.set_behavior("/m1c.bin", slow());
+    let log1 = Log::default();
+    let (sp1, sink1) = (sp.clone(), log1.sink());
+    let first = tokio::spawn(async move {
+        eid_engine::resume(&sp1, fast_cfg(4), sink1, CancellationToken::new()).await
+    });
+    let t = std::time::Instant::now();
+    while log1.count(|e| matches!(e, Event::Restarted { .. })) == 0
+        || log1.count(|e| matches!(e, Event::ResponseOpened { .. })) == 0
+    {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "restart never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for _ in 0..5 {
+        let second = resume(&sp, fast_cfg(4)).await;
+        assert!(
+            matches!(second, Err(Error::Busy)),
+            "got {:?}",
+            second.map(|(o, _)| o.path)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let o = first.await.unwrap().unwrap();
+    assert_eq!(sha_of_file(&o.path), content(33).sha256_hex());
 }

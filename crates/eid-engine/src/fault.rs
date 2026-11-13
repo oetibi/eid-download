@@ -11,6 +11,9 @@ mod imp {
     static JITTER: AtomicU64 = AtomicU64::new(0);
 
     pub fn hit(name: &str) {
+        if PANIC_AT.lock().unwrap().as_deref() == Some(name) {
+            panic!("fault point {name} reached (simulated crash)");
+        }
         if let Ok(want) = std::env::var("EID_FAULT") {
             if want == name {
                 let after: u64 = std::env::var("EID_FAULT_AFTER")
@@ -23,6 +26,13 @@ mod imp {
             }
         }
     }
+    /// Test hook: PANIC (instead of abort) the next time fault point `name` is reached, so an
+    /// in-process test can observe the on-disk state a crash at that point leaves behind.
+    /// Process-global: use only from a test binary that runs a single such test.
+    pub fn set_panic_point(name: &str) {
+        *PANIC_AT.lock().unwrap() = Some(name.to_string());
+    }
+    static PANIC_AT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     pub fn set_jitter(seed: u64) {
         JITTER.store(seed, Ordering::SeqCst);
     }
@@ -43,9 +53,11 @@ mod imp {
     #[inline(always)]
     pub fn hit(_name: &str) {}
     #[inline(always)]
+    pub fn set_panic_point(_name: &str) {}
+    #[inline(always)]
     pub fn set_jitter(_seed: u64) {}
     #[inline(always)]
     pub fn jitter() {}
 }
 
-pub use imp::{hit, jitter, set_jitter};
+pub use imp::{hit, jitter, set_jitter, set_panic_point};
