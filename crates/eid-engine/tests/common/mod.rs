@@ -260,6 +260,23 @@ impl SocketWatch {
                 std::thread::sleep(Duration::from_micros(50));
             }
         });
+        // Readiness barrier (replaces a fixed sleep that bet on thread scheduling): return only
+        // after the sampler took its first successful sample (or gave up, which `finish`
+        // reports). If neither happens within 5 s the TEST FAILS here.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            {
+                let st = stats.lock().unwrap();
+                if st.samples > 0 || st.broken {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "socket sampler took no sample within 5 s (thread never scheduled?)"
+            );
+            std::thread::sleep(Duration::from_micros(200));
+        }
         Self {
             stop,
             timeline,
