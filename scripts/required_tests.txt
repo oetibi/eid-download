@@ -75,3 +75,4 @@ no_listening_sockets_outside_the_test_server
 shell_injection_posix_sh
 shell_injection_powershell
 shell_injection_cmd_exe
+unix:sockdiag_counts_client_sockets_by_ownership_and_sees_closes
