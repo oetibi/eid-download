@@ -806,7 +806,16 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(state::hex(&h.finalize()))
 }
 
-fn finalize_name(dir: &Path, part: &Path, name: &str) -> Result<PathBuf> {
+/// Durably record (name, digest) in the state BEFORE each rename attempt, so recovery after a
+/// crash between rename and state removal verifies the exact destination by content.
+fn finalize_name(
+    dir: &Path,
+    part: &Path,
+    name: &str,
+    state_path: &Path,
+    sha256: &str,
+) -> Result<PathBuf> {
+    let mut st = state::load(state_path)?;
     for n in 0..1000u32 {
         let cand = if n == 0 {
             name.to_string()
@@ -814,6 +823,11 @@ fn finalize_name(dir: &Path, part: &Path, name: &str) -> Result<PathBuf> {
             numbered(name, n)
         };
         let dest = dir.join(&cand);
+        st.finalize = Some(state::Finalize {
+            name: cand.clone(),
+            sha256: sha256.to_string(),
+        });
+        state::save(state_path, &st)?;
         match pfs::rename_noreplace(part, &dest) {
             Ok(()) => return Ok(dest),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1275,19 +1289,18 @@ fn finish(
         ..
     } = files;
     drop(f0);
-    let digest = if cfg.compute_sha256 || cfg.expected_sha256.is_some() {
-        Some(sha256_file(&part)?)
-    } else {
-        None
-    };
-    if let (Some(want), Some(got)) = (&cfg.expected_sha256, &digest) {
-        if !want.eq_ignore_ascii_case(got) {
+    // The digest is always computed: the finalization record below needs it so that a crash
+    // after the rename can be recognised by content, never by file size alone (review B2).
+    let full_digest = sha256_file(&part)?;
+    if let Some(want) = &cfg.expected_sha256 {
+        if !want.eq_ignore_ascii_case(&full_digest) {
             return Err(Error::Checksum {
                 expected: want.clone(),
-                actual: got.clone(),
+                actual: full_digest,
             });
         }
     }
+    let digest = (cfg.compute_sha256 || cfg.expected_sha256.is_some()).then(|| full_digest.clone());
     fault::hit("final_before_rename");
     let dest_name = part
         .file_name()
@@ -1295,7 +1308,7 @@ fn finish(
         .and_then(|n| n.strip_suffix(PART_SUFFIX))
         .ok_or_else(|| Error::InvalidInput("bad part name".into()))?
         .to_string();
-    let dest = finalize_name(dir, &part, &dest_name)?;
+    let dest = finalize_name(dir, &part, &dest_name, &state_path, &full_digest)?;
     fault::hit("part_renamed_final");
     state::remove_all(&state_path);
     let _ = pfs::sync_dir(dir);
@@ -1331,21 +1344,26 @@ pub async fn resume(
         .unwrap_or(Path::new("."))
         .to_path_buf();
     let part = dir.join(format!("{}{}", st.file_name, PART_SUFFIX));
-    // Crash after the final rename but before the state was removed: the job is already done.
+    // Crash after the final rename but before the state was removed: the job is already done,
+    // but ONLY if the state carries the finalization record written before the rename and the
+    // recorded destination still has exactly the recorded content. A same-size file that merely
+    // shares the name proves nothing (review B2) and is never adopted.
     if !part.exists() {
-        if let Some(t) = st.total {
-            let fin = dir.join(&st.file_name);
-            if std::fs::symlink_metadata(&fin).is_ok_and(|m| m.is_file() && m.len() == t) {
+        if let (Some(t), Some(fz)) = (st.total, &st.finalize) {
+            let fin = dir.join(&fz.name);
+            if std::fs::symlink_metadata(&fin).is_ok_and(|m| m.is_file() && m.len() == t)
+                && sha256_file(&fin)? == fz.sha256
+            {
                 let digest = if cfg.compute_sha256 || cfg.expected_sha256.is_some() {
-                    Some(sha256_file(&fin)?)
+                    Some(fz.sha256.clone())
                 } else {
                     None
                 };
-                if let (Some(want), Some(got)) = (&cfg.expected_sha256, &digest) {
-                    if !want.eq_ignore_ascii_case(got) {
+                if let Some(want) = &cfg.expected_sha256 {
+                    if !want.eq_ignore_ascii_case(&fz.sha256) {
                         return Err(Error::Checksum {
                             expected: want.clone(),
-                            actual: got.clone(),
+                            actual: fz.sha256.clone(),
                         });
                     }
                 }

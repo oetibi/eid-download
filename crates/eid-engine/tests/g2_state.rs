@@ -425,3 +425,36 @@ async fn hostile_state_files_are_rejected_before_any_io() {
     assert!(matches!(r, Err(Error::BadState(_))));
     assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
 }
+
+/// Review B2: with the part file gone, an unrelated final file that merely has the right NAME
+/// and SIZE must never be adopted as the finished download (and must stay untouched).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_never_adopts_an_unrelated_same_size_final_file() {
+    let (_srv, url) = serve("/r.bin", content(21), slow()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 2 << 20).await;
+    assert!(matches!(r, Err(Error::Cancelled)));
+    let sp = state_file(dir.path()).unwrap();
+    let st = state::load(&sp).unwrap();
+    let total = st.total.unwrap() as usize;
+    // part vanished, and a stranger of exactly the right size sits at the final name
+    for e in std::fs::read_dir(dir.path()).unwrap() {
+        let p = e.unwrap().path();
+        if p.to_string_lossy().ends_with(".eid-part") {
+            std::fs::remove_file(p).unwrap();
+        }
+    }
+    let evil = vec![b'E'; total];
+    let fin = dir.path().join(&st.file_name);
+    std::fs::write(&fin, &evil).unwrap();
+    _srv.set_behavior("/r.bin", Behavior::default());
+    let (o, log) = resume(&sp, fast_cfg(4)).await.unwrap();
+    assert_eq!(
+        std::fs::read(&fin).unwrap(),
+        evil,
+        "the stranger was modified"
+    );
+    assert_ne!(o.path, fin, "resume adopted the unrelated file");
+    assert_eq!(sha_of_file(&o.path), content(21).sha256_hex());
+    assert!(log.count(|e| matches!(e, Event::Restarted { .. })) >= 1);
+}
