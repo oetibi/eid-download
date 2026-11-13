@@ -1179,11 +1179,14 @@ pub async fn download(
             pfs::preallocate(&file, t).map_err(Error::io("preallocate"))?;
         }
         let peaks: (u64, usize);
-        let result: Result<u64> = if probe.ranged {
+        // Without a validator (ETag/Last-Modified) nothing proves that a later range request is
+        // served from the SAME representation as the first one, so only the original response
+        // is consumed, as ONE stream; a disconnect restarts the whole file (review B3).
+        let can_resume = probe.etag.is_some() || probe.last_modified.is_some();
+        let result: Result<u64> = if probe.ranged && can_resume {
             let total = probe.total.unwrap();
             let state_path = f.state.clone();
             let table = Arc::new(Mutex::new(Table::new(total)));
-            let can_resume = probe.etag.is_some() || probe.last_modified.is_some();
             let ctx = Arc::new(Ctx {
                 cfg: cfg.clone(),
                 client: client.clone(),
@@ -1216,7 +1219,6 @@ pub async fn download(
             tokio::task::spawn_blocking(move || state::save(&sp, &init))
                 .await
                 .map_err(|e| Error::Network(e.to_string()))??;
-            let _ = can_resume; // validators absent => resume() restarts; still keep the state
             let r = run_ranged(ctx.clone(), &info, &state_path, Some(probe.resp)).await;
             let peak = (
                 ctx.peak_buffered.load(Ordering::SeqCst),

@@ -758,3 +758,44 @@ fn socket_watch_start_returns_only_after_the_first_sample() {
         .expect("start must not return before the first sample");
     assert!(r.samples >= 1, "{}", r.describe());
 }
+
+/// Review B3: a server that gives NO validator (no ETag, no Last-Modified) and silently swaps a
+/// same-size file after the probe must never produce a splice of two representations. Without
+/// a validator the engine must consume the original response as one stream and restart the
+/// whole file after a disconnect, so the result is one coherent version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_validator_same_size_change_never_splices_representations() {
+    let a = Content::Generated {
+        seed: 501,
+        len: 6 << 20,
+    };
+    let b = Content::Generated {
+        seed: 502,
+        len: 6 << 20,
+    };
+    let beh = Behavior {
+        etag: eid_testserver::EtagMode::None,
+        last_modified: None,
+        cut: Cut::AfterBytes {
+            conn_index: 1,
+            n: 1 << 20,
+        },
+        // the probe is request 1 (A); every later request is answered from B
+        change_after: Some(ChangeAfter {
+            requests: Some(1),
+            bytes_sent: None,
+            new_content: b.clone(),
+        }),
+        ..Behavior::default()
+    };
+    let (_srv, url) = serve("/nv.bin", a.clone(), beh).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = fast_cfg(4);
+    cfg.max_attempts = 20;
+    let (o, _) = get(&url, dir.path(), cfg).await.unwrap();
+    let got = sha_of_file(&o.path);
+    assert!(
+        got == a.sha256_hex() || got == b.sha256_hex(),
+        "spliced file: SHA matches neither version"
+    );
+}

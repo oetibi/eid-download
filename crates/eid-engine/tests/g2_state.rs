@@ -257,7 +257,9 @@ async fn resume_without_validators_restarts_instead_of_trusting() {
     };
     let (srv, url) = serve("/nv.bin", content(5), b).await;
     let dir = tempfile::tempdir().unwrap();
-    let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 2 << 20).await;
+    // B3: without validators the engine streams the file once and records no per-segment
+    // progress, so there is nothing to wait for: cancel after a moment, mid-stream.
+    let (r, _) = run_then_cancel(&url, dir.path(), fast_cfg(4), Duration::from_millis(700)).await;
     assert!(matches!(r, Err(Error::Cancelled)));
     let sp = state_file(dir.path()).unwrap();
     srv.set_behavior(
