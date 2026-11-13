@@ -320,10 +320,21 @@ pub fn replace_atomic(tmp: &Path, dest: &Path) -> io::Result<()> {
 
 /// Rename that fails with `AlreadyExists` instead of overwriting `to`.
 pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    rename_noreplace_hooked(from, to, &mut || {})
+}
+
+/// [`rename_noreplace`] with a hook that runs right after the new name exists (Unix: after the
+/// link, before the old name is dropped; Windows: after the move). Test seam for crash points.
+pub fn rename_noreplace_hooked(
+    from: &Path,
+    to: &Path,
+    after_link: &mut dyn FnMut(),
+) -> io::Result<()> {
     #[cfg(unix)]
     {
         // link() fails with EEXIST atomically; then drop the old name.
         std::fs::hard_link(from, to)?;
+        after_link();
         std::fs::remove_file(from)
     }
     #[cfg(windows)]
@@ -339,6 +350,7 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
         let (a, b) = (w(from), w(to));
         // Flags 0: no REPLACE_EXISTING => fails if `to` exists.
         if unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), 0) } != 0 {
+            after_link();
             Ok(())
         } else {
             Err(io::Error::last_os_error())

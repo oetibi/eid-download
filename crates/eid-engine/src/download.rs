@@ -930,7 +930,7 @@ fn finalize_name(
             sha256: sha256.to_string(),
         });
         state::save(state_path, &st)?;
-        match pfs::rename_noreplace(part, &dest) {
+        match pfs::rename_noreplace_hooked(part, &dest, &mut || fault::hit("final_linked")) {
             Ok(()) => return Ok(dest),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
