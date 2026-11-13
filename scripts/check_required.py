@@ -6,12 +6,14 @@ root = pathlib.Path(__file__).resolve().parent.parent
 import platform
 _win = platform.system() == "Windows"
 req = []
+not_tested = []
 for l in (root / "scripts/required_tests.txt").read_text().splitlines():
     l = l.strip()
     if not l or l.startswith("#"):
         continue
     if l.startswith("unix:"):          # genuinely Unix-only test (symlinks, rustls backend, SIGINT)
         if _win:
+            not_tested.append(l[5:])
             continue
         l = l[5:]
     req.append(l)
@@ -30,6 +32,9 @@ for name in req:
     hits = [k for k in results if k == name or k.endswith("::" + name)]
     if not hits: bad.append((name, "NOT RUN"))
     elif any(results[h] != "ok" for h in hits): bad.append((name, ",".join(results[h] for h in hits)))
+if not_tested:
+    print("\nNOT TESTED ON THIS PLATFORM (Unix-only required tests; they do NOT count as passed):")
+    for n in not_tested: print("  -", n)
 print(f"\nrequired: {len(req)}  ok: {len(req)-len(bad)}  bad: {len(bad)}")
 for n, why in bad: print("  ✗", n, why)
 sys.exit(1 if (bad or p.returncode != 0) else 0)
