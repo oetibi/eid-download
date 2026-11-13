@@ -82,3 +82,7 @@ NSIS + bootstrapper + خطافات HKCU، `release.yml` يبني من CI فقط 
 | `name_suffixes_stay_within_max_bytes` (197–200 بايت عربي) | رفض ملف حالة ننتجه نحن | #17 |
 | `cancel_at_many_points_leaves_no_orphans` | ملفات يتيمة/حذف تحميل لاحق | #15 |
 </div>
+
+### بند مؤجّل — `conn-cap-by-construction` (P2، غير منفّذ الآن)
+سقف الاتصالات بالبناء: عميل `hyper-util` مع موصِّل (connector) ملفوف يحمل إذن semaphore يُحرَّر في `Drop` للـ`TcpStream` الملفوف (reqwest 0.12 لا يتيح ذلك لأن `Conn` مغلق). يُحذف انتظار الـ2ms. يُنظر في إعادة استعمال الاتصال داخل السقف لإزالة كلفة مصافحة TCP/TLS لكل جزء (بعد `pool_max_idle_per_host(0)`). يُحسب حساب SChannel/native-tls على Windows. الاختبار: عدّاد Drop يساوي ذروة النواة ولا يتجاوز السقف بلا أي نوم.
+

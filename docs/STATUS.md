@@ -8,6 +8,14 @@
 | P0 الأساس | قيد التنفيذ | — |
 | P1 المحرّك | لم يبدأ | — |
 
+> موافقات المالك عتيبيّ (2026-11-13 08:34 توقيت الكويت): بند PLAN `conn-cap-by-construction` وإعادة تسمية اختبار الحدّ الزمني في `required_tests.txt` (ADR-0011).
+
+## ديون معروفة (تُحلّ في P2 ببند `conn-cap-by-construction`)
+- `pool_max_idle_per_host(0)`: مصافحة TCP/TLS جديدة لكل جزء/تقسيم/إعادة محاولة (كلفة أداء على HTTPS). قرار مؤقت لإبقاء السقف على المقابس الفعلية ≤ السقف.
+- انتظار `2ms` بعد إسقاط الجسم قبل `ResponseClosed`: تخفيف زمني لإغلاق hyper غير المتزامن، **ليس ضماناً بالبناء**. السقف على المقابس **مُقاس** (جدول النواة، ADR-0011) لا مثبت بالبناء.
+- اختبارات مقابس النواة (`socket_watch_*`، `socket_closes_mid_download_when_segments_finish_or_split`، `sockdiag_counts_client_sockets_by_ownership_and_sees_closes`) Linux فقط: **لم تُختبر على Windows** (تظهر «NOT TESTED» في `check_required.py`).
+- مراجعة Claude (دَين بسطر لكل بند): كاش ملكية الـinode لا يعيد التحقق من `true` (إنذار كاذب لو احتفظت نواة أحدث بالـinode بعد close)؛ الـdump غير ذرّي (الاتجاهان، ADR-0011 §1)؛ إعادة مسح `/proc/self/fd` تقع لحظة فتح مقابس جديدة (ثغرة عيّنات أطول لحظة الذروة)؛ `RequestStart`/`RequestEnd` في الخادم غير متناظرين (RequestEnd بشرط الجيل) و`now_us` من `SystemTime` غير رتيب؛ `socket_closes_mid_download…` يشترط آخر عيّنة 0 (يعتمد على سرعة إغلاق hyper)؛ الاختبارات تستعمل `std::net::TcpStream::connect` الحاجب داخل async؛ لا اختبار مباشر لسباق pipelining في الخادم؛ اختبارات الالتزامات الوسيطة لم تُشغَّل بمفردها على CI (بُني كل التزام محلياً فقط).
+
 ## لم يُختبر على Windows الحقيقي
 كل شيء. الصندوق الحالي Linux بدون Windows/Wine. ما يتحقق منه هنا: بناء المحرك وCLI والاختبارات على Linux و`cargo check`/بناء متقاطع لـWindows (إن نجح). الاختبارات على Windows تنتظر CI على windows-latest (يحتاج مستودع GitHub — لا نربط حساباً) ثم P8 يدوياً.
 </div>
