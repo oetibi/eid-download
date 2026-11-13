@@ -1159,6 +1159,36 @@ pub async fn download(
     sink: EventSink,
     cancel: CancellationToken,
 ) -> Result<Outcome> {
+    supervised(cancel, move |c| download_inner(spec, cfg, sink, c)).await
+}
+
+/// Run the job on its OWN task so that dropping/aborting the caller's future cannot abandon
+/// in-flight blocking disk work (review M4): the drop guard only REQUESTS cancellation; the job
+/// keeps its exclusive ownership (file lock) until every write/checkpoint has drained and the
+/// final checkpoint is durable.
+async fn supervised<F, Fut>(cancel: CancellationToken, f: F) -> Result<Outcome>
+where
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: std::future::Future<Output = Result<Outcome>> + Send + 'static,
+{
+    let token = cancel.child_token();
+    let guard = token.clone().drop_guard();
+    let handle = tokio::spawn(f(token));
+    let r = handle.await;
+    guard.disarm();
+    match r {
+        Ok(r) => r,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => Err(Error::Network(format!("job task failed: {e}"))),
+    }
+}
+
+async fn download_inner(
+    spec: JobSpec,
+    cfg: Config,
+    sink: EventSink,
+    cancel: CancellationToken,
+) -> Result<Outcome> {
     let st = prepare(&spec)?;
     let client = http::build_client(&cfg)?;
     let mut restarts = 0u32;
@@ -1353,6 +1383,19 @@ fn finish(
 /// Resume from a state file. Falls back to a clean restart when resuming would not be safe
 /// (no validators, missing/short data file, non-ranged state).
 pub async fn resume(
+    state_path: &Path,
+    cfg: Config,
+    sink: EventSink,
+    cancel: CancellationToken,
+) -> Result<Outcome> {
+    let state_path = state_path.to_path_buf();
+    supervised(cancel, move |c| async move {
+        resume_inner(&state_path, cfg, sink, c).await
+    })
+    .await
+}
+
+async fn resume_inner(
     state_path: &Path,
     cfg: Config,
     sink: EventSink,

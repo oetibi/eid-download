@@ -497,3 +497,71 @@ async fn concurrent_resume_of_the_same_job_is_refused_busy() {
     let o = first.await.unwrap().unwrap();
     assert_eq!(sha_of_file(&o.path), content(31).sha256_hex());
 }
+
+/// Review M4: aborting the caller's task must NOT abandon the job mid-flight. The job keeps
+/// running under its own supervision, drains, and persists the final durable checkpoint, so the
+/// sidecar then reflects the bytes already on disk (the periodic checkpoint is disabled here:
+/// only the supervised drain can have written progress), and the sidecar is resumable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn aborting_the_caller_drains_the_job_and_persists_a_final_checkpoint() {
+    let (srv, url) = serve("/m4.bin", content(41), slow()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = fast_cfg(4);
+    cfg.checkpoint_interval = Duration::from_secs(600); // no periodic checkpoint will fire
+    let log = Log::default();
+    let (d, sink) = (dir.path().to_path_buf(), log.sink());
+    let task = tokio::spawn(async move {
+        eid_engine::download(
+            JobSpec {
+                url,
+                dir: d,
+                file_name: None,
+            },
+            cfg,
+            sink,
+            CancellationToken::new(),
+        )
+        .await
+    });
+    let t = std::time::Instant::now();
+    loop {
+        if log.count(|e| matches!(e, Event::Progress { done, .. } if *done >= 2 << 20)) > 0 {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(30), "no progress");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    task.abort(); // the caller goes away
+    let _ = task.await;
+    // the supervised job drains by itself and writes its final checkpoint
+    let sp = state_file(dir.path()).unwrap();
+    let t = std::time::Instant::now();
+    let frontier = loop {
+        let done: u64 = state::load(&sp)
+            .map(|s| s.segments.iter().map(|g| g.next - g.start).sum())
+            .unwrap_or(0);
+        if done >= 1 << 20 {
+            break done;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "state never advanced after the caller was aborted (job was abandoned)"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(frontier >= 1 << 20);
+    // job released its ownership: resume now works and is exact
+    srv.set_behavior("/m4.bin", Behavior::default());
+    let mut tries = 0;
+    let o = loop {
+        match resume(&sp, fast_cfg(4)).await {
+            Ok((o, _)) => break o,
+            Err(Error::Busy) if tries < 100 => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("resume after abort failed: {e}"),
+        }
+    };
+    assert_eq!(sha_of_file(&o.path), content(41).sha256_hex());
+}
