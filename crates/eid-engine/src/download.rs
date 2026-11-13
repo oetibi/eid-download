@@ -4,7 +4,9 @@ use crate::config::{Config, MAX_CONNECTIONS, MAX_TOTAL_BYTES};
 use crate::error::{Error, Result};
 use crate::fault;
 use crate::filename;
-use crate::http::{self, parse_content_range, parse_retry_after, strong_etag};
+use crate::http::{
+    self, parse_content_range, parse_retry_after, strong_etag, strong_last_modified,
+};
 use crate::limiter::Limiter;
 use crate::sanitize::sanitize_file_name;
 use crate::state::{self, SegState, State, STATE_VERSION};
@@ -758,7 +760,12 @@ impl Net<'_> {
         let final_url = resp.url().clone();
         let cd = http::header_str(resp.headers(), "content-disposition");
         let etag = http::header_str(resp.headers(), "etag").and_then(|v| strong_etag(&v));
-        let lm = http::header_str(resp.headers(), "last-modified");
+        // Last-Modified alone is weak unless the server's Date is >= LM + 1 s (RFC 9110 8.8.2.2);
+        // a weak one is dropped here, so it is never stored, never sent in If-Range, and a
+        // download with no other validator is one stream with whole-file restart (review B3).
+        let lm = http::header_str(resp.headers(), "last-modified").and_then(|v| {
+            strong_last_modified(&v, http::header_str(resp.headers(), "date").as_deref())
+        });
         match resp.status() {
             StatusCode::PARTIAL_CONTENT if used_range => {
                 let cr = http::header_str(resp.headers(), "content-range")
