@@ -17,4 +17,5 @@
 | 0009 | إدارة التقسيم: حجز البايتات تحت قفل بدل pause/ack | مقبول، يحكمه اختبار P1 |
 | 0010 | TLS: SChannel على ويندوز، rustls غيره | مقبول |
 | 0011 | سياسة القياس في الاختبارات (سقف الاتصالات مُقاس لا بالبناء؛ حدّ المحدِّد) | مقبول — [0011-test-measurement-policy.md](0011-test-measurement-policy.md) |
+| 0012 | سقف الاتصالات بالتصميم (hyper-util + PermitStream) | **مقترح — بانتظار المالك** — [0012-conn-cap-by-construction.md](0012-conn-cap-by-construction.md) |
 </div>
