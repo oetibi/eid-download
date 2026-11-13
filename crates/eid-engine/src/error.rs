@@ -32,6 +32,8 @@ pub enum Error {
     BadState(String),
     #[error("checksum mismatch: expected {expected}, got {actual}")]
     Checksum { expected: String, actual: String },
+    #[error("this download is already running (data file is locked by another job/process)")]
+    Busy,
     #[error("cancelled")]
     Cancelled,
 }

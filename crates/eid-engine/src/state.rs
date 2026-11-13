@@ -23,6 +23,16 @@ pub struct SegState {
     pub end: u64,
 }
 
+/// Written (and synced) just before the final rename, so a crash after the rename can be
+/// recognised as "done" by content identity, never by file size alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finalize {
+    /// Exact final file name chosen in the download directory.
+    pub name: String,
+    /// SHA-256 (lowercase hex) of the complete data.
+    pub sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
     pub version: u32,
@@ -37,6 +47,8 @@ pub struct State {
     pub ranged: bool,
     pub segments: Vec<SegState>,
     pub restarts: u32,
+    #[serde(default)]
+    pub finalize: Option<Finalize>,
     /// SHA-256 (hex) of this struct serialized with `checksum == ""`.
     pub checksum: String,
 }
@@ -71,6 +83,19 @@ impl State {
         if let Some(t) = self.total {
             if t > MAX_TOTAL_BYTES {
                 return Err("total size absurd".into());
+            }
+        }
+        if let Some(f) = &self.finalize {
+            if !is_safe_stored_name(&f.name) {
+                return Err("finalize name is not a safe plain name".into());
+            }
+            if f.sha256.len() != 64
+                || !f
+                    .sha256
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            {
+                return Err("finalize digest malformed".into());
             }
         }
         if self.segments.len() > MAX_SEGMENTS {
@@ -214,6 +239,7 @@ mod tests {
                 },
             ],
             restarts: 0,
+            finalize: None,
             checksum: String::new(),
         };
         s.seal();

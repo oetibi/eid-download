@@ -80,10 +80,41 @@ fn reject_if_not_plain(f: &File) -> io::Result<()> {
                 "refusing reparse point",
             ));
         }
-        // Hard-link count on Windows needs GetFileInformationByHandle: NOT implemented yet
-        // (listed in docs/STATUS.md as untested/unimplemented on Windows).
+        if windows_link_count(f)? > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing file with multiple hard links",
+            ));
+        }
     }
     Ok(())
+}
+
+/// NTFS hard-link count of an *open handle* (compile-checked on Linux, never executed here).
+#[cfg(windows)]
+fn windows_link_count(f: &File) -> io::Result<u32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    // SAFETY: `info` is a plain-old-data out parameter; the handle is valid for the call.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.nNumberOfLinks)
+}
+
+/// Try to take an exclusive advisory lock on the job's data file (`flock` / `LockFileEx`).
+/// `Ok(false)` = another job/process holds it. The lock lives as long as any duplicate of
+/// this handle stays open, so in-flight blocking writes keep ownership until they finish.
+pub fn try_lock_exclusive(f: &File) -> io::Result<bool> {
+    match f.try_lock() {
+        Ok(()) => Ok(true),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 fn apply_open_flags(o: &mut OpenOptions) {

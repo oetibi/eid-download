@@ -38,6 +38,14 @@ pub struct Config {
     /// How many times a changed file restarts the download before failing.
     pub max_restarts: u32,
     pub max_redirects: usize,
+    /// Response headers (including redirects) must arrive within this time.
+    pub header_timeout: Duration,
+    /// Always hash the finished file and record it before the final rename (enables safe
+    /// crash recovery after the rename). Turning it off makes such a crash restart the download.
+    pub hash_on_finish: bool,
+    /// Use several connections even when the server gave no ETag/Last-Modified. Off by default:
+    /// without a validator a file that changes mid-transfer could be silently spliced.
+    pub allow_unvalidated_segments: bool,
     /// Extra trusted root certificates (PEM), e.g. a corporate CA. This only *adds* trust
     /// anchors; certificate verification is never disabled (guard test enforces that).
     pub extra_root_certs_pem: Vec<Vec<u8>>,
@@ -65,6 +73,9 @@ impl Default for Config {
             compute_sha256: false,
             max_restarts: 3,
             max_redirects: 10,
+            header_timeout: Duration::from_secs(30),
+            hash_on_finish: true,
+            allow_unvalidated_segments: false,
             extra_root_certs_pem: Vec::new(),
         }
     }

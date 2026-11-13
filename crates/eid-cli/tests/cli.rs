@@ -146,7 +146,7 @@ async fn cli_sigkill_then_resume_completes_from_frontier() {
         if let Some(sp) = state_file(dir.path()) {
             if let Ok(st) = state::load(&sp) {
                 let done: u64 = st.segments.iter().map(|s| s.next - s.start).sum();
-                if done > (2 << 20) {
+                if done > (4 << 20) {
                     break st;
                 }
             }
@@ -161,7 +161,9 @@ async fn cli_sigkill_then_resume_completes_from_frontier() {
     let status = child.wait().unwrap();
     assert!(!status.success());
     // re-read after the kill: that is the state a restart will see
-    let sp = state_file(dir.path()).unwrap();
+    // SIGKILL may land between 'primary moved to .bak' and 'tmp renamed to primary': the primary
+    // can legitimately be absent, and resume() must recover from the .bak. So use the fixed name.
+    let sp = dir.path().join("k.bin.eid-state");
     let st2 = state::load(&sp).unwrap_or(st);
     let done: u64 = st2.segments.iter().map(|s| s.next - s.start).sum();
     srv.reset_stats("/k.bin");
@@ -184,16 +186,23 @@ async fn cli_sigkill_then_resume_completes_from_frontier() {
     );
     assert_eq!(sha(&dir.path().join("k.bin")), content(2).sha256_hex());
     assert_eq!(names(dir.path()), vec!["k.bin".to_string()]);
-    for r in srv.stats("/k.bin").requests {
-        let start: u64 = r
-            .range_header
-            .unwrap()
-            .trim_start_matches("bytes=")
-            .split('-')
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
+    let starts: Vec<u64> = srv
+        .stats("/k.bin")
+        .requests
+        .into_iter()
+        .map(|r| {
+            r.range_header
+                .unwrap()
+                .trim_start_matches("bytes=")
+                .split('-')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    assert!(!starts.is_empty());
+    for &start in &starts {
         let seg = st2
             .segments
             .iter()
@@ -205,7 +214,21 @@ async fn cli_sigkill_then_resume_completes_from_frontier() {
             seg.next
         );
     }
-    assert!(srv.stats("/k.bin").bytes_sent_total <= (12 << 20) - done + (1 << 20));
+    let first = st2.segments.iter().find(|s| s.next < s.end).unwrap();
+    let min_in_first = starts
+        .iter()
+        .copied()
+        .filter(|&x| first.start <= x && x < first.end)
+        .min()
+        .unwrap();
+    assert_eq!(
+        min_in_first, first.next,
+        "first resumed request must start exactly at the persisted frontier"
+    );
+    assert!(
+        done >= (4 << 20),
+        "kill must happen after >=30% progress, done {done}"
+    );
 }
 
 /// Abort the process (like power loss) at each persistence point; a restart must always end

@@ -825,6 +825,7 @@ fn make_state(info: &JobInfo, total: Option<u64>, ranged: bool, segs: Vec<SegSta
         ranged,
         segments: segs,
         restarts: info.restarts,
+        finalize: None,
         checksum: String::new(),
     };
     s.seal();

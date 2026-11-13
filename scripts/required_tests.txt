@@ -34,15 +34,15 @@ resume_without_validators_restarts_instead_of_trusting
 file_changes_during_download_is_detected
 length_change_during_download_is_detected
 cancel_at_many_points_leaves_no_orphans
-cli_ctrl_c_prints_a_resume_command_and_it_works
+unix:cli_ctrl_c_prints_a_resume_command_and_it_works
 security_state_never_contains_secrets_on_disk
 state_has_no_secrets_and_is_private
 errors_never_contain_query_or_credentials
 cli_never_prints_credentials_or_query
 security_generated_part_and_state_files_are_private
-security_symlink_at_target_names_is_never_followed
+unix:security_symlink_at_target_names_is_never_followed
 security_hardlinked_part_file_is_refused_on_resume
-security_symlinked_part_file_is_refused_on_resume
+unix:security_symlinked_part_file_is_refused_on_resume
 symlink_capability_precheck
 # ---- G3 segmentation / limiter
 sha256_matches_with_1_8_32_connections
@@ -59,12 +59,12 @@ snapshot_is_sorted_and_covers_exactly_after_splits
 max_in_flight_bytes_bounded
 numbers_from_network_use_checked_ops_content_range
 numbers_from_network_use_checked_ops_retry_after_and_backoff
-# ---- G4 TLS (rustls backend on Linux)
-tls_accepts_with_test_root
-tls_rejects_selfsigned
-tls_rejects_expired
-tls_rejects_wrong_host
-tls_rejects_untrusted_ca
+# ---- G4 TLS (rustls backend: Linux only; Windows uses SChannel, covered by docs/MANUAL-TESTS.md)
+unix:tls_accepts_with_test_root
+unix:tls_rejects_selfsigned
+unix:tls_rejects_expired
+unix:tls_rejects_wrong_host
+unix:tls_rejects_untrusted_ca
 # ---- permanent security / architecture guards
 security_flag_value_is_create_no_window
 security_args_are_passed_literally_without_shell

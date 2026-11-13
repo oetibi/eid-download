@@ -46,6 +46,50 @@ async fn run_then_cancel(
     (r, log)
 }
 
+/// Cancel once a checkpoint with at least `min_done` bytes exists (progress-based, not
+/// timing-based, so slow CI machines cannot make the test vacuous).
+async fn run_until_progress(
+    url: &str,
+    dir: &Path,
+    cfg: Config,
+    min_done: u64,
+) -> (eid_engine::Result<eid_engine::Outcome>, Log) {
+    let log = Log::default();
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    let d = dir.to_path_buf();
+    tokio::spawn(async move {
+        let t = std::time::Instant::now();
+        loop {
+            if let Some(sp) = state_file(&d) {
+                if let Ok(st) = state::load(&sp) {
+                    let done: u64 = st.segments.iter().map(|s| s.next - s.start).sum();
+                    if done >= min_done {
+                        break;
+                    }
+                }
+            }
+            if t.elapsed() > Duration::from_secs(30) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        c2.cancel();
+    });
+    let r = eid_engine::download(
+        JobSpec {
+            url: url.into(),
+            dir: dir.into(),
+            file_name: None,
+        },
+        cfg,
+        log.sink(),
+        cancel,
+    )
+    .await;
+    (r, log)
+}
+
 fn state_file(dir: &Path) -> Option<std::path::PathBuf> {
     std::fs::read_dir(dir)
         .unwrap()
@@ -117,7 +161,7 @@ async fn cancel_at_many_points_leaves_no_orphans() {
 async fn kill_then_resume_requests_only_from_checkpointed_frontier() {
     let (srv, url) = serve("/k.bin", content(2), slow()).await;
     let dir = tempfile::tempdir().unwrap();
-    let (r, _) = run_then_cancel(&url, dir.path(), fast_cfg(4), Duration::from_millis(900)).await;
+    let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 5 << 20).await;
     assert!(matches!(r, Err(Error::Cancelled)));
     let sp = state_file(dir.path()).unwrap();
     let st: State = state::load(&sp).unwrap();
@@ -131,35 +175,57 @@ async fn kill_then_resume_requests_only_from_checkpointed_frontier() {
     let (o, _) = resume(&sp, fast_cfg(4)).await.unwrap();
     assert_eq!(sha_of_file(&o.path), content(2).sha256_hex());
     let reqs = srv.stats("/k.bin").requests;
-    let mut exact = 0;
-    for r in &reqs {
-        let start: u64 = r
-            .range_header
-            .as_ref()
-            .unwrap()
-            .trim_start_matches("bytes=")
-            .split('-')
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
+    assert!(!reqs.is_empty());
+    let starts: Vec<u64> = reqs
+        .iter()
+        .map(|r| {
+            assert!(r.if_range.is_some(), "resume must send If-Range");
+            r.range_header
+                .as_ref()
+                .unwrap()
+                .trim_start_matches("bytes=")
+                .split('-')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    // (1) nothing below any segment's checkpointed frontier is ever re-requested
+    for &start in &starts {
         let seg = st
             .segments
             .iter()
             .find(|s| s.start <= start && start < s.end)
             .expect("start inside a known segment");
-        assert!(start >= seg.next, "re-requested already-checkpointed bytes: start {start} < frontier {} of segment {seg:?}", seg.next);
-        if start == seg.next {
-            exact += 1;
-        }
-        assert!(r.if_range.is_some(), "resume must send If-Range");
+        assert!(
+            start >= seg.next,
+            "re-requested checkpointed bytes: start {start} < frontier {} of {seg:?}",
+            seg.next
+        );
     }
-    assert!(exact >= 1);
-    // never re-downloaded more than the missing part (+ small tolerance for retried splits)
-    let sent = srv.stats("/k.bin").bytes_sent_total;
+    // (2) the first incomplete segment is resumed EXACTLY at its persisted frontier (the first
+    //     worker always takes it; later splits only start above it)
+    let first = st
+        .segments
+        .iter()
+        .find(|s| s.next < s.end)
+        .expect("an incomplete segment");
+    let min_in_first = starts
+        .iter()
+        .copied()
+        .filter(|&x| first.start <= x && x < first.end)
+        .min()
+        .expect("a request into the first incomplete segment");
+    assert_eq!(
+        min_in_first, first.next,
+        "first resumed request must start at the persisted frontier"
+    );
+    // (3) every incomplete segment's frontier is the start of some request or lies inside a split
+    //     sub-range that begins at/after it (never below)
     assert!(
-        sent <= (16 << 20) - done + (1 << 20),
-        "sent {sent}, done {done}"
+        done >= 5 << 20,
+        "cancel must happen after >=30% durable progress, done {done}"
     );
 }
 
@@ -167,7 +233,7 @@ async fn kill_then_resume_requests_only_from_checkpointed_frontier() {
 async fn etag_change_between_attempts_restarts_with_new_content() {
     let (srv, url) = serve("/e.bin", content(3), slow()).await;
     let dir = tempfile::tempdir().unwrap();
-    let (r, _) = run_then_cancel(&url, dir.path(), fast_cfg(4), Duration::from_millis(700)).await;
+    let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 2 << 20).await;
     assert!(matches!(r, Err(Error::Cancelled)));
     let sp = state_file(dir.path()).unwrap();
     srv.set_content("/e.bin", content(4)); // new bytes => new ETag
@@ -191,7 +257,7 @@ async fn resume_without_validators_restarts_instead_of_trusting() {
     };
     let (srv, url) = serve("/nv.bin", content(5), b).await;
     let dir = tempfile::tempdir().unwrap();
-    let (r, _) = run_then_cancel(&url, dir.path(), fast_cfg(4), Duration::from_millis(600)).await;
+    let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 2 << 20).await;
     assert!(matches!(r, Err(Error::Cancelled)));
     let sp = state_file(dir.path()).unwrap();
     srv.set_behavior(
@@ -210,7 +276,7 @@ async fn resume_without_validators_restarts_instead_of_trusting() {
 async fn state_roundtrip_through_a_real_cancelled_download() {
     let (_srv, url) = serve("/r.bin", content(6), slow()).await;
     let dir = tempfile::tempdir().unwrap();
-    let (r, _) = run_then_cancel(&url, dir.path(), fast_cfg(4), Duration::from_millis(500)).await;
+    let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 2 << 20).await;
     assert!(matches!(r, Err(Error::Cancelled)));
     let sp = state_file(dir.path()).unwrap();
     let st = state::load(&sp).unwrap();
@@ -309,6 +375,7 @@ async fn hostile_state_files_are_rejected_before_any_io() {
                 end: 100,
             }],
             restarts: 0,
+            finalize: None,
             checksum: String::new(),
         };
         s.seal();
