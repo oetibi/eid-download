@@ -560,13 +560,16 @@ async fn connection_cap_is_strict_by_real_sockets_engine_and_server() {
 /// (query itself tens of us), a sampling period of roughly 100 us.
 ///
 /// Pass criterion (no new flake source): 3 independent rounds, each of which must catch the
-/// peak at least once within K = 8 tries. Measured per-try detection of a 5 ms peak: 100/100
-/// idle; 89..99/100 under 8 busy loops on 8 cores (worst seen 0.89). A round fails only if all
-/// 8 tries miss: 0.11^8 = 2e-8 per round at the measured worst rate, and even if the per-try
-/// rate were as low as 0.7 the false-failure probability of the whole test is
-/// 3 * 0.3^8 = 2e-4 (< 0.1%). Starvation of the sampler thread can only cause a MISS, never a
-/// false alarm. Shorter holds (2 ms, 1 ms) are REPORT-ONLY (measured 52/100 for 2 ms under
-/// load): they are never asserted.
+/// peak at least once within K = 16 tries (the 5 ms hold and the 3 rounds are unchanged).
+/// Measured per-try detection of a 5 ms peak: 100/100 idle; 89..99/100 under 8 busy loops on
+/// 8 cores; but only ~0.55 per try under 3x oversubscription (24 busy loops on 8 cores: 1 round
+/// of 600 missed all 8 tries, 0.45^8 ~ 1/600). K was raised from 8 to 16 on THAT measurement
+/// (it is a statistical parameter, not a relaxation of what is asserted): a round fails only if
+/// all 16 tries miss, 0.45^16 ~ 2.8e-6 per round, so the whole test false-fails with probability
+/// ~3 * 0.45^16 ~ 1e-5 at the measured 3x-load rate. Starvation of the sampler thread can only
+/// cause a MISS, never a false alarm, and the extra tries cost milliseconds. Shorter holds
+/// (2 ms, 1 ms) are REPORT-ONLY (measured 52/100 for 2 ms under load): never asserted. A longer
+/// hold would weaken the test (a real engine overshoot lasts about 2-7 ms).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn socket_watch_catches_a_brief_cap_plus_one_peak() {
     let (srv, _url) = serve(
@@ -612,7 +615,7 @@ async fn socket_watch_catches_a_brief_cap_plus_one_peak() {
             Some(r.peak > cap)
         }
     };
-    const K: usize = 8;
+    const K: usize = 16;
     for round in 0..3 {
         let mut caught_after = None;
         for t in 1..=K {
