@@ -771,12 +771,16 @@ fn claim_files(dir: &Path, base: &str) -> Result<Files> {
         let part = dir.join(format!("{cand}{PART_SUFFIX}"));
         match pfs::create_new_file(&part) {
             Ok(file) => {
+                // exclusive job ownership from the very first byte (review M1)
+                if !pfs::try_lock_exclusive(&file).map_err(Error::io("lock part file"))? {
+                    return Err(Error::Busy);
+                }
                 return Ok(Files {
                     name: cand,
                     part,
                     state,
                     file,
-                })
+                });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
@@ -790,6 +794,25 @@ fn claim_files(dir: &Path, base: &str) -> Result<Files> {
     Err(Error::InvalidInput(
         "could not find a free file name".into(),
     ))
+}
+
+/// Hash through an already-open (locked) handle: on Windows an exclusive lock blocks reads
+/// through any OTHER handle, and hashing the very handle we verified also closes a path swap.
+fn sha256_handle(f: &File) -> Result<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut f = f.try_clone().map_err(Error::io("clone for hashing"))?;
+    f.seek(SeekFrom::Start(0))
+        .map_err(Error::io("seek for hashing"))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(Error::io("read for hashing"))?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(state::hex(&h.finalize()))
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -1283,17 +1306,17 @@ fn finish(
             "final file length {len} != expected {size}"
         )));
     }
-    drop(file);
+    // Keep BOTH handles (and with them the exclusive job lock) until the final rename and the
+    // state removal are done (review M1).
     let Files {
         part,
         state: state_path,
         file: f0,
         ..
     } = files;
-    drop(f0);
     // The digest is always computed: the finalization record below needs it so that a crash
     // after the rename can be recognised by content, never by file size alone (review B2).
-    let full_digest = sha256_file(&part)?;
+    let full_digest = sha256_handle(&file)?;
     if let Some(want) = &cfg.expected_sha256 {
         if !want.eq_ignore_ascii_case(&full_digest) {
             return Err(Error::Checksum {
@@ -1314,6 +1337,8 @@ fn finish(
     fault::hit("part_renamed_final");
     state::remove_all(&state_path);
     let _ = pfs::sync_dir(dir);
+    drop(f0);
+    drop(file);
     sink(Event::Finished { size });
     Ok(Outcome {
         path: dest,
@@ -1346,6 +1371,15 @@ pub async fn resume(
         .unwrap_or(Path::new("."))
         .to_path_buf();
     let part = dir.join(format!("{}{}", st.file_name, PART_SUFFIX));
+    // Exclusive job ownership BEFORE anything is read, restarted or deleted: a second resume (or
+    // a resume racing the original job) gets `Busy` instead of corrupting the other's state and
+    // data (review M1). The lock lives as long as this handle (and its clones) stay open.
+    let locked_part = pfs::open_regular_nofollow(&part).ok();
+    if let Some(f) = &locked_part {
+        if !pfs::try_lock_exclusive(f).map_err(Error::io("lock part file"))? {
+            return Err(Error::Busy);
+        }
+    }
     // Crash after the final rename but before the state was removed: the job is already done,
     // but ONLY if the state carries the finalization record written before the rename and the
     // recorded destination still has exactly the recorded content. A same-size file that merely
@@ -1392,8 +1426,12 @@ pub async fn resume(
     } else {
         None
     };
+    let mut locked_part = locked_part;
     let part_file = if restart_reason.is_none() {
-        let f = pfs::open_regular_nofollow(&part).map_err(Error::io("open part file"))?;
+        let f = match locked_part.take() {
+            Some(f) => f,
+            None => pfs::open_regular_nofollow(&part).map_err(Error::io("open part file"))?,
+        };
         let len = f.metadata().map_err(Error::io("stat part"))?.len();
         let max_done = st.segments.iter().map(|s| s.next).max().unwrap_or(0);
         if len < max_done || st.total.is_some_and(|t| len > t) {
@@ -1405,6 +1443,7 @@ pub async fn resume(
         None
     };
     let Some(part_file) = part_file else {
+        drop(locked_part);
         let reason = restart_reason.unwrap_or("data file does not match the state");
         sink(Event::Restarted {
             reason: reason.to_string(),

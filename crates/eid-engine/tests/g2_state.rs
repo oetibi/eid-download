@@ -460,3 +460,40 @@ async fn resume_never_adopts_an_unrelated_same_size_final_file() {
     assert_eq!(sha_of_file(&o.path), content(21).sha256_hex());
     assert!(log.count(|e| matches!(e, Event::Restarted { .. })) >= 1);
 }
+
+/// Review M1: while one job owns a part file, a second resume of the same sidecar must be
+/// refused with `Busy` (before it touches state or data) and the first must still finish with
+/// the exact bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_resume_of_the_same_job_is_refused_busy() {
+    let (srv, url) = serve("/m1.bin", content(31), slow()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 2 << 20).await;
+    assert!(matches!(r, Err(Error::Cancelled)));
+    let sp = state_file(dir.path()).unwrap();
+    srv.set_behavior("/m1.bin", slow());
+    let log1 = Log::default();
+    let (sp1, sink1) = (sp.clone(), log1.sink());
+    let first = tokio::spawn(async move {
+        eid_engine::resume(&sp1, fast_cfg(4), sink1, CancellationToken::new()).await
+    });
+    // wait until the first resume is really transferring
+    let t = std::time::Instant::now();
+    while log1.count(|e| matches!(e, Event::ResponseOpened { .. })) == 0 {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "first resume never started"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let second = tokio::time::timeout(Duration::from_secs(20), resume(&sp, fast_cfg(4)))
+        .await
+        .expect("second resume must fail fast, not run");
+    assert!(
+        matches!(second, Err(Error::Busy)),
+        "second resume was not refused: {:?}",
+        second.map(|(o, _)| o.path)
+    );
+    let o = first.await.unwrap().unwrap();
+    assert_eq!(sha_of_file(&o.path), content(31).sha256_hex());
+}
