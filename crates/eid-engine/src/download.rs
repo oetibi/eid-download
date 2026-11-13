@@ -889,8 +889,9 @@ fn claim_files(dir: &Path, base: &str, held: &mut Option<JobLock>) -> Result<Fil
     ))
 }
 
-/// Hash through an already-open (locked) handle: on Windows an exclusive lock blocks reads
-/// through any OTHER handle, and hashing the very handle we verified also closes a path swap.
+/// Hash through an already-open handle (the one we verified and keep until finalization):
+/// hashing the very handle we verified, not a re-opened path, closes a path swap. (The
+/// advisory job lock lives on the separate `.eid-lock` file, not on this data file.)
 fn sha256_handle(f: &File) -> Result<String> {
     use std::io::{Seek, SeekFrom};
     let mut f = f.try_clone().map_err(Error::io("clone for hashing"))?;
@@ -908,9 +909,11 @@ fn sha256_handle(f: &File) -> Result<String> {
     Ok(state::hex(&h.finalize()))
 }
 
-/// Durably record (name, digest) in the state BEFORE each rename attempt, so recovery after a
-/// crash between rename and state removal verifies the exact destination by content.
+/// Durably record (name, digest) in the state BEFORE each publish attempt, so recovery after a
+/// crash between publish and state removal verifies the exact destination by content. The
+/// verified HANDLE `file` is what gets published (M2), not whatever the part name refers to.
 fn finalize_name(
+    file: &File,
     dir: &Path,
     part: &Path,
     name: &str,
@@ -930,7 +933,7 @@ fn finalize_name(
             sha256: sha256.to_string(),
         });
         state::save(state_path, &st)?;
-        match pfs::rename_noreplace_hooked(part, &dest, &mut || fault::hit("final_linked")) {
+        match pfs::publish_verified_hooked(file, part, &dest, &mut || fault::hit("final_linked")) {
             Ok(()) => return Ok(dest),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
@@ -1598,8 +1601,22 @@ fn finish_blocking(
         .and_then(|n| n.strip_suffix(PART_SUFFIX))
         .ok_or_else(|| Error::InvalidInput("bad part name".into()))?
         .to_string();
-    let dest = finalize_name(dir, &part, &dest_name, &state_path, &full_digest)?;
+    let dest = finalize_name(&file, dir, &part, &dest_name, &state_path, &full_digest)?;
     fault::hit("part_renamed_final");
+    // M2: the destination must still be the verified file right before we report success;
+    // otherwise keep the state (and whatever is on disk) and fail loudly.
+    if !pfs::handle_is_path(&file, &dest).map_err(Error::io("verify final destination"))? {
+        return Err(Error::Io {
+            context: "verify final destination",
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "destination changed during finalization: {}",
+                    dest.display()
+                ),
+            ),
+        });
+    }
     state::remove_all(&state_path);
     let _ = pfs::sync_dir(dir);
     drop(f0);
@@ -1671,19 +1688,47 @@ async fn resume_inner(
     // but ONLY if the state carries the finalization record written before the rename and the
     // recorded destination still has exactly the recorded content. A same-size file that merely
     // shares the name proves nothing (review B2) and is never adopted.
-    if !part.exists() {
+    //
+    // M2 addition: a crash between the link and the unlink of a promotion (Unix) leaves `part`
+    // and the destination as two names of ONE inode; that exact pair (same inode, exactly two
+    // links, size and SHA-256 equal to the record, hashed through the held handle) is finished
+    // by dropping the leftover part name. Anything else keeps the strict refusal below.
+    {
         if let (Some(t), Some(fz)) = (st.total, &st.finalize) {
             let fin = dir.join(&fz.name);
-            // open once (no symlink, single link), then check size and hash THROUGH that handle
-            // and off the executor thread: no path re-resolution between check and use
-            let fin_ok = match pfs::open_regular_nofollow_read(&fin) {
-                Ok(h) if h.metadata().is_ok_and(|m| m.len() == t) => {
-                    let want = fz.sha256.clone();
-                    tokio::task::spawn_blocking(move || sha256_handle(&h).map(|d| d == want))
+            let fin_ok = if !part.exists() {
+                // open once (no symlink, single link), then check size and hash THROUGH that
+                // handle and off the executor thread: no path re-resolution between check and use
+                match pfs::open_regular_nofollow_read(&fin) {
+                    Ok(h) if h.metadata().is_ok_and(|m| m.len() == t) => {
+                        let want = fz.sha256.clone();
+                        tokio::task::spawn_blocking(move || sha256_handle(&h).map(|d| d == want))
+                            .await
+                            .map_err(|e| Error::Network(format!("hash task failed: {e}")))??
+                    }
+                    _ => false,
+                }
+            } else {
+                match pfs::open_linked_pair_for_recovery(&part, &fin) {
+                    Ok(Some(h)) if h.metadata().is_ok_and(|m| m.len() == t) => {
+                        let (want, part2) = (fz.sha256.clone(), part.clone());
+                        tokio::task::spawn_blocking(move || {
+                            if sha256_handle(&h)? != want {
+                                return Ok(false);
+                            }
+                            // drop the leftover name only if it still names the verified inode
+                            if !pfs::handle_is_path(&h, &part2).unwrap_or(false) {
+                                return Ok(false);
+                            }
+                            std::fs::remove_file(&part2)
+                                .map_err(Error::io("drop leftover part"))?;
+                            Ok::<bool, Error>(true)
+                        })
                         .await
                         .map_err(|e| Error::Network(format!("hash task failed: {e}")))??
+                    }
+                    _ => false,
                 }
-                _ => false,
             };
             if fin_ok {
                 let digest = if cfg.compute_sha256 || cfg.expected_sha256.is_some() {

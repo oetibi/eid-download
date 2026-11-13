@@ -5,7 +5,7 @@
 //! serialised with a lock.
 mod common;
 use common::*;
-use eid_engine::{fault, Error, JobSpec};
+use eid_engine::{fault, JobSpec};
 use eid_testserver::{Behavior, Content};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -237,11 +237,11 @@ async fn crash_between_link_and_unlink_with_a_tampered_inode_is_not_adopted() {
     )
     .await;
     assert!(
-        !matches!(r, Ok(_)),
+        r.is_err(),
         "a tampered file was adopted as the finished download"
     );
     assert!(
-        !matches!(r, Err(Error::Busy)),
+        !matches!(r, Err(eid_engine::Error::Busy)),
         "unexpected Busy: {:?}",
         r.map(|o| o.path)
     );
