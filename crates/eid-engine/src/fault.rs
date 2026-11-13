@@ -10,7 +10,40 @@ mod imp {
     static HITS: AtomicU64 = AtomicU64::new(0);
     static JITTER: AtomicU64 = AtomicU64::new(0);
 
+    /// Test hook: the NEXT time fault point `name` is reached (on whatever thread, typically a
+    /// blocking-pool thread) that thread signals `reached` and then blocks until `release` is
+    /// signalled (30 s safety timeout). One-shot; process-global.
+    pub fn set_pause_point(
+        name: &str,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *PAUSE_AT.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((name.to_string(), reached_tx, release_rx));
+        (reached_rx, release_tx)
+    }
+    #[allow(clippy::type_complexity)]
+    static PAUSE_AT: std::sync::Mutex<
+        Option<(
+            String,
+            std::sync::mpsc::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    > = std::sync::Mutex::new(None);
+
     pub fn hit(name: &str) {
+        let pause = {
+            let mut g = PAUSE_AT.lock().unwrap_or_else(|e| e.into_inner());
+            if g.as_ref().is_some_and(|p| p.0 == name) {
+                g.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, reached, release)) = pause {
+            let _ = reached.send(());
+            let _ = release.recv_timeout(std::time::Duration::from_secs(30));
+        }
         let fire = {
             let mut g = PANIC_AT.lock().unwrap_or_else(|e| e.into_inner());
             match g.as_ref() {
@@ -68,10 +101,15 @@ mod imp {
     pub fn hit(_name: &str) {}
     #[inline(always)]
     pub fn set_panic_point(_name: &str, _after: u64) {}
+    pub fn set_pause_point(
+        _name: &str,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        (std::sync::mpsc::channel().1, std::sync::mpsc::channel().0)
+    }
     #[inline(always)]
     pub fn set_jitter(_seed: u64) {}
     #[inline(always)]
     pub fn jitter() {}
 }
 
-pub use imp::{hit, jitter, set_jitter, set_panic_point};
+pub use imp::{hit, jitter, set_jitter, set_panic_point, set_pause_point};

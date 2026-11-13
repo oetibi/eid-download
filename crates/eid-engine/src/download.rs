@@ -347,6 +347,7 @@ impl Ctx {
         let file = self.file.clone();
         let r = tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
             let (off, n) = table.lock().unwrap().reserve(seg, data.len() as u64);
+            fault::hit("write_reserved");
             fault::jitter();
             if n > 0 {
                 pfs::write_all_at(&file, &data[..n as usize], off)?;
