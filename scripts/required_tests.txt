@@ -76,6 +76,8 @@ shell_injection_posix_sh
 shell_injection_powershell
 shell_injection_cmd_exe
 connection_cap_is_strict_by_real_sockets_engine_and_server
+# NOTE: socket_watch_catches_a_brief_cap_plus_one_peak is REPORT-ONLY (it must run and not crash, but a missed brief peak
+# is printed, not asserted: ADR-0011). The asserted proof of the sampler is the event-confirmed test right below.
 unix:socket_watch_catches_a_brief_cap_plus_one_peak
 unix:socket_watch_sees_cap_plus_one_while_held_and_sees_it_closed
 unix:socket_closes_mid_download_when_segments_finish_or_split

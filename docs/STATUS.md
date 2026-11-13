@@ -34,6 +34,19 @@
 | M2, M3, M5, M6, M7, m1–m3 | **لم تُعالَج بعد** | — |
 | m2 جزئياً | الإنهاء (fsync+hash+rename) صار على مجمّع الـblocking | — |
 
+## سجل CI لـPR1–PR4 (جرى دمجها في main @ 58d2f42)
+آخر تشغيل لرأس كل PR قبل الدمج (من `gh run list`؛ الناجح فقط مذكور كأخضر):
+| PR | رأس الفرع | ci-linux | ci-windows |
+|---|---|---|---|
+| PR1 `p1/conn-cap` | `7e9510c` | success `43404489688` | success `43404489663` |
+| PR2 `p1/drop-resp` | `3468e99` | success `43404489392` | success `43404490739` |
+| PR3 `p1/adr-0012` | `3ce5c07` | success `43404698952` | success `43404698960` |
+| PR4 `p1/review-fixes` | `7e1ef19` | success `43404983213` | success `43404983175` |
+
+- تشغيلان `cancelled` على `3468e99` (`43404489337` linux، `43404489279` windows) أُلغيا (conclusion=cancelled)، وبقي لنفس الرأس تشغيل ناجح؛ لا يُحتسبان فشلاً أو نجاحاً.
+- فشلت قبلها (للتاريخ، لا تُحسب خضراء): conn-cap `43402351147` (push، «workflow file issue» — YAML) و`43402361819` (windows، `security_hardlinked_part_file_is_refused_on_resume` NOT RUN) على `45ee840`؛ وجولة `859aa38`/`77a2e1b`/`48d496c`/`540b017` (linux فشل لـ`540b017` `43395030089`، ثم أُصلح).
+- تشغيلات push على main: `43406673837` (@ `58d2f42`) قيد التشغيل وقت الكتابة؛ ثلاثة تشغيلات push أخرى على main أُلغيت (`43406428312`، `43406565666`، `43406616357`) لأن الدمجات توالت. لا أُسجّل main أخضر حتى يكتمل `43406673837`.
+
 ## لم يُختبر على Windows الحقيقي
 - **B4 (hard link) و M1 (`LockFileEx` وقفل الملف على Windows):** مُنفَّذان ويُبنيان (`cargo check --target x86_64-pc-windows-gnu --all-targets`) لكن **لم يُشغَّلا على Windows**. خطر معروف: قفل `LockFileEx` إلزامي — أي قراءة للـpart عبر مقبض آخر ستفشل؛ لذلك يجري الـhash عبر المقبض المقفول نفسه (`sha256_handle`).
 كل شيء. الصندوق الحالي Linux بدون Windows/Wine. ما يتحقق منه هنا: بناء المحرك وCLI والاختبارات على Linux و`cargo check`/بناء متقاطع لـWindows (إن نجح). الاختبارات على Windows تنتظر CI على windows-latest (يحتاج مستودع GitHub — لا نربط حساباً) ثم P8 يدوياً.
