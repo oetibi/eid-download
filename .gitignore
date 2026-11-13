@@ -1,0 +1,6 @@
+target/
+node_modules/
+tools/yt-dlp*
+tools/ffmpeg*
+*.part
+.codex-tmp/

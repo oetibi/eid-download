@@ -1,0 +1,53 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4          # TODO(P7): pin every action by commit SHA
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --no-fail-fast
+      - run: python scripts/check_required.py
+      - run: python scripts/check_required.py --release   # overflow/security tests in release mode
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-pc-windows-gnu }
+      - run: cargo check --workspace --target x86_64-pc-windows-gnu
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: PowerShell injection matrix (pwsh is preinstalled)
+        run: cargo test -p eid-cli --test shell_injection -- --nocapture
+  windows-artifacts:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p eid-cli
+      - name: SHA-256
+        shell: pwsh
+        run: |
+          Get-FileHash target\release\eid.exe -Algorithm SHA256 | Format-List
+          (Get-FileHash target\release\eid.exe -Algorithm SHA256).Hash | Out-File sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eid-windows-x64
+          path: |
+            target/release/eid.exe
+            sha256.txt

@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/eid-engine", "crates/eid-platform", "crates/eid-testserver", "crates/eid-cli"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0 OR MIT"   # PROPOSED, see docs/adr/0008-license.md (owner approval pending)
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

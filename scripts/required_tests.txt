@@ -1,0 +1,2 @@
+# one test path suffix per line; scripts/check_required.py verifies each ran and passed (not ignored)
+# filled per gate as tests land (P1/G1..G4)
