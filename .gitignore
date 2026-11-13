@@ -1,6 +1,27 @@
+# build output
 target/
 node_modules/
+dist/
+*.exe
+*.msi
+*.zip
+*.part
+*.eid-part
+*.eid-state*
+# external tools are downloaded after user consent, never committed
 tools/yt-dlp*
 tools/ffmpeg*
-*.part
+tools/deno*
+# secrets / local config
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+secrets/
 .codex-tmp/
+# editor / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

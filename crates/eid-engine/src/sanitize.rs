@@ -1,0 +1,204 @@
+//! File-name sanitation. Everything that names a file on disk and comes from outside
+//! (Content-Disposition, URL, extension, state file, imported list) goes through here.
+
+/// Longest name (bytes, UTF-8) we ever produce; engine suffixes (`.eid-part`,
+/// `.eid-state.tmp`, ` (999)`) stay far below the 255 limit of common filesystems.
+pub const MAX_NAME_BYTES: usize = 200;
+
+const FALLBACK: &str = "download";
+
+fn is_forbidden_char(c: char) -> bool {
+    matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        || c.is_control()
+        // bidi controls & invisible formatting that can disguise an extension (U+202E ...)
+        || matches!(c as u32,
+            0x061C | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
+            | 0xFEFF | 0x180E)
+}
+
+fn is_reserved_device(stem: &str) -> bool {
+    let up = stem.trim_end_matches([' ', '.']).to_ascii_uppercase();
+    matches!(up.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || ((up.starts_with("COM") || up.starts_with("LPT"))
+            && up.len() == 4
+            && matches!(up.as_bytes()[3], b'1'..=b'9'))
+        // superscript digits COM¹ COM² COM³ LPT¹ ...
+        || ((up.starts_with("COM") || up.starts_with("LPT"))
+            && up.chars().count() == 4
+            && matches!(up.chars().nth(3), Some('\u{b9}' | '\u{b2}' | '\u{b3}')))
+}
+
+fn truncate_bytes(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        return name.to_string();
+    }
+    // keep a short extension if there is one
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if name.len() - i <= 16 && i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let budget = max.saturating_sub(ext.len());
+    let mut end = budget.min(stem.len());
+    while end > 0 && !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &stem[..end], ext)
+}
+
+/// Turn untrusted text into a single safe file-name component. Never returns an empty
+/// string, never contains a path separator, `..`, a Windows-forbidden char, a bidi override,
+/// a reserved device name, or a trailing dot/space.
+pub fn sanitize_file_name(raw: &str) -> String {
+    // 1. last component only (both separator kinds), so "../../x" -> "x", "C:\\a\\b.txt" -> "b.txt"
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    // 2. replace forbidden chars (this also kills NTFS ADS "a.txt:stream" and drive prefixes)
+    let mut s: String = base
+        .chars()
+        .map(|c| if is_forbidden_char(c) { '_' } else { c })
+        .collect();
+    // 3. no trailing dots/spaces, no leading spaces
+    s = s
+        .trim_end_matches([' ', '.'])
+        .trim_start_matches(' ')
+        .to_string();
+    // 4. dots-only names
+    if s.is_empty() || s.chars().all(|c| c == '.') {
+        return FALLBACK.to_string();
+    }
+    // 5. reserved device names (with or without extension, "CON.txt", "con .txt")
+    let stem = s.split('.').next().unwrap_or("");
+    if is_reserved_device(stem) {
+        s = format!("_{s}");
+    }
+    // 6. length
+    let s = truncate_bytes(&s, MAX_NAME_BYTES);
+    let s = s.trim_end_matches([' ', '.']).to_string();
+    if s.is_empty() {
+        FALLBACK.to_string()
+    } else {
+        s
+    }
+}
+
+/// `true` if `name` is exactly what [`sanitize_file_name`] would produce, i.e. safe to trust
+/// when read back from a state file.
+pub fn is_safe_stored_name(name: &str) -> bool {
+    !name.is_empty() && sanitize_file_name(name) == name
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_safe(out: &str) {
+        assert!(!out.is_empty());
+        assert!(
+            !out.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*']),
+            "{out:?}"
+        );
+        assert!(!out.ends_with(['.', ' ']), "{out:?}");
+        assert!(out != "." && out != "..");
+        assert!(out.len() <= MAX_NAME_BYTES);
+        assert!(!out.contains('\u{202e}'));
+        let stem = out.split('.').next().unwrap();
+        assert!(!is_reserved_device(stem), "reserved: {out:?}");
+        assert!(is_safe_stored_name(out), "not idempotent: {out:?}");
+    }
+
+    #[test]
+    fn security_sanitize_traversal_and_absolute() {
+        for (i, want) in [
+            ("../../x", "x"),
+            ("..\\..\\x.txt", "x.txt"),
+            ("/etc/passwd", "passwd"),
+            ("C:\\Windows\\system32\\evil.dll", "evil.dll"),
+            ("\\\\server\\share\\f.bin", "f.bin"),
+            ("\\\\?\\C:\\x\\y.zip", "y.zip"),
+            ("a/../../b.txt", "b.txt"),
+            ("..", "download"),
+            ("...", "download"),
+            ("", "download"),
+            ("   ", "download"),
+            ("./", "download"),
+        ] {
+            let o = sanitize_file_name(i);
+            assert_eq!(o, want, "input {i:?}");
+            assert_safe(&o);
+        }
+    }
+
+    #[test]
+    fn security_windows_reserved_names_and_ads_and_trailing() {
+        for i in [
+            "CON",
+            "con",
+            "NUL.txt",
+            "aux.tar.gz",
+            "COM1",
+            "lpt9.log",
+            "PRN ",
+            "con .txt",
+            "CON.",
+            "COM\u{b9}",
+            "CONIN$",
+            "a.txt:ads",
+            "a.txt:$DATA",
+            "name:stream:$DATA",
+            "a.txt.",
+            "a.txt ",
+            "a.txt. . ",
+            "file<name>.txt",
+            "q?*.zip",
+            "tab\tname",
+            "nul\0byte",
+        ] {
+            let o = sanitize_file_name(i);
+            assert_safe(&o);
+        }
+        assert_eq!(sanitize_file_name("a.txt:ads"), "a.txt_ads");
+        assert_eq!(sanitize_file_name("NUL.txt"), "_NUL.txt");
+        assert_eq!(sanitize_file_name("a.txt. . "), "a.txt");
+        assert_eq!(sanitize_file_name("CON"), "_CON");
+    }
+
+    #[test]
+    fn security_rtl_override_and_control_chars_stripped() {
+        let o = sanitize_file_name("invoice\u{202e}fdp.exe");
+        assert!(!o.contains('\u{202e}'));
+        assert_safe(&o);
+        let o = sanitize_file_name("a\u{200f}b\u{2066}c\u{feff}.txt");
+        assert_eq!(o, "a_b_c_.txt");
+    }
+
+    #[test]
+    fn security_name_suffixes_stay_within_max_bytes_arabic() {
+        for n in 190..=205 {
+            // 2-byte Arabic letters + extension
+            let name = format!("{}.zip", "ع".repeat(n / 2));
+            let o = sanitize_file_name(&name);
+            assert!(o.len() <= MAX_NAME_BYTES, "len {}", o.len());
+            assert!(o.ends_with(".zip"));
+            assert!(std::str::from_utf8(o.as_bytes()).is_ok());
+            // engine suffixes keep us under 255
+            assert!(o.len() + ".eid-state.tmp".len() + " (999)".len() < 255);
+            assert_safe(&o);
+        }
+        let name = "ع".repeat(300);
+        assert_safe(&sanitize_file_name(&name));
+    }
+
+    #[test]
+    fn arabic_and_normal_names_are_preserved() {
+        assert_eq!(sanitize_file_name("تقرير 2026.pdf"), "تقرير 2026.pdf");
+        assert_eq!(sanitize_file_name("movie (1).mp4"), "movie (1).mp4");
+        assert_eq!(sanitize_file_name(".bashrc"), ".bashrc");
+    }
+
+    #[test]
+    fn stored_name_check_rejects_unsanitized() {
+        assert!(!is_safe_stored_name("../x"));
+        assert!(!is_safe_stored_name("CON"));
+        assert!(!is_safe_stored_name(""));
+        assert!(is_safe_stored_name("ok.bin"));
+    }
+}

@@ -1,0 +1,36 @@
+# Cheap, runs on every push/PR that touches code. (Private repo: Linux minutes cost 1x.)
+name: ci-linux
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**/*.md', 'LICENSE*']
+  pull_request:
+    paths-ignore: ['docs/**', '**/*.md', 'LICENSE*']
+permissions:
+  contents: read
+env:
+  EID_REQUIRE_SHELLS: '1'   # shell-injection tests must not silently skip when pwsh/sh is missing
+  CARGO_TERM_COLOR: always
+concurrency:
+  group: ci-linux-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4          # TODO(P7): pin every action by commit SHA
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --no-fail-fast
+      - run: python3 scripts/check_required.py
+      - run: python3 scripts/check_required.py --release   # overflow/security tests in release mode
+      - name: Windows target still compiles (compile-check only, never executed here)
+        run: cargo check --workspace --all-targets --target x86_64-pc-windows-gnu
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        continue-on-error: true            # becomes blocking once deny.toml exists (P7)

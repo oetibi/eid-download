@@ -1,0 +1,61 @@
+# Expensive (Windows minutes count 2x on private repos): NOT on every push.
+# Runs on pull_request, version tags and manual dispatch only.
+name: ci-windows
+on:
+  pull_request:
+    paths-ignore: ['docs/**', '**/*.md', 'LICENSE*']
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  EID_REQUIRE_SHELLS: '1'   # shell-injection tests must not silently skip when pwsh/sh is missing
+  CARGO_TERM_COLOR: always
+concurrency:
+  group: ci-windows-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --no-fail-fast
+      - run: python scripts/check_required.py
+      - name: PowerShell + cmd injection matrix (real Windows shells)
+        run: cargo test -p eid-cli --test shell_injection -- --nocapture
+        continue-on-error: false
+        if: ${{ hashFiles('crates/eid-cli/tests/shell_injection.rs') != '' }}
+      - run: cargo build --release -p eid-cli
+      # ---- Desktop app + NSIS installer: only once the Tauri app exists (phase P5)
+      - uses: actions/setup-node@v4
+        if: ${{ hashFiles('apps/desktop/package.json') != '' }}
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Build NSIS installer (per-user, no admin)
+        if: ${{ hashFiles('apps/desktop/package.json') != '' }}
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run tauri build -- --bundles nsis
+      - name: SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = @('target\release\eid.exe') + (Get-ChildItem -Recurse -Path target\release\bundle\nsis -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object FullName)
+          $files | ForEach-Object { $h = Get-FileHash $_ -Algorithm SHA256; "$($h.Hash.ToLower())  $(Split-Path $_ -Leaf)" } | Tee-Object -FilePath SHA256SUMS.txt
+          (Get-ChildItem -Recurse -Path target\release\bundle\nsis -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object FullName) | Out-File -FilePath installers.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eid-windows-x64
+          retention-days: 14
+          path: |
+            target/release/eid.exe
+            target/release/bundle/nsis/*.exe
+            SHA256SUMS.txt

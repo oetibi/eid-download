@@ -8,4 +8,23 @@ license.workspace = true
 name = "eid"
 path = "src/main.rs"
 
+[features]
+# Crash injection for the integration tests only (never enabled in releases).
+test-faults = ["eid-engine/test-faults"]
+
 [dependencies]
+eid-engine = { path = "../eid-engine" }
+eid-platform = { path = "../eid-platform" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+
+[dev-dependencies]
+eid-testserver = { path = "../eid-testserver" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util"] }
+sha2 = "0.10"
+tempfile = "3"
+eid-cli = { path = ".", features = ["test-faults"] }
+eid-platform = { path = "../eid-platform" }
+eid-engine = { path = "../eid-engine" }
+
+[lints]
+workspace = true
