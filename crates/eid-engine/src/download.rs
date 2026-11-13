@@ -4,7 +4,9 @@ use crate::config::{Config, MAX_CONNECTIONS, MAX_TOTAL_BYTES};
 use crate::error::{Error, Result};
 use crate::fault;
 use crate::filename;
-use crate::http::{self, parse_content_range, parse_retry_after, strong_etag};
+use crate::http::{
+    self, parse_content_range, parse_retry_after, strong_etag, strong_last_modified,
+};
 use crate::limiter::Limiter;
 use crate::sanitize::sanitize_file_name;
 use crate::state::{self, SegState, State, STATE_VERSION};
@@ -28,6 +30,75 @@ use url::Url;
 
 pub const PART_SUFFIX: &str = ".eid-part";
 pub const STATE_SUFFIX: &str = ".eid-state";
+pub const LOCK_SUFFIX: &str = ".eid-lock";
+
+/// Exclusive ownership of one job (review M1): an advisory lock (`flock` / `LockFileEx`) on a
+/// STABLE per-job file `<name>.eid-lock` that exists independently of the part file, so it
+/// covers a missing part, restarts and finalization. Acquired BEFORE any state is read; held
+/// until the job ends (including across restarts). The file is deleted only at the very end of
+/// a successful finalization, while still locked.
+#[derive(Debug)]
+pub struct JobLock {
+    file: File,
+    path: PathBuf,
+    name: String,
+}
+
+impl JobLock {
+    /// Take the lock for job `name` in `dir`; `Err(Busy)` if another job/process holds it.
+    pub fn acquire(dir: &Path, name: &str) -> Result<JobLock> {
+        let path = dir.join(format!("{name}{LOCK_SUFFIX}"));
+        // The lock file is deleted while locked (end of a finished job). A process that opened the
+        // path BEFORE the deletion and locks AFTER the owner released would hold an ORPHAN inode
+        // while a third process creates and locks a fresh file at the same path: two owners.
+        // So after locking, the handle must still be the file the path names; else retry.
+        for _ in 0..32 {
+            let file = match pfs::open_or_create_lock_file(&path) {
+                Ok(f) => f,
+                Err(e) if pfs::is_lock_contention(&e) => return Err(Error::Busy),
+                Err(e) => return Err(Error::io("open job lock")(e)),
+            };
+            fault::hit("lock_after_open");
+            if !pfs::try_lock_exclusive(&file).map_err(Error::io("lock job"))? {
+                return Err(Error::Busy);
+            }
+            match pfs::handle_is_path(&file, &path) {
+                Ok(true) => {
+                    return Ok(JobLock {
+                        file,
+                        path,
+                        name: name.to_string(),
+                    })
+                }
+                Ok(false) => continue, // orphan inode: reopen the path
+                Err(e) if pfs::is_lock_contention(&e) => return Err(Error::Busy),
+                Err(e) => return Err(Error::io("verify job lock")(e)),
+            }
+        }
+        Err(Error::Busy)
+    }
+
+    /// Lock for the job whose sidecar is `state_path` (`<name>.eid-state`).
+    pub fn for_state_file(state_path: &Path) -> Result<JobLock> {
+        let fname = state_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(STATE_SUFFIX))
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| Error::InvalidInput("not a .eid-state file".into()))?;
+        let dir = match state_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        JobLock::acquire(dir, fname)
+    }
+
+    /// Delete the lock file while still holding the lock (end of a finished job).
+    pub fn remove_file_keep_lock(&self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = &self.file;
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -297,6 +368,7 @@ impl Ctx {
         let file = self.file.clone();
         let r = tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
             let (off, n) = table.lock().unwrap().reserve(seg, data.len() as u64);
+            fault::hit("write_reserved");
             fault::jitter();
             if n > 0 {
                 pfs::write_all_at(&file, &data[..n as usize], off)?;
@@ -688,7 +760,12 @@ impl Net<'_> {
         let final_url = resp.url().clone();
         let cd = http::header_str(resp.headers(), "content-disposition");
         let etag = http::header_str(resp.headers(), "etag").and_then(|v| strong_etag(&v));
-        let lm = http::header_str(resp.headers(), "last-modified");
+        // Last-Modified alone is weak unless the server's Date is >= LM + 1 s (RFC 9110 8.8.2.2);
+        // a weak one is dropped here, so it is never stored, never sent in If-Range, and a
+        // download with no other validator is one stream with whole-file restart (review B3).
+        let lm = http::header_str(resp.headers(), "last-modified").and_then(|v| {
+            strong_last_modified(&v, http::header_str(resp.headers(), "date").as_deref())
+        });
         match resp.status() {
             StatusCode::PARTIAL_CONTENT if used_range => {
                 let cr = http::header_str(resp.headers(), "content-range")
@@ -750,11 +827,12 @@ struct Files {
     part: PathBuf,
     state: PathBuf,
     file: File,
+    lock: JobLock,
 }
 
 /// Atomically claim a unique `<name>.eid-part` (create_new) and make sure no final file or
 /// stale state with that name exists.
-fn claim_files(dir: &Path, base: &str) -> Result<Files> {
+fn claim_files(dir: &Path, base: &str, held: &mut Option<JobLock>) -> Result<Files> {
     for n in 0..1000u32 {
         let cand = if n == 0 {
             base.to_string()
@@ -769,6 +847,18 @@ fn claim_files(dir: &Path, base: &str) -> Result<Files> {
             continue;
         }
         let part = dir.join(format!("{cand}{PART_SUFFIX}"));
+        // job ownership first (a lock already held by a restarting resume is reused as is)
+        let (lock, was_held) = match held.take() {
+            Some(l) if l.name == cand => (l, true),
+            other => {
+                *held = other;
+                match JobLock::acquire(dir, &cand) {
+                    Ok(l) => (l, false),
+                    Err(Error::Busy) => continue, // someone else owns this name
+                    Err(e) => return Err(e),
+                }
+            }
+        };
         match pfs::create_new_file(&part) {
             Ok(file) => {
                 return Ok(Files {
@@ -776,9 +866,15 @@ fn claim_files(dir: &Path, base: &str) -> Result<Files> {
                     part,
                     state,
                     file,
-                })
+                    lock,
+                });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if was_held {
+                    *held = Some(lock);
+                }
+                continue;
+            }
             Err(e) => {
                 return Err(Error::Io {
                     context: "create part file",
@@ -792,8 +888,13 @@ fn claim_files(dir: &Path, base: &str) -> Result<Files> {
     ))
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut f = pfs::open_regular_nofollow_read(path).map_err(Error::io("open for hashing"))?;
+/// Hash through an already-open (locked) handle: on Windows an exclusive lock blocks reads
+/// through any OTHER handle, and hashing the very handle we verified also closes a path swap.
+fn sha256_handle(f: &File) -> Result<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut f = f.try_clone().map_err(Error::io("clone for hashing"))?;
+    f.seek(SeekFrom::Start(0))
+        .map_err(Error::io("seek for hashing"))?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
@@ -806,7 +907,16 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(state::hex(&h.finalize()))
 }
 
-fn finalize_name(dir: &Path, part: &Path, name: &str) -> Result<PathBuf> {
+/// Durably record (name, digest) in the state BEFORE each rename attempt, so recovery after a
+/// crash between rename and state removal verifies the exact destination by content.
+fn finalize_name(
+    dir: &Path,
+    part: &Path,
+    name: &str,
+    state_path: &Path,
+    sha256: &str,
+) -> Result<PathBuf> {
+    let mut st = state::load(state_path)?;
     for n in 0..1000u32 {
         let cand = if n == 0 {
             name.to_string()
@@ -814,6 +924,11 @@ fn finalize_name(dir: &Path, part: &Path, name: &str) -> Result<PathBuf> {
             numbered(name, n)
         };
         let dest = dir.join(&cand);
+        st.finalize = Some(state::Finalize {
+            name: cand.clone(),
+            sha256: sha256.to_string(),
+        });
+        state::save(state_path, &st)?;
         match pfs::rename_noreplace(part, &dest) {
             Ok(()) => return Ok(dest),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1122,6 +1237,37 @@ pub async fn download(
     sink: EventSink,
     cancel: CancellationToken,
 ) -> Result<Outcome> {
+    supervised(cancel, move |c| download_inner(spec, cfg, sink, c, None)).await
+}
+
+/// Run the job on its OWN task so that dropping/aborting the caller's future cannot abandon
+/// in-flight blocking disk work (review M4): the drop guard only REQUESTS cancellation; the job
+/// keeps its exclusive ownership (file lock) until every write/checkpoint has drained and the
+/// final checkpoint is durable.
+async fn supervised<F, Fut>(cancel: CancellationToken, f: F) -> Result<Outcome>
+where
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: std::future::Future<Output = Result<Outcome>> + Send + 'static,
+{
+    let token = cancel.child_token();
+    let guard = token.clone().drop_guard();
+    let handle = tokio::spawn(f(token));
+    let r = handle.await;
+    guard.disarm();
+    match r {
+        Ok(r) => r,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => Err(Error::Network(format!("job task failed: {e}"))),
+    }
+}
+
+async fn download_inner(
+    spec: JobSpec,
+    cfg: Config,
+    sink: EventSink,
+    cancel: CancellationToken,
+    mut held: Option<JobLock>,
+) -> Result<Outcome> {
     let st = prepare(&spec)?;
     let client = http::build_client(&cfg)?;
     let mut restarts = 0u32;
@@ -1144,7 +1290,10 @@ pub async fn download(
             }
         };
         if files.is_none() {
-            files = Some(claim_files(&st.dir, &name)?);
+            files = Some(claim_files(&st.dir, &name, &mut held)?);
+            if let Some(old) = held.take() {
+                old.remove_file_keep_lock(); // handed-over lock for a name we did not end up using
+            }
         }
         let f = files.as_ref().unwrap();
         sink(Event::Started {
@@ -1160,16 +1309,43 @@ pub async fn download(
             restarts,
         };
         let file = Arc::new(f.file.try_clone().map_err(Error::io("clone file handle"))?);
+        // Without a validator (ETag/Last-Modified) nothing proves that a later range request is
+        // served from the SAME representation as the first one, so only the original response
+        // is consumed, as ONE stream; a disconnect restarts the whole file (review B3).
+        let can_resume = probe.etag.is_some() || probe.last_modified.is_some();
+        let ranged_mode = probe.ranged && can_resume;
+        // Review B1: the NEW generation's state (zero frontier, new validators) replaces the old
+        // one — and the old backup is deleted — BEFORE the data is truncated. A crash anywhere
+        // after this point can no longer pair an old checkpoint's frontiers with new-generation
+        // data; a crash before it leaves old state + old data, which are still consistent.
+        let init = if ranged_mode {
+            make_state(
+                &info,
+                probe.total,
+                true,
+                Table::new(probe.total.unwrap()).snapshot(),
+            )
+        } else {
+            make_state(&info, probe.total, false, vec![])
+        };
+        let sp = f.state.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            state::save(&sp, &init)?;
+            state::remove_backup(&sp)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| Error::Network(e.to_string()))??;
         file.set_len(0).map_err(Error::io("truncate"))?;
         if let Some(t) = probe.total {
             pfs::preallocate(&file, t).map_err(Error::io("preallocate"))?;
         }
+        fault::hit("restart_truncated");
         let peaks: (u64, usize);
-        let result: Result<u64> = if probe.ranged {
+        let result: Result<u64> = if ranged_mode {
             let total = probe.total.unwrap();
             let state_path = f.state.clone();
             let table = Arc::new(Mutex::new(Table::new(total)));
-            let can_resume = probe.etag.is_some() || probe.last_modified.is_some();
             let ctx = Arc::new(Ctx {
                 cfg: cfg.clone(),
                 client: client.clone(),
@@ -1191,18 +1367,6 @@ pub async fn download(
                 done_bytes: AtomicU64::new(0),
                 gate: Mutex::new(Instant::now()),
             });
-            // initial state so that even a crash before the first checkpoint is recoverable
-            let init = make_state(
-                &info,
-                Some(total),
-                true,
-                ctx.table.lock().unwrap().snapshot(),
-            );
-            let sp = state_path.clone();
-            tokio::task::spawn_blocking(move || state::save(&sp, &init))
-                .await
-                .map_err(|e| Error::Network(e.to_string()))??;
-            let _ = can_resume; // validators absent => resume() restarts; still keep the state
             let r = run_ranged(ctx.clone(), &info, &state_path, Some(probe.resp)).await;
             let peak = (
                 ctx.peak_buffered.load(Ordering::SeqCst),
@@ -1211,11 +1375,6 @@ pub async fn download(
             peaks = peak;
             r.map(|_| total)
         } else {
-            let init = make_state(&info, probe.total, false, vec![]);
-            let sp = f.state.clone();
-            tokio::task::spawn_blocking(move || state::save(&sp, &init))
-                .await
-                .map_err(|e| Error::Network(e.to_string()))??;
             peaks = (0, 1);
             run_single(&net, &file, probe.resp, probe.total, job_limiter(&cfg)).await
         };
@@ -1226,7 +1385,7 @@ pub async fn download(
                     restarts,
                     peaks,
                 };
-                return finish(&cfg, &st.dir, files.take().unwrap(), file, done, &sink);
+                return finish(&cfg, &st.dir, files.take().unwrap(), file, done, &sink).await;
             }
             Err(Error::ServerChanged) if restarts < cfg.max_restarts => {
                 restarts += 1;
@@ -1247,7 +1406,27 @@ struct Done {
     peaks: (u64, usize),
 }
 
-fn finish(
+/// Finalization does blocking disk work (fsync, full-file hash, rename, state removal): run it on
+/// the blocking pool, never on an executor thread (AGENTS §6.7, review m2/B2).
+async fn finish(
+    cfg: &Config,
+    dir: &Path,
+    files: Files,
+    file: Arc<File>,
+    done: Done,
+    sink: &EventSink,
+) -> Result<Outcome> {
+    let (cfg, dir, sink) = (cfg.clone(), dir.to_path_buf(), sink.clone());
+    match tokio::task::spawn_blocking(move || finish_blocking(&cfg, &dir, files, file, done, &sink))
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => Err(Error::Network(format!("finalization task failed: {e}"))),
+    }
+}
+
+fn finish_blocking(
     cfg: &Config,
     dir: &Path,
     files: Files,
@@ -1267,27 +1446,27 @@ fn finish(
             "final file length {len} != expected {size}"
         )));
     }
-    drop(file);
+    // Keep BOTH handles (and with them the exclusive job lock) until the final rename and the
+    // state removal are done (review M1).
     let Files {
         part,
         state: state_path,
         file: f0,
+        lock,
         ..
     } = files;
-    drop(f0);
-    let digest = if cfg.compute_sha256 || cfg.expected_sha256.is_some() {
-        Some(sha256_file(&part)?)
-    } else {
-        None
-    };
-    if let (Some(want), Some(got)) = (&cfg.expected_sha256, &digest) {
-        if !want.eq_ignore_ascii_case(got) {
+    // The digest is always computed: the finalization record below needs it so that a crash
+    // after the rename can be recognised by content, never by file size alone (review B2).
+    let full_digest = sha256_handle(&file)?;
+    if let Some(want) = &cfg.expected_sha256 {
+        if !want.eq_ignore_ascii_case(&full_digest) {
             return Err(Error::Checksum {
                 expected: want.clone(),
-                actual: got.clone(),
+                actual: full_digest,
             });
         }
     }
+    let digest = (cfg.compute_sha256 || cfg.expected_sha256.is_some()).then(|| full_digest.clone());
     fault::hit("final_before_rename");
     let dest_name = part
         .file_name()
@@ -1295,10 +1474,14 @@ fn finish(
         .and_then(|n| n.strip_suffix(PART_SUFFIX))
         .ok_or_else(|| Error::InvalidInput("bad part name".into()))?
         .to_string();
-    let dest = finalize_name(dir, &part, &dest_name)?;
+    let dest = finalize_name(dir, &part, &dest_name, &state_path, &full_digest)?;
     fault::hit("part_renamed_final");
     state::remove_all(&state_path);
     let _ = pfs::sync_dir(dir);
+    drop(f0);
+    drop(file);
+    lock.remove_file_keep_lock();
+    drop(lock);
     sink(Event::Finished { size });
     Ok(Outcome {
         path: dest,
@@ -1318,7 +1501,36 @@ pub async fn resume(
     sink: EventSink,
     cancel: CancellationToken,
 ) -> Result<Outcome> {
-    let st = state::load(state_path)?;
+    let state_path = state_path.to_path_buf();
+    supervised(cancel, move |c| async move {
+        resume_inner(&state_path, cfg, sink, c).await
+    })
+    .await
+}
+
+async fn resume_inner(
+    state_path: &Path,
+    cfg: Config,
+    sink: EventSink,
+    cancel: CancellationToken,
+) -> Result<Outcome> {
+    // Job ownership FIRST: before the state is read, and independent of the part file, so it
+    // also covers a missing part, restarts and finalization (review M1).
+    let lock = JobLock::for_state_file(state_path)?;
+    let st = match state::load(state_path) {
+        Ok(st) => st,
+        Err(e) => {
+            if !state_path.exists() {
+                lock.remove_file_keep_lock(); // we created it just now; nothing to protect
+            }
+            return Err(e);
+        }
+    };
+    if st.file_name != lock.name {
+        return Err(Error::BadState(
+            "file name in the state does not match the state file name".into(),
+        ));
+    }
     let dir = state_path
         .parent()
         .map(|p| {
@@ -1331,25 +1543,40 @@ pub async fn resume(
         .unwrap_or(Path::new("."))
         .to_path_buf();
     let part = dir.join(format!("{}{}", st.file_name, PART_SUFFIX));
-    // Crash after the final rename but before the state was removed: the job is already done.
+    // Crash after the final rename but before the state was removed: the job is already done,
+    // but ONLY if the state carries the finalization record written before the rename and the
+    // recorded destination still has exactly the recorded content. A same-size file that merely
+    // shares the name proves nothing (review B2) and is never adopted.
     if !part.exists() {
-        if let Some(t) = st.total {
-            let fin = dir.join(&st.file_name);
-            if std::fs::symlink_metadata(&fin).is_ok_and(|m| m.is_file() && m.len() == t) {
+        if let (Some(t), Some(fz)) = (st.total, &st.finalize) {
+            let fin = dir.join(&fz.name);
+            // open once (no symlink, single link), then check size and hash THROUGH that handle
+            // and off the executor thread: no path re-resolution between check and use
+            let fin_ok = match pfs::open_regular_nofollow_read(&fin) {
+                Ok(h) if h.metadata().is_ok_and(|m| m.len() == t) => {
+                    let want = fz.sha256.clone();
+                    tokio::task::spawn_blocking(move || sha256_handle(&h).map(|d| d == want))
+                        .await
+                        .map_err(|e| Error::Network(format!("hash task failed: {e}")))??
+                }
+                _ => false,
+            };
+            if fin_ok {
                 let digest = if cfg.compute_sha256 || cfg.expected_sha256.is_some() {
-                    Some(sha256_file(&fin)?)
+                    Some(fz.sha256.clone())
                 } else {
                     None
                 };
-                if let (Some(want), Some(got)) = (&cfg.expected_sha256, &digest) {
-                    if !want.eq_ignore_ascii_case(got) {
+                if let Some(want) = &cfg.expected_sha256 {
+                    if !want.eq_ignore_ascii_case(&fz.sha256) {
                         return Err(Error::Checksum {
                             expected: want.clone(),
-                            actual: got.clone(),
+                            actual: fz.sha256.clone(),
                         });
                     }
                 }
                 state::remove_all(state_path);
+                lock.remove_file_keep_lock();
                 sink(Event::Finished { size: t });
                 return Ok(Outcome {
                     path: fin,
@@ -1391,7 +1618,8 @@ pub async fn resume(
         });
         let _ = std::fs::remove_file(&part);
         state::remove_all(state_path);
-        return download(
+        // the job lock is handed over, never released in between (review M1)
+        return download_inner(
             JobSpec {
                 url: st.url.clone(),
                 dir,
@@ -1400,6 +1628,7 @@ pub async fn resume(
             cfg,
             sink,
             cancel,
+            Some(lock),
         )
         .await;
     };
@@ -1461,6 +1690,7 @@ pub async fn resume(
                 part: part_name,
                 state: state_path.to_path_buf(),
                 file: f0,
+                lock,
             };
             finish(
                 &cfg,
@@ -1474,6 +1704,7 @@ pub async fn resume(
                 },
                 &sink,
             )
+            .await
         }
         Err(Error::ServerChanged) => {
             sink(Event::Restarted {
@@ -1483,7 +1714,7 @@ pub async fn resume(
             drop(file);
             let _ = std::fs::remove_file(&part);
             state::remove_all(state_path);
-            download(
+            download_inner(
                 JobSpec {
                     url: st.url.clone(),
                     dir,
@@ -1492,6 +1723,7 @@ pub async fn resume(
                 cfg,
                 sink,
                 cancel,
+                Some(lock),
             )
             .await
         }

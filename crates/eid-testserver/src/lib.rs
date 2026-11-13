@@ -91,6 +91,8 @@ pub struct ChangeAfter {
 pub struct Behavior {
     pub etag: EtagMode,
     pub last_modified: Option<String>,
+    /// Sent as the `Date` header when set (the server sends none otherwise).
+    pub date: Option<String>,
     pub advertise_ranges: bool,
     pub range: RangeMode,
     pub length_lie: LengthLie,
@@ -118,6 +120,7 @@ impl Default for Behavior {
         Self {
             etag: EtagMode::Auto,
             last_modified: None,
+            date: None,
             advertise_ranges: true,
             range: RangeMode::Honor,
             length_lie: LengthLie::None,

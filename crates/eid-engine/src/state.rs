@@ -207,6 +207,44 @@ pub fn load(path: &Path) -> Result<State> {
     }
 }
 
+/// Delete only the `.bak` generation (used when a restart replaces the state, so the backup can
+/// never certify data of a previous representation) and make the deletion durable.
+///
+/// Review B1: this MUST NOT fail silently. A `.bak` that survives (an antivirus/indexer holds it
+/// open on Windows) would later be picked up by `load` as a valid older generation next to
+/// new-generation data. Bounded retries on any error (AGENTS §6.9), then `sync_dir`; the caller
+/// aborts the restart BEFORE truncating when this returns `Err`.
+pub fn remove_backup(path: &Path) -> Result<()> {
+    remove_backup_with(path, 8, std::time::Duration::from_millis(20))
+}
+
+pub fn remove_backup_with(path: &Path, attempts: u32, step: std::time::Duration) -> Result<()> {
+    let bak = bak_path(path);
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..attempts.max(1) {
+        let r =
+            crate::fault::fail("remove_backup").and_then(|_| match std::fs::remove_file(&bak) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            });
+        match r {
+            Ok(()) => {
+                if let Some(dir) = path.parent() {
+                    pfs::sync_dir(dir).map_err(Error::io("sync dir after removing .bak"))?;
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(step * (attempt + 1));
+            }
+        }
+    }
+    Err(Error::io("remove stale .bak")(
+        last.expect("at least one attempt"),
+    ))
+}
+
 pub fn remove_all(path: &Path) {
     for p in [path.to_path_buf(), bak_path(path), tmp_path(path)] {
         let _ = std::fs::remove_file(p);

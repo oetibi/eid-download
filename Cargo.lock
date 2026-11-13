@@ -192,6 +192,7 @@ name = "eid-platform"
 version = "0.0.1"
 dependencies = [
  "libc",
+ "tempfile",
  "windows-sys 0.59.0",
 ]
 

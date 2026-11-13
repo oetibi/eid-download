@@ -117,6 +117,46 @@ pub fn strong_etag(v: &str) -> Option<String> {
     }
 }
 
+/// Seconds since the Unix epoch of an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`, RFC 9110
+/// 5.6.7). The obsolete formats are not accepted: an unparsable date makes the validator weak.
+pub fn parse_imf_fixdate(v: &str) -> Option<i64> {
+    let p: Vec<&str> = v.split_whitespace().collect();
+    if p.len() != 6 || p[5] != "GMT" || !p[0].ends_with(',') {
+        return None;
+    }
+    let day: i64 = p[1].parse().ok().filter(|d| (1..=31).contains(d))?;
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .position(|m| *m == p[2])? as i64
+        + 1;
+    let year: i64 = p[3].parse().ok().filter(|y| (1970..=9999).contains(y))?;
+    let t: Vec<i64> = p[4].split(':').filter_map(|x| x.parse().ok()).collect();
+    if t.len() != 3 || t[0] > 23 || t[1] > 59 || t[2] > 60 {
+        return None;
+    }
+    // days from civil (Howard Hinnant)
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + t[0] * 3600 + t[1] * 60 + t[2])
+}
+
+/// `Last-Modified` is a STRONG validator only if the server's own `Date` is at least one second
+/// later (RFC 9110 8.8.2.2): otherwise the resource may change again within the same second.
+/// No `Date`, an unparsable date, or `Date < LM + 1s` => `None` (treated as no validator).
+pub fn strong_last_modified(lm: &str, date: Option<&str>) -> Option<String> {
+    let lm = lm.trim();
+    let l = parse_imf_fixdate(lm)?;
+    let d = parse_imf_fixdate(date?.trim())?;
+    (d > l).then(|| lm.to_string()) // whole seconds: d > l  <=>  d >= l + 1 s
+}
+
 pub fn header_str(h: &HeaderMap, name: &str) -> Option<String> {
     h.get(name)
         .and_then(|v| v.to_str().ok())
@@ -136,6 +176,32 @@ pub fn backoff(cfg: &Config, attempt: u32) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn imf_fixdate_and_strong_last_modified() {
+        use super::{parse_imf_fixdate as p, strong_last_modified as s};
+        assert_eq!(p("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
+        assert_eq!(p("Sun, 06 Nov 1994 08:49:37 GMT"), Some(784_111_777));
+        assert_eq!(p("Sat, 29 Feb 2020 12:00:00 GMT"), Some(1_582_977_600));
+        assert_eq!(p("06 Nov 1994 08:49:37"), None);
+        assert_eq!(p("Sunday, 06-Nov-94 08:49:37 GMT"), None);
+        let lm = "Sun, 06 Nov 1994 08:49:37 GMT";
+        assert!(
+            s(lm, Some("Sun, 06 Nov 1994 08:49:37 GMT")).is_none(),
+            "Date == LM"
+        );
+        assert!(
+            s(lm, Some("Sun, 06 Nov 1994 08:49:38 GMT")).is_some(),
+            "Date == LM+1s"
+        );
+        assert!(
+            s(lm, Some("Sun, 06 Nov 1994 08:49:36 GMT")).is_none(),
+            "Date < LM"
+        );
+        assert!(s(lm, None).is_none(), "no Date");
+        assert!(s(lm, Some("garbage")).is_none());
+        assert!(s("garbage", Some("Sun, 06 Nov 1994 08:49:38 GMT")).is_none());
+    }
+
     use super::*;
 
     #[test]

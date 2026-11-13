@@ -371,6 +371,7 @@ async fn length_change_during_download_is_detected() {
         throttle_bps: Some(4_000_000),
         etag: eid_testserver::EtagMode::None,
         last_modified: Some("Wed, 21 Oct 2026 07:28:00 GMT".into()),
+        date: Some("Wed, 21 Oct 2026 07:29:00 GMT".into()), // strong: Date >= LM + 1 s
         cut: Cut::EveryBytes(600_000),
         change_after: Some(ChangeAfter {
             requests: None,
@@ -386,4 +387,106 @@ async fn length_change_during_download_is_detected() {
     let (o, _) = get(&url, dir.path(), cfg).await.unwrap();
     assert_eq!(sha_of_file(&o.path), b.sha256_hex());
     assert!(o.restarts >= 1);
+}
+
+/// Review B3: a server that gives NO validator (no ETag, no Last-Modified) and silently swaps a
+/// same-size file after the probe must never produce a splice of two representations. Without
+/// a validator the engine must consume the original response as one stream and restart the
+/// whole file after a disconnect, so the result is one coherent version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_validator_same_size_change_never_splices_representations() {
+    let a = Content::Generated {
+        seed: 501,
+        len: 6 << 20,
+    };
+    let b = Content::Generated {
+        seed: 502,
+        len: 6 << 20,
+    };
+    let beh = Behavior {
+        etag: eid_testserver::EtagMode::None,
+        last_modified: None,
+        cut: Cut::AfterBytes {
+            conn_index: 1,
+            n: 1 << 20,
+        },
+        // the probe is request 1 (A); every later request is answered from B
+        change_after: Some(ChangeAfter {
+            requests: Some(1),
+            bytes_sent: None,
+            new_content: b.clone(),
+        }),
+        ..Behavior::default()
+    };
+    let (_srv, url) = serve("/nv.bin", a.clone(), beh).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = fast_cfg(4);
+    cfg.max_attempts = 20;
+    let (o, log) = get(&url, dir.path(), cfg).await.unwrap();
+    // the test only means something if the cut really forced a reconnect...
+    assert!(
+        log.count(|e| matches!(e, eid_engine::Event::Retry { .. })) >= 1,
+        "the disconnect never happened: the scenario was not exercised"
+    );
+    // ...and the coherent answer after the whole-file restart is the NEW representation, whole
+    assert_eq!(
+        sha_of_file(&o.path),
+        b.sha256_hex(),
+        "result is not one coherent version (spliced, or stale A + B)"
+    );
+}
+
+/// Review (RFC 9110 8.8.2.2): `Last-Modified` with no ETag is a strong validator only if the
+/// server's `Date` is >= LM + 1 s. With `Date == LM` it is weak: the engine must treat the
+/// download as having NO validator (one stream, no segments), even with 4 connections allowed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn last_modified_equal_to_date_is_a_weak_validator_so_the_download_is_one_stream() {
+    let content = Content::Generated {
+        seed: 801,
+        len: 8 << 20,
+    };
+    let beh = Behavior {
+        throttle_bps: Some(6_000_000),
+        etag: eid_testserver::EtagMode::None,
+        last_modified: Some("Wed, 21 Oct 2026 07:28:00 GMT".into()),
+        date: Some("Wed, 21 Oct 2026 07:28:00 GMT".into()), // Date == LM: weak
+        ..Behavior::default()
+    };
+    let (_srv, url) = serve("/lm-weak.bin", content.clone(), beh).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (o, log) = get(&url, dir.path(), fast_cfg(4)).await.unwrap();
+    assert_eq!(sha_of_file(&o.path), content.sha256_hex());
+    // the single-stream path emits no segment events (0); a segmented download shows 4
+    assert!(
+        log.peak_live_responses() <= 1,
+        "a weak Last-Modified must not be used to split the download (peak live responses = {})",
+        log.peak_live_responses()
+    );
+}
+
+/// Counterpart: `Date >= LM + 1 s` makes the same `Last-Modified` strong, so the download is
+/// segmented (several live responses) — proves the weak case above is the rule, not a harness
+/// artefact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn last_modified_one_second_before_date_is_a_strong_validator_so_the_download_is_segmented() {
+    let content = Content::Generated {
+        seed: 802,
+        len: 8 << 20,
+    };
+    let beh = Behavior {
+        throttle_bps: Some(6_000_000),
+        etag: eid_testserver::EtagMode::None,
+        last_modified: Some("Wed, 21 Oct 2026 07:28:00 GMT".into()),
+        date: Some("Wed, 21 Oct 2026 07:28:01 GMT".into()), // Date == LM + 1 s: strong
+        ..Behavior::default()
+    };
+    let (_srv, url) = serve("/lm-strong.bin", content.clone(), beh).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (o, log) = get(&url, dir.path(), fast_cfg(4)).await.unwrap();
+    assert_eq!(sha_of_file(&o.path), content.sha256_hex());
+    assert!(
+        log.peak_live_responses() > 1,
+        "a strong Last-Modified must allow segmenting (peak live responses = {})",
+        log.peak_live_responses()
+    );
 }

@@ -33,7 +33,9 @@ pub struct Config {
     pub job_limit_bps: Option<u64>,
     /// Verify the final file against this SHA-256 (hex).
     pub expected_sha256: Option<String>,
-    /// Compute and return SHA-256 of the final file.
+    /// Controls ONLY whether the SHA-256 is returned/displayed in the outcome. The digest is
+    /// ALWAYS computed at finish (on the blocking pool): the finalization record needs the
+    /// content identity to recognise a finished file after a crash (docs/DESIGN_NOTES.md).
     pub compute_sha256: bool,
     /// How many times a changed file restarts the download before failing.
     pub max_restarts: u32,

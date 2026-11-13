@@ -20,6 +20,8 @@ pub mod table;
 pub mod urlsafe;
 
 pub use config::Config;
+#[doc(hidden)]
+pub use download::JobLock; // exposed for the lock-race test only
 pub use download::{download, resume, Event, EventSink, JobSpec, Outcome};
 pub use error::{Error, Result};
 pub use limiter::Limiter;

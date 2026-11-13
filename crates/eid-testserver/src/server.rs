@@ -574,6 +574,9 @@ async fn send_response(
         if let Some(date) = &b.last_modified {
             headers.push_str(&format!("Last-Modified: {date}\r\n"));
         }
+        if let Some(date) = &b.date {
+            headers.push_str(&format!("Date: {date}\r\n"));
+        }
         if b.advertise_ranges && !(b.head_lies && req.method == "HEAD") {
             headers.push_str("Accept-Ranges: bytes\r\n");
         }
