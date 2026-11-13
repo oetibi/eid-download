@@ -80,11 +80,16 @@ async fn one_connection_single_stream_retry_drops_old_body_first() {
     let (srv, url) = serve("/s.bin", content.clone(), b).await;
     let dir = tempfile::tempdir().unwrap();
     let watch = SocketWatch::start(&srv.base_url());
-    let (o, log) =
-        tokio::time::timeout(Duration::from_secs(60), get(&url, dir.path(), fast_cfg(1)))
-            .await
-            .unwrap_or_else(|_| panic!("single-stream retry hung with connections = 1"))
-            .unwrap();
+    let mut cfg = fast_cfg(1);
+    cfg.stall_timeout = Duration::from_millis(400);
+    // a long backoff leaves hyper ample time to close the dropped socket asynchronously, so this
+    // test measures only the ORDER (old body dropped before the retry), not scheduler luck
+    cfg.backoff_base = Duration::from_millis(150);
+    cfg.backoff_cap = Duration::from_millis(150);
+    let (o, log) = tokio::time::timeout(Duration::from_secs(60), get(&url, dir.path(), cfg))
+        .await
+        .unwrap_or_else(|_| panic!("single-stream retry hung with connections = 1"))
+        .unwrap();
     assert_eq!(sha_of_file(&o.path), content.sha256_hex());
     assert!(
         log.count(|e| matches!(e, Event::Retry { .. })) >= 1,
