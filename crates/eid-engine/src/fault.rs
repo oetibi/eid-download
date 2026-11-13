@@ -80,6 +80,29 @@ mod imp {
     }
     static PANIC_AT: std::sync::Mutex<Option<(String, u64)>> = std::sync::Mutex::new(None);
     static PANIC_HITS: AtomicU64 = AtomicU64::new(0);
+    /// Test hook: after `skip` successful calls of [`fail`] with this `name`, the next `times`
+    /// calls return a `PermissionDenied` error (an antivirus/indexer holding a file).
+    /// Process-global.
+    pub fn set_fail_point(name: &str, skip: u32, times: u32) {
+        *FAIL_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some((name.to_string(), skip, times));
+    }
+    static FAIL_AT: std::sync::Mutex<Option<(String, u32, u32)>> = std::sync::Mutex::new(None);
+    /// An injectable I/O error at a named point (`Ok` unless a test armed it).
+    pub fn fail(name: &str) -> std::io::Result<()> {
+        let mut g = FAIL_AT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((n, skip, times)) = g.as_mut() {
+            if n == name && *skip > 0 {
+                *skip -= 1;
+            } else if n == name && *times > 0 {
+                *times -= 1;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("injected failure at {name}"),
+                ));
+            }
+        }
+        Ok(())
+    }
     pub fn set_jitter(seed: u64) {
         JITTER.store(seed, Ordering::SeqCst);
     }
@@ -101,6 +124,12 @@ mod imp {
     pub fn hit(_name: &str) {}
     #[inline(always)]
     pub fn set_panic_point(_name: &str, _after: u64) {}
+    #[inline(always)]
+    pub fn set_fail_point(_name: &str, _skip: u32, _times: u32) {}
+    #[inline(always)]
+    pub fn fail(_name: &str) -> std::io::Result<()> {
+        Ok(())
+    }
     pub fn set_pause_point(
         _name: &str,
     ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
@@ -112,4 +141,4 @@ mod imp {
     pub fn jitter() {}
 }
 
-pub use imp::{hit, jitter, set_jitter, set_panic_point, set_pause_point};
+pub use imp::{fail, hit, jitter, set_fail_point, set_jitter, set_panic_point, set_pause_point};

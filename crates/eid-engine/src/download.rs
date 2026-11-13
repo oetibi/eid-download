@@ -1305,7 +1305,7 @@ async fn download_inner(
         let sp = f.state.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             state::save(&sp, &init)?;
-            state::remove_backup(&sp);
+            state::remove_backup(&sp)?;
             Ok(())
         })
         .await
