@@ -1709,25 +1709,40 @@ async fn resume_inner(
                     _ => false,
                 }
             } else {
-                match pfs::open_linked_pair_for_recovery(&part, &fin) {
-                    Ok(Some(h)) if h.metadata().is_ok_and(|m| m.len() == t) => {
-                        let (want, part2) = (fz.sha256.clone(), part.clone());
-                        tokio::task::spawn_blocking(move || {
-                            if sha256_handle(&h)? != want {
-                                return Ok(false);
-                            }
-                            // drop the leftover name only if it still names the verified inode
-                            if !pfs::handle_is_path(&h, &part2).unwrap_or(false) {
-                                return Ok(false);
-                            }
-                            std::fs::remove_file(&part2)
-                                .map_err(Error::io("drop leftover part"))?;
-                            Ok::<bool, Error>(true)
-                        })
-                        .await
-                        .map_err(|e| Error::Network(format!("hash task failed: {e}")))??
+                // everything (open, hash, re-check, unlink) runs on one blocking thread
+                let (want, part2, fin2) = (fz.sha256.clone(), part.clone(), fin.clone());
+                let r = tokio::task::spawn_blocking(move || -> Result<Option<bool>> {
+                    let Some(h) = pfs::open_linked_pair_for_recovery(&part2, &fin2)
+                        .ok()
+                        .flatten()
+                    else {
+                        return Ok(None); // not a link pair: the normal path decides
+                    };
+                    let ok = h.metadata().is_ok_and(|m| m.len() == t) && sha256_handle(&h)? == want;
+                    fault::hit("recovery_hashed");
+                    // the handle must STILL name both paths with exactly two links before we
+                    // drop anything or report success (a swap/extra link during hashing refuses)
+                    let exact = pfs::recovery_pair_is_exact(&h, &part2, &fin2).unwrap_or(false);
+                    if !(ok && exact) {
+                        return Ok(Some(false));
                     }
-                    _ => false,
+                    std::fs::remove_file(&part2).map_err(Error::io("drop leftover part"))?;
+                    Ok(Some(true))
+                })
+                .await
+                .map_err(|e| Error::Network(format!("recovery task failed: {e}")))??;
+                match r {
+                    Some(ok) => {
+                        if !ok {
+                            // a finalization candidate that does not verify: refuse and KEEP
+                            // everything (never fall into the restart path that deletes the part)
+                            return Err(Error::BadState(
+                                "finalization candidate (part and destination are one file) does not match the recorded digest/size or changed during verification; nothing was deleted".into(),
+                            ));
+                        }
+                        true
+                    }
+                    None => false,
                 }
             };
             if fin_ok {

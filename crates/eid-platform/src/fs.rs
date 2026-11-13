@@ -518,9 +518,15 @@ fn publish_impl(
     if now == Some(verified) {
         return drop_part_if_ours(file, part);
     }
-    // identity mismatch: undo ONLY a link we created ourselves to a foreign inode, and only if
-    // the name still refers to exactly that inode
-    if linked.is_some() && linked != Some(verified) && now == linked {
+    // identity mismatch: undo our link ONLY if `dest` and `part` are still two names of the same
+    // foreign inode (the one our link() created): removing one of two names destroys no data.
+    // Pathname snapshots cannot prove ownership atomically, so a stranger swapping `dest` in the
+    // instant between this check and the unlink is a documented residual race.
+    if linked.is_some()
+        && linked != Some(verified)
+        && now == linked
+        && path_id(part).ok().flatten() == linked
+    {
         let _ = std::fs::remove_file(dest);
         return Err(mismatch(
             "the source was swapped before promotion; our link to the foreign file was removed, nothing published",
@@ -582,18 +588,20 @@ fn publish_impl(
     ))
 }
 
-/// Crash recovery only (Unix): if `part` and `dest` are two names of ONE regular file with
-/// exactly two links (a crash between the link and the unlink of a promotion), return a read
-/// handle to it; otherwise `None` (different inode, extra links, symlink, missing, non-Unix).
-/// Neither name is followed if it is a symlink.
+/// Crash recovery only (Unix): if `part` and `dest` are two names of ONE regular file (same
+/// device+inode, any link count), return a read handle to it; otherwise `None` (different
+/// inode, symlink, FIFO/device, missing, non-Unix). Neither name is followed if it is a symlink
+/// and opening never blocks (`O_NONBLOCK`: a FIFO planted at either name is rejected, not
+/// waited on). Call from a blocking thread. Callers must still require
+/// [`recovery_pair_is_exact`] before acting on the handle.
 pub fn open_linked_pair_for_recovery(part: &Path, dest: &Path) -> io::Result<Option<File>> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         let open = |p: &Path| -> io::Result<Option<File>> {
             let mut o = OpenOptions::new();
-            o.read(true);
-            apply_open_flags(&mut o);
+            o.read(true)
+                .custom_flags(nofollow_flag() | libc::O_NONBLOCK);
             match o.open(p) {
                 Ok(f) => Ok(Some(f)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -606,16 +614,29 @@ pub fn open_linked_pair_for_recovery(part: &Path, dest: &Path) -> io::Result<Opt
             return Ok(None);
         };
         let (ma, mb) = (a.metadata()?, b.metadata()?);
-        let ok = ma.is_file()
-            && mb.is_file()
-            && ma.nlink() == 2
-            && (ma.dev(), ma.ino()) == (mb.dev(), mb.ino());
-        Ok(ok.then_some(a))
+        let same = ma.is_file() && mb.is_file() && (ma.dev(), ma.ino()) == (mb.dev(), mb.ino());
+        Ok(same.then_some(a))
     }
     #[cfg(not(unix))]
     {
         let _ = (part, dest);
         Ok(None)
+    }
+}
+
+/// Crash recovery only: `h` (from [`open_linked_pair_for_recovery`]) still names BOTH `part` and
+/// `dest` right now and has exactly two links. Re-checked after hashing, right before the
+/// leftover part name is dropped. Always `false` off Unix (the Windows promotion is one move).
+pub fn recovery_pair_is_exact(h: &File, part: &Path, dest: &Path) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(h.metadata()?.nlink() == 2 && handle_is_path(h, part)? && handle_is_path(h, dest)?)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (h, part, dest);
+        Ok(false)
     }
 }
 
@@ -781,21 +802,6 @@ mod tests {
         assert_eq!(std::fs::read(&part).unwrap(), b"ORIG", "part must be kept");
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn publish_verified_refuses_a_swapped_source_where_it_cannot_prevent() {
-        // Windows / non-Linux Unix: detection, never publishing the substitute
-        let d = tmpdir("pv3");
-        let (f, part) = verified_part(&d, b"ORIG");
-        let aside = swap_part(&d, &part, b"EVIL");
-        let dest = d.join("dest");
-        assert!(publish_verified(&f, &part, &dest).is_err());
-        assert!(!dest.exists());
-        assert_eq!(std::fs::read(&part).unwrap(), b"EVIL");
-        assert_eq!(std::fs::read(&aside).unwrap(), b"ORIG");
-    }
-
-    #[cfg(unix)]
     #[test]
     fn publish_verified_fallback_refuses_a_source_replaced_before_promotion() {
         let d = tmpdir("pv4");
@@ -815,7 +821,6 @@ mod tests {
         assert!(!part2.exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn publish_verified_fallback_rolls_back_a_swap_between_link_and_post_check() {
         // (A) the source is swapped AFTER the pre-check, BEFORE the link: we link the foreign
@@ -961,10 +966,11 @@ mod tests {
                 .unwrap()
                 .expect("exactly two names");
             assert!(handle_is_path(&h, &p).unwrap());
+            assert!(recovery_pair_is_exact(&h, &p, &q).unwrap());
             std::fs::hard_link(&p, &r).unwrap(); // third name
             assert!(
-                open_linked_pair_for_recovery(&p, &q).unwrap().is_none(),
-                "three links"
+                !recovery_pair_is_exact(&h, &p, &q).unwrap(),
+                "three links must not be exact"
             );
             std::fs::remove_file(&r).unwrap();
             // a symlink named like the destination is never followed

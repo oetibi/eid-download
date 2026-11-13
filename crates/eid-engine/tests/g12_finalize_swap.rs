@@ -170,8 +170,11 @@ async fn finalization_detects_a_destination_replaced_before_success() {
 
 /// Crash between link and unlink: part and dest are two names of one inode.
 #[cfg(unix)]
-async fn crash_between_link_and_unlink(c: &Content) -> (tempfile::TempDir, PathBuf, PathBuf) {
-    let (srv, url) = serve("/f.bin", c.clone(), plain()).await;
+async fn crash_between_link_and_unlink(
+    c: &Content,
+    b: Behavior,
+) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let (srv, url) = serve("/f.bin", c.clone(), b).await;
     let dir = tempfile::tempdir().unwrap();
     fault::set_panic_point("final_linked", 1);
     let crashed = start(url, dir.path().to_path_buf()).await;
@@ -195,7 +198,7 @@ async fn crash_between_link_and_unlink(c: &Content) -> (tempfile::TempDir, PathB
 async fn crash_between_link_and_unlink_is_recovered_without_the_network() {
     let _g = SERIAL.lock().await;
     let c = content();
-    let (dir, part, dest) = crash_between_link_and_unlink(&c).await;
+    let (dir, part, dest) = crash_between_link_and_unlink(&c, plain()).await;
     let sp = dir.path().join("f.bin.eid-state");
     let o = eid_engine::resume(
         &sp,
@@ -215,40 +218,112 @@ async fn crash_between_link_and_unlink_is_recovered_without_the_network() {
     );
 }
 
+/// Server without validators and without ranges: the state is NOT resumable, so a rejected
+/// candidate must not be mistaken for an ordinary restart (which deletes the part).
+#[cfg(unix)]
+fn non_resumable() -> Behavior {
+    Behavior {
+        etag: eid_testserver::EtagMode::None,
+        advertise_ranges: false,
+        ..Behavior::default()
+    }
+}
+
+#[cfg(unix)]
+async fn resume_once(sp: &Path, log: &Log) -> eid_engine::Result<eid_engine::Outcome> {
+    eid_engine::resume(
+        sp,
+        fast_cfg(2),
+        log.sink(),
+        eid_engine::CancellationToken::new(),
+    )
+    .await
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn crash_between_link_and_unlink_with_a_tampered_inode_is_not_adopted() {
     let _g = SERIAL.lock().await;
     let c = content();
-    let (dir, part, dest) = crash_between_link_and_unlink(&c).await;
-    // tamper IN PLACE (same inode under both names): same size, different content
-    {
-        use std::os::unix::fs::FileExt;
-        let f = std::fs::OpenOptions::new().write(true).open(&dest).unwrap();
-        f.write_all_at(b"TAMPERED", 0).unwrap();
+    for (label, b) in [("resumable", plain()), ("non-resumable", non_resumable())] {
+        let (dir, part, dest) = crash_between_link_and_unlink(&c, b).await;
+        // tamper IN PLACE (same inode under both names): same size, different content
+        {
+            use std::os::unix::fs::FileExt;
+            let f = std::fs::OpenOptions::new().write(true).open(&dest).unwrap();
+            f.write_all_at(b"TAMPERED", 0).unwrap();
+        }
+        let sp = dir.path().join("f.bin.eid-state");
+        let log = Log::default();
+        let r = resume_once(&sp, &log).await;
+        assert!(
+            matches!(&r, Err(e) if !matches!(e, eid_engine::Error::Busy)),
+            "{label}: a tampered file must be refused with an error, got {:?}",
+            r.map(|o| o.path)
+        );
+        assert_eq!(std::fs::read(&dest).unwrap()[..8], *b"TAMPERED", "{label}");
+        assert!(
+            part.exists() && sp.exists(),
+            "{label}: evidence (part + state) must be kept"
+        );
+        assert_eq!(
+            log.count(|e| matches!(e, eid_engine::Event::Finished { .. })),
+            0,
+            "{label}"
+        );
     }
+}
+
+/// Pause recovery after it hashed the pair, run `mutate`, release, and expect a refusal that
+/// keeps everything on disk.
+#[cfg(unix)]
+async fn recovery_refused_after(
+    label: &str,
+    mutate: impl FnOnce(&Path, &Path),
+) -> (PathBuf, PathBuf) {
+    let c = content();
+    let (dir, part, dest) = crash_between_link_and_unlink(&c, plain()).await;
     let sp = dir.path().join("f.bin.eid-state");
-    let log = Log::default();
-    let r = eid_engine::resume(
-        &sp,
-        fast_cfg(2),
-        log.sink(),
-        eid_engine::CancellationToken::new(),
-    )
-    .await;
+    let (reached, release) = fault::set_pause_point("recovery_hashed");
+    let sp2 = sp.clone();
+    let task = tokio::spawn(async move { resume_once(&sp2, &Log::default()).await });
+    wait_reached(reached, "recovery_hashed").await;
+    mutate(&part, &dest);
+    release.send(()).unwrap();
+    let r = task.await.unwrap();
     assert!(
         r.is_err(),
-        "a tampered file was adopted as the finished download"
-    );
-    assert!(
-        !matches!(r, Err(eid_engine::Error::Busy)),
-        "unexpected Busy: {:?}",
+        "{label}: recovery reported success although the pair changed while hashing: {:?}",
         r.map(|o| o.path)
     );
-    assert_eq!(std::fs::read(&dest).unwrap()[..8], *b"TAMPERED");
-    assert!(part.exists() && sp.exists(), "evidence must be kept");
-    assert_eq!(
-        log.count(|e| matches!(e, eid_engine::Event::Finished { .. })),
-        0
+    assert!(
+        part.exists() && sp.exists(),
+        "{label}: part + state must be kept"
     );
+    let keep = dir.keep();
+    (keep.join("f.bin"), keep.join("f.bin.eid-part"))
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_refuses_a_destination_substituted_while_hashing() {
+    let _g = SERIAL.lock().await;
+    let (dest, _part) = recovery_refused_after("substituted dest", |_part, dest| {
+        std::fs::rename(dest, dest.with_file_name("moved.orig")).unwrap();
+        std::fs::write(dest, EVIL).unwrap();
+    })
+    .await;
+    assert_eq!(std::fs::read(&dest).unwrap(), EVIL, "foreign file touched");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_refuses_a_third_link_created_while_hashing() {
+    let _g = SERIAL.lock().await;
+    let (dest, _part) = recovery_refused_after("third link", |_part, dest| {
+        std::fs::hard_link(dest, dest.with_file_name("third")).unwrap();
+    })
+    .await;
+    assert!(dest.exists());
+    assert!(dest.with_file_name("third").exists());
 }
