@@ -678,6 +678,10 @@ impl Net<'_> {
         if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE
             || (resp.status() == StatusCode::PARTIAL_CONTENT && encoded(&resp))
         {
+            // the old response must be gone BEFORE the next request: it owns a socket, and with
+            // connections = 1 holding it while connecting again exceeds the cap (and would
+            // deadlock a permit-based cap)
+            drop(resp);
             resp = self.send_retrying(false).await?;
             used_range = false;
         }
@@ -1050,6 +1054,8 @@ async fn run_single(
                 return Ok(written);
             }
             other => {
+                // release the failed body (and its socket) before sleeping / reconnecting
+                drop(stream);
                 attempt += 1;
                 let reason = match other {
                     Err(r) => r,
