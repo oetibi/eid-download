@@ -5,6 +5,7 @@
 ## السياق
 - ADR-0011 قرّر سقفاً **مُقاساً** على مقابس النواة (`SocketWatch`/`SockDiag`) مع تخفيف زمني: `pool_max_idle_per_host(0)` و`sleep(2ms)` بعد إسقاط الـbody. هذا ليس ضماناً: hyper يغلق الـfd في مهمة خلفية بعد إسقاط الـbody، فقد يتصل الجديد قبل إغلاق القديم، والـ2ms مجرد رهان على الجدولة.
 - فشل متقطع مُسجَّل (حلقة الـ200 تحت الحمل، التشغيل 90: `PEAK conns=8 client_sockets=9`، `/tmp/cap200_FAIL_90.log`). وللمسار نفسه دليل مباشر: في اختبار `g5_one_connection` (سقف 1) بعد `drop(resp)` ما زال القياس يُظهر مقبسين في ~50% من الجولات تحت الحمل، أي أن الإسقاط لا يعني إغلاق الـfd.
+- محاولات التشخيص بالهوية (inode+منفذ محلي لكل مقطع، `diag_hunt_for_cap_overshoot`، فرع `p1/conn-cap-diag`): **2300 تشغيل مُجهَّز بلا تكرار للفشل** (`/tmp/hunt2.log` 800، `/tmp/hunt3.log` 1500)؛ فالسبب «إغلاق fd متأخر في hyper» **مرجَّح لا مُثبَت بالهوية** (انظر `docs/../reports/diagnosis.md`).
 - `connector_layer` في reqwest لا يكفي (راجَعنا reqwest 0.12.28 `src/connect.rs:1288-1305`): `Conn` داخل `mod sealed` وحقوله `pub(super)` بلا constructor عام، فالطبقة تستطيع حجز permit قبل الاتصال لكن لا تستطيع ربطه بـDrop الـstream. و`ConcurrencyLimitLayer` يحدّ مرحلة الاتصال لا عمر المقبس. كما أن `connect_timeout` طبقة خارجية فانتظار الـpermit كان سيُحسب منها.
 
 ## القرار المقترح
@@ -19,8 +20,8 @@
 | الجانب | الخطة |
 |---|---|
 | TLS | Linux: `tokio-rustls`. **Windows حالياً `native-tls-alpn` (SChannel) لا rustls** (`crates/eid-engine/Cargo.toml:24-27`، ADR-0010) فعلى Windows `tokio-native-tls` (يبقى SChannel)؛ توحيد rustls قرار منفصل. الـhandshake يجري والـpermit ممسوك؛ وفشله يُسقط TCP أولاً. |
-| Proxy | يضيع الدعم الجاهز. `hyper-util` 0.1.21 فيه `client-proxy` و`client-proxy-system` (`Matcher::from_system()`) و`Tunnel` لـCONNECT. الحد الأدنى: CONNECT لـhttps، وhttp-proxy بصيغة absolute-form (`Connected::proxy(true)`). الأقرب أن يبقى `use_system_proxy=false` افتراضياً كما الآن (`http.rs:43`). |
-| Redirects | المقاطع ترسل إلى `final_url` الذي حسمه الـprobe، فلا تتبّع تحويلات: أي 3xx في مقطع = خطأ «تغيّر سلوك الخادم». الـprobe يستمر بـ`redirect_verdict` (دالة نقية مُختبَرة) في حلقة صغيرة. |
+| Proxy | يضيع الدعم الجاهز. **الافتراضي الحالي `use_system_proxy = true` (`config.rs:69`)**، فالاستبدال بلا بروكسي = تراجع سلوك لمستخدمين خلف بروكسي شركة/مدرسة، لا مجرد «ميزة ناقصة». `hyper-util` 0.1.21 فيه `client-proxy` و`client-proxy-system` (`Matcher::from_system()`) و`Tunnel` لـCONNECT. الحد الأدنى المقترح: CONNECT لـhttps، وhttp-proxy بصيغة absolute-form (`Connected::proxy(true)`)، مع إبقاء الافتراضي `true`. **قرار للمالك** (سؤال 3). |
+| Redirects | الـprobe يمشي حلقة تحويلات صغيرة يدوية بـ`redirect_verdict` (نقية، مُختبَرة). **أمن (AGENTS §6.3):** بيانات الدخول `basic_auth` تذهب **فقط إلى الـorigin الأصلي** (نفس scheme+host+port)؛ عند أي تحويل لـorigin مختلف يُحذف `Authorization` (reqwest يفعل ذلك اليوم؛ الحلقة اليدوية يجب أن تفعله ويُختبر: خادمان، الثاني لا يرى `Authorization`، وهو اختبار `g1_transfer` الحالي يُنقل كما هو للعميل الجديد). `Location` النسبي يُحَلّ على الـURL الحالي. المقاطع **لا** ترسل بيانات الدخول إلى `final_url` إن اختلف الـorigin؛ إن اختلف تُعاد عبر الـorigin الأصلي أو يُعتبر خطأ «تغيّر السلوك» (3xx في مقطع = خطأ). |
 | Timeouts | `connect_timeout` داخل الـconnector بعد الـpermit؛ `stall_timeout` قائم حول `stream.next()`؛ **`header_timeout` معرّف في `config.rs:42` لكنه غير مستخدم** اليوم فيُلفّ حول `send` هنا (يتقاطع مع M3 في المراجعة). |
 | Cookies/gzip/… | لا نستعملها أصلاً (`Accept-Encoding: identity`). |
 | تبعيات | مباشرة جديدة: hyper، hyper-util، http-body-util، tokio-rustls/tokio-native-tls. تحديث `docs/DEPENDENCIES.md` ونجاح `cargo deny` شرط. |
@@ -55,4 +56,4 @@
 ## أسئلة للمالك
 1. هل يُقدَّم البند (PLAN P2 `conn-cap-by-construction`) إلى آخر P1، أم يبقى دَيناً موثّقاً؟
 2. Windows: `tokio-native-tls` (SChannel) أم توحيد rustls؟
-3. مدى دعم البروكسي المطلوب في الإصدار الأول.
+3. البروكسي: الافتراضي الحالي `use_system_proxy = true`. هل يُقبل فقدان بروكسي النظام في أول إصدار بالعميل الجديد، أم يُشترط CONNECT + `Matcher::from_system()` من اليوم الأول؟
