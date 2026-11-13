@@ -792,10 +792,16 @@ async fn no_validator_same_size_change_never_splices_representations() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = fast_cfg(4);
     cfg.max_attempts = 20;
-    let (o, _) = get(&url, dir.path(), cfg).await.unwrap();
-    let got = sha_of_file(&o.path);
+    let (o, log) = get(&url, dir.path(), cfg).await.unwrap();
+    // the test only means something if the cut really forced a reconnect...
     assert!(
-        got == a.sha256_hex() || got == b.sha256_hex(),
-        "spliced file: SHA matches neither version"
+        log.count(|e| matches!(e, eid_engine::Event::Retry { .. })) >= 1,
+        "the disconnect never happened: the scenario was not exercised"
+    );
+    // ...and the coherent answer after the whole-file restart is the NEW representation, whole
+    assert_eq!(
+        sha_of_file(&o.path),
+        b.sha256_hex(),
+        "result is not one coherent version (spliced, or stale A + B)"
     );
 }

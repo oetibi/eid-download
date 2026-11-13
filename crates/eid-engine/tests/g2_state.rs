@@ -258,8 +258,30 @@ async fn resume_without_validators_restarts_instead_of_trusting() {
     let (srv, url) = serve("/nv.bin", content(5), b).await;
     let dir = tempfile::tempdir().unwrap();
     // B3: without validators the engine streams the file once and records no per-segment
-    // progress, so there is nothing to wait for: cancel after a moment, mid-stream.
-    let (r, _) = run_then_cancel(&url, dir.path(), fast_cfg(4), Duration::from_millis(700)).await;
+    // progress, so wait on the Progress events themselves (not on a fixed delay) and then cancel.
+    let log0 = Log::default();
+    let cancel = CancellationToken::new();
+    let (c2, l2) = (cancel.clone(), log0.clone());
+    tokio::spawn(async move {
+        let t = std::time::Instant::now();
+        while l2.count(|e| matches!(e, Event::Progress { done, .. } if *done >= 1 << 20)) == 0
+            && t.elapsed() < Duration::from_secs(30)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        c2.cancel();
+    });
+    let r = eid_engine::download(
+        JobSpec {
+            url: url.clone(),
+            dir: dir.path().into(),
+            file_name: None,
+        },
+        fast_cfg(4),
+        log0.sink(),
+        cancel,
+    )
+    .await;
     assert!(matches!(r, Err(Error::Cancelled)));
     let sp = state_file(dir.path()).unwrap();
     srv.set_behavior(

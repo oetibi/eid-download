@@ -881,20 +881,6 @@ fn sha256_handle(f: &File) -> Result<String> {
     Ok(state::hex(&h.finalize()))
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut f = pfs::open_regular_nofollow_read(path).map_err(Error::io("open for hashing"))?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = f.read(&mut buf).map_err(Error::io("read for hashing"))?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(state::hex(&h.finalize()))
-}
-
 /// Durably record (name, digest) in the state BEFORE each rename attempt, so recovery after a
 /// crash between rename and state removal verifies the exact destination by content.
 fn finalize_name(
@@ -1373,7 +1359,7 @@ async fn download_inner(
                     restarts,
                     peaks,
                 };
-                return finish(&cfg, &st.dir, files.take().unwrap(), file, done, &sink);
+                return finish(&cfg, &st.dir, files.take().unwrap(), file, done, &sink).await;
             }
             Err(Error::ServerChanged) if restarts < cfg.max_restarts => {
                 restarts += 1;
@@ -1394,7 +1380,27 @@ struct Done {
     peaks: (u64, usize),
 }
 
-fn finish(
+/// Finalization does blocking disk work (fsync, full-file hash, rename, state removal): run it on
+/// the blocking pool, never on an executor thread (AGENTS §6.7, review m2/B2).
+async fn finish(
+    cfg: &Config,
+    dir: &Path,
+    files: Files,
+    file: Arc<File>,
+    done: Done,
+    sink: &EventSink,
+) -> Result<Outcome> {
+    let (cfg, dir, sink) = (cfg.clone(), dir.to_path_buf(), sink.clone());
+    match tokio::task::spawn_blocking(move || finish_blocking(&cfg, &dir, files, file, done, &sink))
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => Err(Error::Network(format!("finalization task failed: {e}"))),
+    }
+}
+
+fn finish_blocking(
     cfg: &Config,
     dir: &Path,
     files: Files,
@@ -1518,9 +1524,18 @@ async fn resume_inner(
     if !part.exists() {
         if let (Some(t), Some(fz)) = (st.total, &st.finalize) {
             let fin = dir.join(&fz.name);
-            if std::fs::symlink_metadata(&fin).is_ok_and(|m| m.is_file() && m.len() == t)
-                && sha256_file(&fin)? == fz.sha256
-            {
+            // open once (no symlink, single link), then check size and hash THROUGH that handle
+            // and off the executor thread: no path re-resolution between check and use
+            let fin_ok = match pfs::open_regular_nofollow_read(&fin) {
+                Ok(h) if h.metadata().is_ok_and(|m| m.len() == t) => {
+                    let want = fz.sha256.clone();
+                    tokio::task::spawn_blocking(move || sha256_handle(&h).map(|d| d == want))
+                        .await
+                        .map_err(|e| Error::Network(format!("hash task failed: {e}")))??
+                }
+                _ => false,
+            };
+            if fin_ok {
                 let digest = if cfg.compute_sha256 || cfg.expected_sha256.is_some() {
                     Some(fz.sha256.clone())
                 } else {
@@ -1663,6 +1678,7 @@ async fn resume_inner(
                 },
                 &sink,
             )
+            .await
         }
         Err(Error::ServerChanged) => {
             sink(Event::Restarted {
