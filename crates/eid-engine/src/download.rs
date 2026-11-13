@@ -1727,6 +1727,13 @@ async fn resume_inner(
                         return Ok(Some(false));
                     }
                     std::fs::remove_file(&part2).map_err(Error::io("drop leftover part"))?;
+                    // the handle must still be the destination after the unlink (nothing was
+                    // lost either way: the data lives under whatever name it still has)
+                    if !pfs::handle_is_path(&h, &fin2).unwrap_or(false) {
+                        return Err(Error::BadState(
+                            "destination changed during recovery; state kept".into(),
+                        ));
+                    }
                     Ok(Some(true))
                 })
                 .await

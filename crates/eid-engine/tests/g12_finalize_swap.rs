@@ -279,10 +279,11 @@ async fn crash_between_link_and_unlink_with_a_tampered_inode_is_not_adopted() {
 #[cfg(unix)]
 async fn recovery_refused_after(
     label: &str,
+    b: Behavior,
     mutate: impl FnOnce(&Path, &Path),
-) -> (PathBuf, PathBuf) {
+) -> tempfile::TempDir {
     let c = content();
-    let (dir, part, dest) = crash_between_link_and_unlink(&c, plain()).await;
+    let (dir, part, dest) = crash_between_link_and_unlink(&c, b).await;
     let sp = dir.path().join("f.bin.eid-state");
     let (reached, release) = fault::set_pause_point("recovery_hashed");
     let sp2 = sp.clone();
@@ -300,30 +301,38 @@ async fn recovery_refused_after(
         part.exists() && sp.exists(),
         "{label}: part + state must be kept"
     );
-    let keep = dir.keep();
-    (keep.join("f.bin"), keep.join("f.bin.eid-part"))
+    dir
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recovery_refuses_a_destination_substituted_while_hashing() {
     let _g = SERIAL.lock().await;
-    let (dest, _part) = recovery_refused_after("substituted dest", |_part, dest| {
-        std::fs::rename(dest, dest.with_file_name("moved.orig")).unwrap();
-        std::fs::write(dest, EVIL).unwrap();
-    })
-    .await;
-    assert_eq!(std::fs::read(&dest).unwrap(), EVIL, "foreign file touched");
+    for (label, b) in [("resumable", plain()), ("non-resumable", non_resumable())] {
+        let dir = recovery_refused_after(label, b, |_part, dest| {
+            std::fs::rename(dest, dest.with_file_name("moved.orig")).unwrap();
+            std::fs::write(dest, EVIL).unwrap();
+        })
+        .await;
+        let dest = dir.path().join("f.bin");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            EVIL,
+            "{label}: foreign file touched"
+        );
+    }
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recovery_refuses_a_third_link_created_while_hashing() {
     let _g = SERIAL.lock().await;
-    let (dest, _part) = recovery_refused_after("third link", |_part, dest| {
-        std::fs::hard_link(dest, dest.with_file_name("third")).unwrap();
-    })
-    .await;
-    assert!(dest.exists());
-    assert!(dest.with_file_name("third").exists());
+    for (label, b) in [("resumable", plain()), ("non-resumable", non_resumable())] {
+        let dir = recovery_refused_after(label, b, |_part, dest| {
+            std::fs::hard_link(dest, dest.with_file_name("third")).unwrap();
+        })
+        .await;
+        assert!(dir.path().join("f.bin").exists(), "{label}");
+        assert!(dir.path().join("third").exists(), "{label}");
+    }
 }

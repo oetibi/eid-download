@@ -855,9 +855,9 @@ mod tests {
         let d = tmpdir("pv5b");
         let (f, part) = verified_part(&d, b"ORIG");
         let dest = d.join("dest");
-        let dp = dest.clone();
+        let (dp, dd) = (dest.clone(), d.clone());
         let e = publish_impl(&f, &part, &dest, true, &mut || {}, &mut || {
-            std::fs::remove_file(&dp).unwrap();
+            std::fs::rename(&dp, dd.join("moved.orig")).unwrap();
             std::fs::write(&dp, b"FOREIGN").unwrap();
         })
         .unwrap_err();
@@ -867,6 +867,7 @@ mod tests {
             b"FOREIGN",
             "foreign dest deleted"
         );
+        #[cfg(unix)] // Windows moved the part away; its name is gone by design
         assert_eq!(std::fs::read(&part).unwrap(), b"ORIG", "part must be kept");
     }
 
@@ -895,26 +896,63 @@ mod tests {
         assert_eq!(std::fs::read(d.join("dest")).unwrap(), b"X");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn publish_verified_linkat_publishes_original_even_if_part_name_swapped() {
         let d = tmpdir("pv7");
         let (f, part) = verified_part(&d, b"ORIG");
         let aside = swap_part(&d, &part, b"EVIL");
         let dest = d.join("dest");
-        publish_verified(&f, &part, &dest).unwrap();
-        assert_eq!(
-            std::fs::read(&dest).unwrap(),
-            b"ORIG",
-            "the substitute was published"
-        );
-        assert!(handle_is_path(&f, &dest).unwrap());
+        let r = publish_verified(&f, &part, &dest);
+        #[cfg(target_os = "linux")]
+        {
+            r.unwrap();
+            assert_eq!(
+                std::fs::read(&dest).unwrap(),
+                b"ORIG",
+                "the substitute was published"
+            );
+            assert!(handle_is_path(&f, &dest).unwrap());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // no /proc route: detection only, the substitute is never published
+            assert!(r.is_err());
+            assert!(!dest.exists());
+        }
         assert_eq!(
             std::fs::read(&part).unwrap(),
             b"EVIL",
             "foreign part name touched"
         );
         assert_eq!(std::fs::read(&aside).unwrap(), b"ORIG");
+    }
+
+    /// Windows runtime check of the rollback-FAILURE path (compile-checked on Linux; executed
+    /// only by ci-windows): the source name is re-occupied after the move, so the non-destructive
+    /// rollback cannot happen and both names must be preserved.
+    #[cfg(windows)]
+    #[test]
+    fn windows_rollback_failure_preserves_both_names() {
+        let d = tmpdir("pvw");
+        let (f, part) = verified_part(&d, b"ORIG");
+        let dest = d.join("dest");
+        let (pp, dd) = (part.clone(), d.clone());
+        let pp2 = part.clone();
+        let e = publish_impl(
+            &f,
+            &part,
+            &dest,
+            true,
+            &mut || {
+                swap_part(&dd, &pp, b"EVIL");
+            },
+            &mut || std::fs::write(&pp2, b"OCCUPIED").unwrap(),
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("rollback failed"), "{e}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"EVIL");
+        assert_eq!(std::fs::read(&part).unwrap(), b"OCCUPIED");
     }
 
     #[cfg(unix)]
@@ -941,6 +979,28 @@ mod tests {
                 .unwrap()
                 .file_type()
                 .is_symlink());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_open_never_blocks_on_a_fifo() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = tmpdir("fifo");
+        let (p, q) = (d.join("p"), d.join("q"));
+        std::fs::write(&p, b"A").unwrap();
+        let c = std::ffi::CString::new(q.as_os_str().as_bytes()).unwrap();
+        // SAFETY: valid NUL-terminated path for the duration of the call.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        for (a, b) in [(p.clone(), q.clone()), (q.clone(), p.clone())] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(open_linked_pair_for_recovery(&a, &b).map(|o| o.is_none()));
+            });
+            let r = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("opening a FIFO blocked");
+            assert!(r.unwrap(), "a FIFO must not be a recovery candidate");
         }
     }
 
