@@ -1,10 +1,10 @@
 # ADR-0012 — سقف الاتصالات بالتصميم (hyper-util + PermitStream)
 
-**الحالة: مقترح — غير مقبول، وغير منفَّذ.** موافقة المالك (2026-11-13 10:12 الكويت) تخص **موعد** البند في PLAN (آخر P1 أو أول P2، بعد B1–B4) فقط؛ هذا الـADR والتبعيات الجديدة يحتاجان موافقة صريحة (AGENTS §3.1، §8). إن قُبل يحلّ جزئياً محل بند «مُقاس لا بالتصميم» في ADR-0011 §1، وتبقى سياسة القياس وحدودها سارية.
+**الحالة: مقترح — غير مقبول، وغير منفَّذ.** موافقة المالك (2026-11-13 10:12 الكويت) تخص **موعد** البند في PLAN (آخر P1 أو أول P2، بعد B1–B4) فقط؛ هذا الـADR والتبعيات الجديدة يحتاجان موافقة صريحة (AGENTS §8). إن قُبل يحلّ جزئياً محل بند «مُقاس لا بالتصميم» في ADR-0011 §1، وتبقى سياسة القياس وحدودها سارية.
 
 ## السياق (السبب **مرجَّح** لا مُثبَت)
 - فشل واحد في 90 جولة تحت حمل ≈3× الأنوية: `client_sockets=9` مع سقف 8 (`/tmp/cap200_FAIL_90.log`). **السبب المرجَّح (probable):** hyper يغلق الـfd في مهمة خلفية بعد إسقاط الرد/الجسم، فيتصل البديل قبل إغلاق القديم؛ `ResponseOpened` يتأخر عن الـconnect الفعلي. لم يُلتقط الـinode بالهوية في 2300 تشغيل مُجهَّز (`/workspace/projects/reports/diagnosis.md`، قسم Hunt 3).
-- دليل مباشر على أن «أُسقط الرد» لا يعني «أُغلق المقبس»: اختبار سقف 1 (`g5_one_connection`) يُظهر مقبسين في ~50% من الجولات بعد `drop(resp)` (مُتجاهَل `#[ignore]` ومُسجَّل في STATUS).
+- دليل مباشر على أن «أُسقط الرد» لا يعني «أُغلق المقبس»: اختبار سقف 1 لمسار 416 (`g5_one_connection`) يبقى **غير مستقر** حتى بعد `drop(resp)` بسبب الإغلاق غير المتزامن في hyper (مُتجاهَل `#[ignore]` ومُسجَّل في STATUS).
 - `connector_layer` في reqwest 0.12.28 لا يكفي: `Conn` مغلق (`src/connect.rs:1288-1305`) فلا يمكن ربط permit بـDrop الـstream.
 - الـ2ms (ADR-0011) رهان زمني، لا ضمان.
 
@@ -25,7 +25,7 @@ PLAN:86 «يُنظر في إعادة استعمال الاتصال داخل ال
 |---|---|
 | **الأمن: التحويلات وبيانات الدخول** (AGENTS §6.3) | حلقة تحويلات يدوية في الـprobe: `basic_auth` فقط للـorigin الأصلي (scheme+host+port)؛ **يُحذف `Authorization` عند أي تغيّر في الـorigin** ولا يعود؛ `Location` النسبي يُحَلّ على الـURL الحالي؛ **يُمنع https→http** (`redirect_verdict`)؛ يُحترم `max_redirects` (10). المقاطع تستعمل `final_url` **بلا بيانات دخول إن اختلف الـorigin**؛ أي 3xx في مقطع = خطأ «تغيّر السلوك». المحرك الحالي سليم (reqwest يحذفها): `cross_origin_redirect_drops_credentials`. |
 | **الشهادات** (parity) | Linux: نفس جذور reqwest الحالي (`rustls-tls` = webpki-roots) + `Config::extra_root_certs_pem`؛ Windows: مخزن النظام عبر SChannel + نفس `extra_root_certs_pem`. SNI والتحقق من اسم المضيف من الـURL (تُرفض الشهادات الخاطئة قبل إرسال أي طلب HTTP كما اليوم). `user_agent` من `Config` و`Accept-Encoding: identity`. |
-| **TLS على Windows** | `tokio-native-tls` (يبقى SChannel، ADR-0010)؛ توحيد rustls قرار منفصل. الـhandshake والـpermit ممسوك؛ فشله يُسقط TCP أولاً. |
+| **TLS على Windows** | `tokio-native-tls` (يبقى SChannel، ADR-0010)؛ توحيد rustls قرار منفصل. الـpermit يبقى ممسوكاً طوال المصافحة، وفشلها يُسقط الـstream فيُحرَّر. |
 | **Proxy** | **الافتراضي الحالي `use_system_proxy = true` (`config.rs:69`)**؛ الاستبدال بلا بروكسي **تراجع سلوك** لمن خلف بروكسي. `hyper-util` فيه `client-proxy-system` (`Matcher::from_system()`) و`Tunnel` (CONNECT). **قرار للمالك** (سؤال 2). |
 | Timeouts | `connect_timeout` داخل الـconnector بعد الـpermit؛ `stall_timeout` قائم؛ `header_timeout` (غير مستخدم اليوم، M3) يُلفّ حول `send`. |
 | تبعيات | مباشرة جديدة: hyper، hyper-util، http-body-util، tokio-rustls/tokio-native-tls؛ تحديث `DEPENDENCIES.md` ونجاح `cargo deny`. |
