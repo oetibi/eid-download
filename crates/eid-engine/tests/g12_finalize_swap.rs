@@ -336,3 +336,56 @@ async fn recovery_refuses_a_third_link_created_while_hashing() {
         assert!(dir.path().join("third").exists(), "{label}");
     }
 }
+
+/// Part absent (crash right after the publish): recovery hashes the destination through one
+/// handle; if the NAME is swapped while hashing it must refuse and keep the state, never report
+/// `Finished` for the foreign file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_without_a_part_refuses_a_destination_substituted_while_hashing() {
+    let _g = SERIAL.lock().await;
+    let c = content();
+    let (srv, url) = serve("/f.bin", c.clone(), plain()).await;
+    let dir = tempfile::tempdir().unwrap();
+    fault::set_panic_point("part_renamed_final", 1);
+    let crashed = start(url, dir.path().to_path_buf()).await;
+    assert!(
+        crashed.is_err_and(|e| e.is_panic()),
+        "crash point not reached"
+    );
+    let (dest, part) = (dir.path().join("f.bin"), dir.path().join("f.bin.eid-part"));
+    assert!(
+        dest.exists() && !part.exists(),
+        "expected a published dest and no part"
+    );
+    drop(srv); // the origin is gone: recovery must not need the network
+    let sp = dir.path().join("f.bin.eid-state");
+    let (reached, release) = fault::set_pause_point("recovery_hashed");
+    let sp2 = sp.clone();
+    let log = Log::default();
+    let log2 = log.clone();
+    let task = tokio::spawn(async move {
+        eid_engine::resume(
+            &sp2,
+            fast_cfg(2),
+            log2.sink(),
+            eid_engine::CancellationToken::new(),
+        )
+        .await
+    });
+    wait_reached(reached, "recovery_hashed").await;
+    std::fs::rename(&dest, dir.path().join("moved.orig")).unwrap();
+    std::fs::write(&dest, EVIL).unwrap();
+    release.send(()).unwrap();
+    let r = task.await.unwrap();
+    assert!(
+        r.is_err(),
+        "Finished was reported for a destination swapped during verification: {:?}",
+        r.map(|o| o.path)
+    );
+    assert_eq!(std::fs::read(&dest).unwrap(), EVIL, "foreign file touched");
+    assert!(sp.exists(), "state must be kept");
+    assert_eq!(
+        log.count(|e| matches!(e, eid_engine::Event::Finished { .. })),
+        0
+    );
+}

@@ -1702,9 +1702,13 @@ async fn resume_inner(
                 match pfs::open_regular_nofollow_read(&fin) {
                     Ok(h) if h.metadata().is_ok_and(|m| m.len() == t) => {
                         let want = fz.sha256.clone();
-                        tokio::task::spawn_blocking(move || sha256_handle(&h).map(|d| d == want))
-                            .await
-                            .map_err(|e| Error::Network(format!("hash task failed: {e}")))??
+                        tokio::task::spawn_blocking(move || {
+                            let r = sha256_handle(&h).map(|d| d == want);
+                            fault::hit("recovery_hashed");
+                            r
+                        })
+                        .await
+                        .map_err(|e| Error::Network(format!("hash task failed: {e}")))??
                     }
                     _ => false,
                 }
