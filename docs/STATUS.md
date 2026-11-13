@@ -9,8 +9,9 @@
 | P1 المحرّك | لم يبدأ | — |
 
 > موافقات المالك عتيبيّ (2026-11-13 08:34 توقيت الكويت): بند PLAN `conn-cap-by-construction` وإعادة تسمية اختبار الحدّ الزمني في `required_tests.txt` (ADR-0011).
+> موافقة المالك عتيبيّ (2026-11-13 10:12 توقيت الكويت، بتوصية Claude): نقل بند `conn-cap-by-construction` إلى «آخر P1 أو أول P2، بعد B1–B4». ADR-0012 والتبعيات الجديدة ما زالت **مقترحة** (غير مقبولة).
 
-## ديون معروفة (تُحلّ في P2 ببند `conn-cap-by-construction`)
+## ديون معروفة (تُحلّ ببند `conn-cap-by-construction`: آخر P1 أو أول P2، بعد B1–B4)
 - `pool_max_idle_per_host(0)`: مصافحة TCP/TLS جديدة لكل جزء/تقسيم/إعادة محاولة (كلفة أداء على HTTPS). قرار مؤقت لإبقاء السقف على المقابس الفعلية ≤ السقف.
 - **انتظار `2ms` بعد إسقاط الجسم قبل `ResponseClosed` = تخفيف مؤقت موثَّق (TEMPORARY)، ليس ضماناً.** السبب المرجَّح (probable، لا مُثبَت بالهوية — `/workspace/projects/reports/diagnosis.md`): hyper يغلق الـfd في مهمة خلفية بعد إسقاط الجسم/الرد، فقد يتصل الجديد قبل إغلاق القديم (حدث مرة في 90 جولة تحت حمل ≈3× الأنوية: `client_sockets=9`؛ 2300 تشغيل مُجهَّز بعدها بلا تكرار). السقف على المقابس **مُقاس** (جدول النواة، ADR-0011) لا مثبت بالبناء. الحل: `conn-cap-by-construction` (PLAN P2؛ المسودة المقترحة ADR-0012) مؤجَّل لآخر P1/أول P2 **بانتظار توقيع المالك الصريح**. اختبار SockDiag الصارم يبقى كما هو ولا يُحذف أي اسم من `required_tests.txt`؛ إن فشل في CI يُسجَّل هنا ولا يُعاد تشغيله بصمت.
 - اختبارات مقابس النواة (`socket_watch_*`، `socket_closes_mid_download_when_segments_finish_or_split`، `sockdiag_counts_client_sockets_by_ownership_and_sees_closes`) Linux فقط: **لم تُختبر على Windows** (تظهر «NOT TESTED» في `check_required.py`).
