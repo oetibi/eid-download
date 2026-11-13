@@ -544,7 +544,20 @@ async fn concurrent_resume_of_the_same_job_is_refused_busy() {
 /// only the supervised drain can have written progress), and the sidecar is resumable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn aborting_the_caller_drains_the_job_and_persists_a_final_checkpoint() {
-    let (srv, url) = serve("/m4.bin", content(41), slow()).await;
+    // With a plain throttle the whole 16 MiB can finish (and the job remove its sidecar) while a
+    // slow runner (Windows fsync/MoveFileEx, ci-windows run 43413774280 attempt 1) is still
+    // between "2 MiB seen" and the abort/poll below; then no state is ever readable again. So every
+    // response stalls after 2 MiB for 30 s (same as kill_then_resume...): the job cannot complete
+    // inside the observation window, whatever the scheduling or checkpoint latency.
+    let behavior = Behavior {
+        stall: Some(eid_testserver::Stall {
+            after_bytes: 2 << 20,
+            duration: Duration::from_secs(30),
+            once: false,
+        }),
+        ..Behavior::default()
+    };
+    let (srv, url) = serve("/m4.bin", content(41), behavior).await;
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = fast_cfg(4);
     cfg.checkpoint_interval = Duration::from_secs(600); // no periodic checkpoint will fire
@@ -574,18 +587,27 @@ async fn aborting_the_caller_drains_the_job_and_persists_a_final_checkpoint() {
     task.abort(); // the caller goes away
     let _ = task.await;
     // the supervised job drains by itself and writes its final checkpoint
-    let sp = state_file(dir.path()).unwrap();
+    // Known sidecar path (not a directory scan: a scan can land in the primary->.bak rotation gap).
+    let sp = dir.path().join("m4.bin.eid-state");
     let t = std::time::Instant::now();
+    let mut last_frontier: Option<u64> = None;
+    let mut last_load_error: Option<Error> = None;
     let frontier = loop {
-        let done: u64 = state::load(&sp)
-            .map(|s| s.segments.iter().map(|g| g.next - g.start).sum())
-            .unwrap_or(0);
-        if done >= 1 << 20 {
-            break done;
+        match state::load(&sp) {
+            Ok(st) => {
+                let done: u64 = st.segments.iter().map(|g| g.next - g.start).sum();
+                last_frontier = Some(done);
+                if done >= 1 << 20 {
+                    break done;
+                }
+            }
+            // a failed observation is NOT zero bytes of progress: remember it and retry
+            Err(e) => last_load_error = Some(e),
         }
         assert!(
             t.elapsed() < Duration::from_secs(20),
-            "state never advanced after the caller was aborted (job was abandoned)"
+            "state never advanced after the caller was aborted (job was abandoned): \
+             last observed frontier = {last_frontier:?}, last state::load error = {last_load_error:?}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
