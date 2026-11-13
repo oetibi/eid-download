@@ -989,6 +989,7 @@ async fn persist_checkpoint(ctx: &Ctx, info: &JobInfo, state_path: &Path) -> Res
         let snap = table.lock().unwrap().snapshot();
         let st = make_state(&info, Some(total), true, snap);
         fault::hit("before_sync");
+        fault::fail("before_sync").map_err(Error::io("sync data"))?;
         file.sync_data().map_err(Error::io("sync data"))?;
         fault::hit("after_sync");
         state::save(&path, &st)
@@ -1025,14 +1026,21 @@ impl CkptCtl {
     /// Stop accepting new work, join the in-flight `spawn_blocking` (never abort it), then
     /// return. Must be called before any later state write (final checkpoint, finalize /
     /// `remove_all`, ServerChanged restart, cancel).
-    async fn join(self) -> Result<()> {
+    async fn join(mut self) -> Result<()> {
         self.stop.cancel();
         self.notify.notify_one();
-        match self.handle.await {
+        match (&mut self.handle).await {
             Ok(r) => r,
             Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
             Err(e) => Err(Error::Network(format!("checkpoint task failed: {e}"))),
         }
+    }
+}
+
+impl Drop for CkptCtl {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        self.notify.notify_one();
     }
 }
 
@@ -1111,6 +1119,7 @@ async fn run_ranged(
     ckpt.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ckpt.reset();
     let mut fatal: Option<Error> = None;
+    let mut ckpt_closed = false;
     let (ckpt_ctl, mut ckpt_err) = start_ckpt_task(ctx.clone(), info.clone(), state_path);
 
     // the first worker starts immediately
@@ -1122,6 +1131,7 @@ async fn run_ranged(
         }
     }
     loop {
+        fault::coordinator_iteration(fatal.is_some());
         let complete = ctx.table.lock().unwrap().is_complete();
         if complete && set.is_empty() {
             break;
@@ -1171,10 +1181,12 @@ async fn run_ranged(
             _ = ckpt.tick() => {
                 ckpt_ctl.request();
             }
-            maybe_err = ckpt_err.recv() => {
+            maybe_err = ckpt_err.recv(), if !ckpt_closed => {
                 if let Some(e) = maybe_err {
                     fatal.get_or_insert(e);
                     ctx.cancel.cancel();
+                } else {
+                    ckpt_closed = true;
                 }
             }
             _ = prog.tick() => {
@@ -1339,7 +1351,10 @@ pub async fn download(
     sink: EventSink,
     cancel: CancellationToken,
 ) -> Result<Outcome> {
-    supervised(cancel, move |c| download_inner(spec, cfg, sink, c, None)).await
+    supervised(cancel, move |c| {
+        download_inner(spec, cfg, sink, c, None, None)
+    })
+    .await
 }
 
 /// Run the job on its OWN task so that dropping/aborting the caller's future cannot abandon
@@ -1369,6 +1384,7 @@ async fn download_inner(
     sink: EventSink,
     cancel: CancellationToken,
     mut held: Option<JobLock>,
+    mut restart_reason: Option<String>,
 ) -> Result<Outcome> {
     let st = prepare(&spec)?;
     let client = http::build_client(&cfg)?;
@@ -1431,7 +1447,11 @@ async fn download_inner(
             make_state(&info, probe.total, false, vec![])
         };
         let sp = f.state.clone();
+        let restarting = restart_reason.is_some();
         tokio::task::spawn_blocking(move || -> Result<()> {
+            if restarting {
+                fault::fail("restart_state_write").map_err(Error::io("restart state write"))?;
+            }
             state::save(&sp, &init)?;
             state::remove_backup(&sp)?;
             Ok(())
@@ -1441,6 +1461,9 @@ async fn download_inner(
         file.set_len(0).map_err(Error::io("truncate"))?;
         if let Some(t) = probe.total {
             pfs::preallocate(&file, t).map_err(Error::io("preallocate"))?;
+        }
+        if let Some(reason) = restart_reason.take() {
+            sink(Event::Restarted { reason });
         }
         fault::hit("restart_truncated");
         let peaks: (u64, usize);
@@ -1491,9 +1514,8 @@ async fn download_inner(
             }
             Err(Error::ServerChanged) if restarts < cfg.max_restarts => {
                 restarts += 1;
-                sink(Event::Restarted {
-                    reason: "the file changed on the server or ranges stopped working".into(),
-                });
+                restart_reason =
+                    Some("the file changed on the server or ranges stopped working".into());
                 continue;
             }
             Err(e) => return Err(e),
@@ -1715,9 +1737,7 @@ async fn resume_inner(
     };
     let Some(part_file) = part_file else {
         let reason = restart_reason.unwrap_or("data file does not match the state");
-        sink(Event::Restarted {
-            reason: reason.to_string(),
-        });
+
         let _ = std::fs::remove_file(&part);
         state::remove_all(state_path);
         // the job lock is handed over, never released in between (review M1)
@@ -1731,6 +1751,7 @@ async fn resume_inner(
             sink,
             cancel,
             Some(lock),
+            Some(reason.to_string()),
         )
         .await;
     };
@@ -1809,9 +1830,6 @@ async fn resume_inner(
             .await
         }
         Err(Error::ServerChanged) => {
-            sink(Event::Restarted {
-                reason: "the file changed on the server".into(),
-            });
             drop(ctx);
             drop(file);
             let _ = std::fs::remove_file(&part);
@@ -1826,6 +1844,7 @@ async fn resume_inner(
                 sink,
                 cancel,
                 Some(lock),
+                Some("the file changed on the server".into()),
             )
             .await
         }

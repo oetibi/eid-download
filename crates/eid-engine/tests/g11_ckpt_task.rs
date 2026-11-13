@@ -1,12 +1,13 @@
 //! Coordinator checkpoint task (PR5): a parked checkpoint must not stall ramp/split,
 //! and must be joined before any later state write (finalization, ServerChanged restart,
 //! cancel). Own test binary: uses the process-global `fault::set_pause_point`. One test
-//! function, four cases, no timing bounds on the properties (the 30 s waits are a safety
+//! function, sequential cases, no timing bounds on the properties (the 30 s waits are a safety
 //! watchdog only).
 mod common;
 use common::*;
 use eid_engine::{fault, Error, Event, JobSpec};
 use eid_testserver::{Behavior, ChangeAfter, Content, Cut};
+use futures_util::FutureExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -22,7 +23,7 @@ async fn recv_barrier(
         (ok, reached)
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|e| panic!("{what}: barrier task failed: {e}"));
     assert!(ok, "{what}: checkpoint barrier was never reached");
     reached
 }
@@ -112,7 +113,7 @@ async fn parked_checkpoint_allows_split_and_ramp_to_cap() {
         },
     )
     .await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a: operation failed");
     let mut cfg = fast_cfg(8);
     cfg.checkpoint_interval = Duration::from_millis(5);
     cfg.ramp_interval = Duration::from_millis(5);
@@ -133,8 +134,11 @@ async fn parked_checkpoint_allows_split_and_ramp_to_cap() {
         || splits_after(&log, splits_at_pause) >= 1 && peak_workers(&log) >= cap,
     )
     .await;
-    release.send(()).unwrap();
-    let o = task.await.unwrap().unwrap();
+    release.send(()).expect("a: operation failed");
+    let o = task
+        .await
+        .expect("a: operation failed")
+        .expect("a: operation failed");
     assert_eq!(sha_of_file(&o.path), content.sha256_hex(), "a: sha");
 }
 
@@ -146,7 +150,7 @@ async fn parked_checkpoint_is_joined_before_remove_all() {
         len: 4 << 20,
     };
     let (_srv, url) = serve("/b.bin", content.clone(), Behavior::default()).await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("b: operation failed");
     let mut cfg = fast_cfg(4);
     cfg.checkpoint_interval = Duration::from_millis(5);
     let (reached, release) = fault::set_pause_point("before_sync");
@@ -174,8 +178,11 @@ async fn parked_checkpoint_is_joined_before_remove_all() {
         log.count(|e| matches!(e, Event::Finished { .. })) == 0,
         "b: Finished was emitted before the parked checkpoint was joined"
     );
-    release.send(()).unwrap();
-    let o = task.await.unwrap().unwrap();
+    release.send(()).expect("b: operation failed");
+    let o = task
+        .await
+        .expect("b: operation failed")
+        .expect("b: operation failed");
     assert_eq!(sha_of_file(&o.path), content.sha256_hex(), "b: sha");
     assert!(
         log.count(|e| matches!(e, Event::Checkpoint { .. })) >= 1,
@@ -213,7 +220,7 @@ async fn parked_checkpoint_cannot_overwrite_new_generation_state() {
         ..Behavior::default()
     };
     let (srv, url) = serve("/c.bin", a, beh).await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("c: operation failed");
     let mut cfg = fast_cfg(4);
     cfg.checkpoint_interval = Duration::from_millis(5);
     cfg.max_attempts = 80;
@@ -237,6 +244,12 @@ async fn parked_checkpoint_cannot_overwrite_new_generation_state() {
         },
     )
     .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        log.count(|e| matches!(e, Event::Restarted { .. })),
+        0,
+        "c: Restarted before checkpoint join"
+    );
     let sp = state_path(dir.path(), "c.bin");
     let st = eid_engine::state::load(&sp).expect("c: state should still be the old generation");
     assert_eq!(
@@ -248,40 +261,34 @@ async fn parked_checkpoint_cannot_overwrite_new_generation_state() {
         st.restarts, 0,
         "c: restart began before the parked checkpoint was joined"
     );
-    release.send(()).unwrap();
+    release.send(()).expect("c: operation failed");
     wait_pred("c: Restarted after the join", || {
         log.count(|e| matches!(e, Event::Restarted { .. })) >= 1
     })
     .await;
-    // Restarted is emitted *before* the next loop iteration writes the new-generation
-    // state, so etag A can still be on disk for a moment. Wait until B appears, then
-    // make sure A never comes back (that would be the in-flight overwrite, B1).
-    wait_pred("c: new-generation state written", || {
-        eid_engine::state::load(&sp)
-            .ok()
-            .is_some_and(|st| st.etag.as_deref() == Some(etag_b.as_str()) || st.restarts >= 1)
-    })
-    .await;
+    let st = eid_engine::state::load(&sp).expect("c: state immediately after Restarted");
+    assert_eq!(
+        st.etag.as_deref(),
+        Some(etag_b.as_str()),
+        "c: Restarted preceded new state"
+    );
     let job = task;
     let finished = loop {
         if job.is_finished() {
-            break job.await.unwrap();
+            break job.await.expect("c: operation failed");
         }
         if sp.exists() {
             if let Ok(st) = eid_engine::state::load(&sp) {
-                assert_ne!(
+                assert_eq!(
                     st.etag.as_deref(),
-                    Some(etag_a.as_str()),
-                    "c: old checkpoint overwrote the new-generation state (B1)"
+                    Some(etag_b.as_str()),
+                    "c: state after Restarted must remain B"
                 );
-                if let Some(e) = st.etag.as_deref() {
-                    assert_eq!(e, etag_b, "c: unexpected etag after restart: {e}");
-                }
             }
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
-    let o = finished.unwrap();
+    let o = finished.expect("c: operation failed");
     assert_eq!(
         sha_of_file(&o.path),
         b.sha256_hex(),
@@ -305,7 +312,7 @@ async fn cancel_while_checkpoint_parked_then_resume_is_exact() {
         },
     )
     .await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("d: operation failed");
     let mut cfg = fast_cfg(4);
     cfg.checkpoint_interval = Duration::from_millis(5);
     let (reached, release) = fault::set_pause_point("before_sync");
@@ -324,8 +331,8 @@ async fn cancel_while_checkpoint_parked_then_resume_is_exact() {
         !task.is_finished(),
         "d: the job returned before the parked checkpoint was joined"
     );
-    release.send(()).unwrap();
-    let r = task.await.unwrap();
+    release.send(()).expect("d: operation failed");
+    let r = task.await.expect("d: operation failed");
     assert!(
         matches!(r, Err(Error::Cancelled)),
         "d: expected Cancelled after join, got {:?}",
@@ -336,7 +343,7 @@ async fn cancel_while_checkpoint_parked_then_resume_is_exact() {
     assert!(sp.exists(), "d: final checkpoint after cancel is missing");
     let o = eid_engine::resume(&sp, cfg, Log::default().sink(), CancellationToken::new())
         .await
-        .unwrap();
+        .expect("d: operation failed");
     assert_eq!(
         sha_of_file(&o.path),
         content.sha256_hex(),
@@ -344,10 +351,156 @@ async fn cancel_while_checkpoint_parked_then_resume_is_exact() {
     );
 }
 
+/// (e) Checkpoint failure must stop the job without spinning on the closed channel.
+async fn checkpoint_error_has_bounded_drain() {
+    let content = Content::Generated {
+        seed: 1106,
+        len: 6 << 20,
+    };
+    let (_srv, url) = serve(
+        "/e.bin",
+        content,
+        Behavior {
+            throttle_bps: Some(3_000_000),
+            ..Behavior::default()
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().expect("e: tempdir");
+    let mut cfg = fast_cfg(4);
+    cfg.checkpoint_interval = Duration::from_millis(5);
+    let before = fault::drain_iterations();
+    let (reached, release) = fault::set_pause_point("write_reserved");
+    let task = start_download(
+        url,
+        dir.path().to_path_buf(),
+        cfg,
+        Log::default().sink(),
+        CancellationToken::new(),
+    );
+    let _reached = recv_barrier(reached, "e").await;
+    fault::set_fail_point("before_sync", 0, 1);
+    wait_pred(
+        "e: checkpoint error received while writer is parked",
+        || fault::drain_iterations() > before,
+    )
+    .await;
+    // Keep a worker in flight so a closed-channel spin cannot escape observation.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let held_iterations = fault::drain_iterations() - before;
+    release.send(()).expect("e: release writer");
+    let result = tokio::time::timeout(WATCHDOG, task)
+        .await
+        .expect("e: job timed out")
+        .expect("e: job panicked");
+    assert!(
+        held_iterations < 100,
+        "e: coordinator spun with writer parked: {held_iterations}"
+    );
+    let err = result.expect_err("e: checkpoint failure was ignored");
+    assert!(
+        err.to_string().contains("before_sync"),
+        "e: wrong error: {err}"
+    );
+    let iterations = fault::drain_iterations() - before;
+    assert!(
+        iterations < 100,
+        "e: coordinator spun during drain: {iterations}"
+    );
+}
+
+/// (f) A failed new-generation state write must not announce Restarted.
+async fn failed_restart_write_does_not_emit_restarted() {
+    let content = Content::Generated {
+        seed: 1107,
+        len: 6 << 20,
+    };
+    let (_srv, url) = serve(
+        "/f.bin",
+        content,
+        Behavior {
+            cut: Cut::EveryBytes(400_000),
+            change_after: Some(ChangeAfter {
+                requests: None,
+                bytes_sent: Some(1 << 20),
+                new_content: Content::Generated {
+                    seed: 1108,
+                    len: 6 << 20,
+                },
+            }),
+            ..Behavior::default()
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().expect("f: tempdir");
+    fault::set_fail_point("restart_state_write", 0, 1);
+    let log = Log::default();
+    let result = tokio::time::timeout(
+        WATCHDOG,
+        start_download(
+            url,
+            dir.path().to_path_buf(),
+            fast_cfg(4),
+            log.sink(),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("f: job timed out")
+    .expect("f: job panicked");
+    let err = result.expect_err("f: restart write failure was ignored");
+    assert!(
+        err.to_string().contains("restart_state_write"),
+        "f: wrong error: {err}"
+    );
+    assert_eq!(
+        log.count(|e| matches!(e, Event::Restarted { .. })),
+        0,
+        "f: Restarted emitted despite failed state write"
+    );
+}
+
+async fn run_case(name: &str, case: impl std::future::Future<Output = ()>) {
+    if let Err(payload) = std::panic::AssertUnwindSafe(case).catch_unwind().await {
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic");
+        panic!("{name}: {message}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn checkpoint_task_does_not_block_ramp_and_is_joined_before_state_writes() {
-    parked_checkpoint_allows_split_and_ramp_to_cap().await;
-    parked_checkpoint_is_joined_before_remove_all().await;
-    parked_checkpoint_cannot_overwrite_new_generation_state().await;
-    cancel_while_checkpoint_parked_then_resume_is_exact().await;
+    run_case(
+        "a: parked_checkpoint_allows_split_and_ramp_to_cap",
+        parked_checkpoint_allows_split_and_ramp_to_cap(),
+    )
+    .await;
+    run_case(
+        "b: parked_checkpoint_is_joined_before_remove_all",
+        parked_checkpoint_is_joined_before_remove_all(),
+    )
+    .await;
+    run_case(
+        "c: parked_checkpoint_cannot_overwrite_new_generation_state",
+        parked_checkpoint_cannot_overwrite_new_generation_state(),
+    )
+    .await;
+    run_case(
+        "d: cancel_while_checkpoint_parked_then_resume_is_exact",
+        cancel_while_checkpoint_parked_then_resume_is_exact(),
+    )
+    .await;
+    run_case(
+        "e: checkpoint_error_has_bounded_drain",
+        checkpoint_error_has_bounded_drain(),
+    )
+    .await;
+    run_case(
+        "f: failed_restart_write_does_not_emit_restarted",
+        failed_restart_write_does_not_emit_restarted(),
+    )
+    .await;
 }
