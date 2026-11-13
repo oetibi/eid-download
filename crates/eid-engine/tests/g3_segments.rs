@@ -216,7 +216,7 @@ async fn retry_after_429_respected_and_403_lowers_connections() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn limiter_real_time_smoke_within_25_percent() {
+async fn limiter_real_time_smoke_bounded() {
     // 2 MiB at 1 MiB/s ~ 2 s (smoke only; the precise test is the virtual-time one)
     let len = 2u64 << 20;
     let (_srv, url) = serve(
@@ -232,10 +232,11 @@ async fn limiter_real_time_smoke_within_25_percent() {
     let (o, _) = get(&url, dir.path(), cfg).await.unwrap();
     let secs = t.elapsed().as_secs_f64();
     assert_eq!(o.size, len);
-    assert!(
-        (1.5..=2.5).contains(&secs),
-        "took {secs:.2}s, expected ~2s +-25%"
-    );
+    // Lower bound strict: proves the limiter really limits. Upper bound loose (ADR-0011): slow
+    // 2-core CI runners add hashing/fsync/scheduling time. Rate accuracy is proven by the 5%
+    // virtual-time test `limiter_rate_within_5_percent_virtual_time`.
+    assert!(secs >= 1.5, "limiter did not slow the transfer: {secs:.2}s");
+    assert!(secs <= 4.0, "limiter stalled the transfer: {secs:.2}s");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
