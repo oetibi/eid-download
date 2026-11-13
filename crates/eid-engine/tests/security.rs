@@ -99,6 +99,62 @@ async fn security_hostile_url_path_names() {
     }
 }
 
+/// Not unix-only: `std::fs::hard_link` works on Windows too and eid-platform enforces the link
+/// count there (nNumberOfLinks), so this test is in required_tests.txt WITHOUT a `unix:` prefix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn security_hardlinked_part_file_is_refused_on_resume() {
+    use eid_engine::{CancellationToken, Error};
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.bin");
+    std::fs::write(&victim, vec![7u8; 4096]).unwrap();
+    let (srv, url) = serve(
+        "/h.bin",
+        Content::Generated {
+            seed: 1,
+            len: 8 << 20,
+        },
+        Behavior {
+            throttle_bps: Some(2_000_000),
+            ..Behavior::default()
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        c2.cancel();
+    });
+    let r = eid_engine::download(
+        eid_engine::JobSpec {
+            url,
+            dir: dir.path().into(),
+            file_name: None,
+        },
+        fast_cfg(2),
+        Log::default().sink(),
+        cancel,
+    )
+    .await;
+    assert!(matches!(r, Err(Error::Cancelled)));
+    // attacker swaps the part file for a hard link to a victim file
+    let part = dir.path().join("h.bin.eid-part");
+    std::fs::remove_file(&part).unwrap();
+    std::fs::hard_link(&victim, &part).unwrap();
+    let sp = dir.path().join("h.bin.eid-state");
+    let r = eid_engine::resume(
+        &sp,
+        fast_cfg(2),
+        Log::default().sink(),
+        CancellationToken::new(),
+    )
+    .await;
+    assert!(r.is_err(), "hardlinked part must not be written through");
+    assert_eq!(std::fs::read(&victim).unwrap(), vec![7u8; 4096]);
+    drop(srv);
+}
+
 #[cfg(unix)]
 mod links {
     use super::*;
@@ -122,60 +178,6 @@ mod links {
             .unwrap()
             .file_type()
             .is_symlink());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn security_hardlinked_part_file_is_refused_on_resume() {
-        use eid_engine::{CancellationToken, Error};
-        let outside = tempfile::tempdir().unwrap();
-        let victim = outside.path().join("victim.bin");
-        std::fs::write(&victim, vec![7u8; 4096]).unwrap();
-        let (srv, url) = serve(
-            "/h.bin",
-            Content::Generated {
-                seed: 1,
-                len: 8 << 20,
-            },
-            Behavior {
-                throttle_bps: Some(2_000_000),
-                ..Behavior::default()
-            },
-        )
-        .await;
-        let dir = tempfile::tempdir().unwrap();
-        let cancel = CancellationToken::new();
-        let c2 = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-            c2.cancel();
-        });
-        let r = eid_engine::download(
-            eid_engine::JobSpec {
-                url,
-                dir: dir.path().into(),
-                file_name: None,
-            },
-            fast_cfg(2),
-            Log::default().sink(),
-            cancel,
-        )
-        .await;
-        assert!(matches!(r, Err(Error::Cancelled)));
-        // attacker swaps the part file for a hard link to a victim file
-        let part = dir.path().join("h.bin.eid-part");
-        std::fs::remove_file(&part).unwrap();
-        std::fs::hard_link(&victim, &part).unwrap();
-        let sp = dir.path().join("h.bin.eid-state");
-        let r = eid_engine::resume(
-            &sp,
-            fast_cfg(2),
-            Log::default().sink(),
-            CancellationToken::new(),
-        )
-        .await;
-        assert!(r.is_err(), "hardlinked part must not be written through");
-        assert_eq!(std::fs::read(&victim).unwrap(), vec![7u8; 4096]);
-        drop(srv);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

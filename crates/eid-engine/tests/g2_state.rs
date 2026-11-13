@@ -319,7 +319,7 @@ async fn state_has_no_secrets_and_is_private() {
             "{p:?} must be owner-only"
         );
     }
-    let dbg = format!("{:?}", log.0.lock().unwrap());
+    let dbg = format!("{:?}", log.events.lock().unwrap());
     assert!(
         !dbg.contains("HUNTER2pw"),
         "events must not carry the password"

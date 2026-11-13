@@ -6,5 +6,6 @@
 //! but NOT executed here: see docs/STATUS.md "not tested on real Windows".
 
 pub mod fs;
+pub mod net;
 pub mod process;
 pub const IS_WINDOWS: bool = cfg!(windows);

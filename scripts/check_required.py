@@ -4,14 +4,24 @@ executed and passed (not ignored, not missing). Exit 1 otherwise."""
 import re, subprocess, sys, pathlib
 root = pathlib.Path(__file__).resolve().parent.parent
 import platform
+
+# Windows consoles default to cp1252: printing the failure marker must never crash the checker
+# (CI run 43387076026). A failed check must stay visible AND exit non-zero.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 _win = platform.system() == "Windows"
 req = []
+not_tested = []
 for l in (root / "scripts/required_tests.txt").read_text().splitlines():
     l = l.strip()
     if not l or l.startswith("#"):
         continue
     if l.startswith("unix:"):          # genuinely Unix-only test (symlinks, rustls backend, SIGINT)
         if _win:
+            not_tested.append(l[5:])
             continue
         l = l[5:]
     req.append(l)
@@ -30,6 +40,9 @@ for name in req:
     hits = [k for k in results if k == name or k.endswith("::" + name)]
     if not hits: bad.append((name, "NOT RUN"))
     elif any(results[h] != "ok" for h in hits): bad.append((name, ",".join(results[h] for h in hits)))
+if not_tested:
+    print("\nNOT TESTED ON THIS PLATFORM (Unix-only required tests; they do NOT count as passed):")
+    for n in not_tested: print("  -", n)
 print(f"\nrequired: {len(req)}  ok: {len(req)-len(bad)}  bad: {len(bad)}")
 for n, why in bad: print("  ✗", n, why)
 sys.exit(1 if (bad or p.returncode != 0) else 0)

@@ -256,6 +256,7 @@ struct Active {
     shared: Arc<Shared>,
     path: String,
     index: usize,
+    conn_id: usize,
     generation: u64,
 }
 impl Active {
@@ -283,6 +284,16 @@ impl Drop for Active {
             .get_mut(&self.path)
         {
             entry.active = entry.active.saturating_sub(1);
+            if entry.generation == self.generation {
+                let after = entry.active;
+                entry.stats.events.push(crate::ServerEvent {
+                    t_us: crate::now_us(),
+                    kind: crate::ServerEventKind::RequestEnd,
+                    conn_id: self.conn_id,
+                    request_index: self.index,
+                    active_after: after,
+                });
+            }
         }
         self.shared.changed.notify_waiters();
     }
@@ -378,6 +389,14 @@ fn prepare(shared: &Arc<Shared>, req: &Request, conn_id: usize) -> Option<Respon
         None
     };
     let index = entry.stats.requests.len();
+    let active_now = entry.active;
+    entry.stats.events.push(crate::ServerEvent {
+        t_us: crate::now_us(),
+        kind: crate::ServerEventKind::RequestStart,
+        conn_id,
+        request_index: index,
+        active_after: active_now,
+    });
     entry.stats.requests.push(RequestLog {
         method: req.method.clone(),
         range_header: req.headers.get("range").cloned(),
@@ -403,6 +422,7 @@ fn prepare(shared: &Arc<Shared>, req: &Request, conn_id: usize) -> Option<Respon
             shared: shared.clone(),
             path: req.path.clone(),
             index,
+            conn_id,
             generation: entry.generation,
         },
     })
@@ -468,6 +488,35 @@ fn cut_limit(cut: &Cut, id: usize) -> Option<u64> {
             } else {
                 min + x % (width + 1)
             })
+        }
+    }
+}
+
+/// Fails promptly when the peer has closed (EOF/RST), so the in-flight counter is released at
+/// the moment of close instead of at the next failed write (ADR-0011). Uses a non-blocking
+/// PEEK, so no byte of a pipelined/next request is ever consumed.
+fn check_open(socket: &TcpStream) -> io::Result<()> {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let mut b = [0u8; 1];
+    let mut fut = std::pin::pin!(socket.peek(&mut b));
+    match fut.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(Ok(0)) => Err(io::ErrorKind::ConnectionAborted.into()),
+        Poll::Ready(Ok(_)) | Poll::Pending => Ok(()),
+        Poll::Ready(Err(e)) => Err(e),
+    }
+}
+
+async fn sleep_unless_closed(socket: &TcpStream, deadline: Instant) -> io::Result<()> {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return Ok(()),
+            r = socket.readable() => {
+                r?;
+                check_open(socket)?;
+                // readable because of pipelined data (peek leaves it): keep waiting without spinning
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         }
     }
 }
@@ -580,13 +629,14 @@ async fn send_response(
     while sent < send_len {
         if let Some(stall) = &r.stall {
             if !stalled && sent >= stall.after_bytes {
-                tokio::time::sleep(stall.duration).await;
+                sleep_unless_closed(socket, Instant::now() + stall.duration).await?;
                 stalled = true;
             }
         }
         if bps == Some(0) {
-            std::future::pending::<()>().await;
+            sleep_unless_closed(socket, Instant::now() + Duration::from_secs(86_400)).await?;
         }
+        check_open(socket)?;
         let mut n = (send_len - sent).min(CHUNK as u64);
         if let Some(stall) = &r.stall {
             if !stalled && sent < stall.after_bytes {
@@ -599,7 +649,7 @@ async fn send_response(
             // Each increment is at most one second, even for u64::MAX fixtures.
             // Keep a cumulative deadline so write overhead cannot increase the cap.
             deadline += Duration::from_secs_f64(n as f64 / speed.max(1) as f64);
-            tokio::time::sleep_until(deadline).await;
+            sleep_unless_closed(socket, deadline).await?;
         }
         let bytes = r
             .content
@@ -622,6 +672,31 @@ async fn send_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `check_open` must never consume bytes (keep-alive / pipelined requests) and must notice
+    /// a close at once.
+    #[tokio::test]
+    async fn check_open_peeks_without_consuming_and_detects_close() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let mut peer = TcpStream::connect(addr).await.unwrap();
+        let (mut srv, _) = l.accept().await.unwrap();
+        assert!(check_open(&srv).is_ok(), "idle open socket");
+        peer.write_all(b"x").await.unwrap();
+        srv.readable().await.unwrap();
+        assert!(check_open(&srv).is_ok(), "pending byte is not an error");
+        assert!(check_open(&srv).is_ok(), "and peeking twice still works");
+        let mut b = [0u8; 1];
+        srv.read_exact(&mut b).await.unwrap();
+        assert_eq!(&b, b"x", "the byte was not consumed by check_open");
+        drop(peer);
+        let t = std::time::Instant::now();
+        while check_open(&srv).is_ok() {
+            assert!(t.elapsed() < Duration::from_secs(2), "close never detected");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
 
     #[test]
     fn range_parser_checks_overflow_and_strict_decimal_syntax() {

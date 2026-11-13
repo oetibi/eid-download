@@ -69,6 +69,14 @@ pub enum Event {
     Finished {
         size: u64,
     },
+    /// A response (one TCP connection) became active for segment `seg`.
+    ResponseOpened {
+        seg: usize,
+    },
+    /// That response was dropped (emitted strictly after its body stream was dropped).
+    ResponseClosed {
+        seg: usize,
+    },
 }
 
 pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
@@ -337,6 +345,20 @@ impl Ctx {
                 r
             }
         };
+        self.emit(Event::ResponseOpened { seg });
+        let r = self.stream_segment(seg, resp).await;
+        // hyper closes the socket asynchronously in its connection task after the body is
+        // dropped; give it a moment so a replacement connection does not overlap the old
+        // socket (ADR-0011: real-socket cap). Cost: 2 ms per response, i.e. per segment.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        self.emit(Event::ResponseClosed { seg });
+        r
+    }
+
+    /// Consume one response body into segment `seg`. The body stream is dropped (connection
+    /// closing) when this returns, before the caller reports the response closed.
+    async fn stream_segment(&self, seg: usize, resp: Response) -> std::result::Result<(), Fail> {
         let mut stream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::with_capacity(self.cfg.write_chunk + 16 * 1024);
         loop {

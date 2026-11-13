@@ -165,8 +165,36 @@ impl Behavior {
     }
 }
 
+/// Wall-clock microseconds since the Unix epoch (comparable with client-side timestamps).
+pub fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerEventKind {
+    /// A request was accepted and its response started.
+    RequestStart,
+    /// The server finished (or gave up on) that response: it noticed the client was gone.
+    RequestEnd,
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerEvent {
+    pub t_us: u64,
+    pub kind: ServerEventKind,
+    pub conn_id: usize,
+    pub request_index: usize,
+    /// Number of in-flight responses on this path right after the event.
+    pub active_after: usize,
+}
+
 #[derive(Default, Clone, Debug)]
 pub struct Stats {
+    /// Timestamped request start/end log (evidence for concurrency questions).
+    pub events: Vec<ServerEvent>,
     pub requests: Vec<RequestLog>,
     pub connections_accepted: usize,
     pub peak_concurrent: usize,
