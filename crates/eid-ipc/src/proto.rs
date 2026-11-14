@@ -53,7 +53,10 @@ impl Command {
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub v: u32,
-    /// Client-chosen idempotency key: the same id never runs its command twice.
+    /// Client-chosen idempotency key: the same id never runs its command twice (while the app
+    /// that saw it is alive: ids are kept in memory only). The cache is global, keyed by this id
+    /// alone, and also replays failures, so a client (the P6 extension in particular) must use a
+    /// fresh unique id per user action and reuse one only to retry that very action.
     pub id: String,
     pub command: Command,
 }

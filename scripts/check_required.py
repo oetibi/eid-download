@@ -19,11 +19,16 @@ for l in (root / "scripts/required_tests.txt").read_text().splitlines():
     l = l.strip()
     if not l or l.startswith("#"):
         continue
-    if l.startswith("unix:"):          # genuinely Unix-only test (symlinks, rustls backend, SIGINT)
-        if _win:
-            not_tested.append(l[5:])
+    # `unix:` = genuinely Unix-only (symlinks, rustls backend, SIGINT); `windows:` = genuinely
+    # Windows-only (pipe DACL, HKCU registry). On the other platform the name is reported as
+    # NOT TESTED (it does not count as passed) but it is still required on its own platform, so
+    # deleting or #[ignore]-ing it turns that platform's CI red.
+    if l.startswith("unix:") or l.startswith("windows:"):
+        prefix, name = l.split(":", 1)
+        if (prefix == "unix") == _win:
+            not_tested.append(prefix + ":" + name)
             continue
-        l = l[5:]
+        l = name
     req.append(l)
 extra = sys.argv[1:]
 p = subprocess.run(["cargo", "test", "--workspace", "--no-fail-fast", *extra, "--", "--test-threads=4"],

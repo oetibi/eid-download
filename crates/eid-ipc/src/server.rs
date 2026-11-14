@@ -34,6 +34,8 @@ pub struct ServeOptions {
     pub handshake_timeout: Duration,
     /// A connection idle for this long is closed.
     pub idle_timeout: Duration,
+    /// Time allowed to write one reply; a peer that stops reading is dropped (its slot is freed).
+    pub write_timeout: Duration,
     /// Simultaneous connections; extra ones are dropped immediately.
     pub max_connections: usize,
     /// Remembered request ids (oldest forgotten first).
@@ -45,6 +47,7 @@ impl Default for ServeOptions {
         ServeOptions {
             handshake_timeout: Duration::from_secs(5),
             idle_timeout: Duration::from_secs(120),
+            write_timeout: Duration::from_secs(10),
             max_connections: 64,
             dedup_capacity: 1024,
         }
@@ -101,14 +104,20 @@ fn handle_once(dedup: &Mutex<Dedup>, handler: &dyn Handler, req: Request) -> Res
     resp
 }
 
-async fn send(stream: &mut Stream, resp: &Response) -> Result<(), FrameError> {
+async fn send(stream: &mut Stream, resp: &Response, limit: Duration) -> Result<(), FrameError> {
     let mut bytes =
         serde_json::to_vec(resp).map_err(|e| FrameError::Io(std::io::Error::other(e)))?;
     if bytes.len() > MAX_FRAME {
         bytes = serde_json::to_vec(&Response::err(&resp.id, "response too large"))
             .map_err(|e| FrameError::Io(std::io::Error::other(e)))?;
     }
-    write_frame(stream, &bytes).await
+    match tokio::time::timeout(limit, write_frame(stream, &bytes)).await {
+        Ok(r) => r,
+        Err(_) => Err(FrameError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the peer stopped reading",
+        ))),
+    }
 }
 
 async fn serve_connection(
@@ -118,6 +127,7 @@ async fn serve_connection(
     dedup: Arc<Mutex<Dedup>>,
     opts: ServeOptions,
 ) {
+    let wt = opts.write_timeout;
     // --- handshake: one small frame, bounded in size and time
     let hello = tokio::time::timeout(opts.handshake_timeout, read_frame_max(&mut s, 4096)).await;
     let Ok(Ok(bytes)) = hello else {
@@ -128,6 +138,7 @@ async fn serve_connection(
             if send(
                 &mut s,
                 &Response::ok("", serde_json::json!({"hello": true})),
+                wt,
             )
             .await
             .is_err()
@@ -136,12 +147,12 @@ async fn serve_connection(
             }
         }
         Ok(_) => {
-            let _ = send(&mut s, &Response::err("", "authentication failed")).await;
+            let _ = send(&mut s, &Response::err("", "authentication failed"), wt).await;
             let _ = s.shutdown().await;
             return;
         }
         Err(e) => {
-            let _ = send(&mut s, &Response::err("", e)).await;
+            let _ = send(&mut s, &Response::err("", e), wt).await;
             let _ = s.shutdown().await;
             return;
         }
@@ -153,18 +164,18 @@ async fn serve_connection(
             Ok(Err(FrameError::Closed)) | Err(_) => return,
             Ok(Err(e)) => {
                 // oversized / truncated / empty / io: one error reply (best effort), then close
-                let _ = send(&mut s, &Response::err("", e.to_string())).await;
+                let _ = send(&mut s, &Response::err("", e.to_string()), wt).await;
                 return;
             }
         };
         let resp = match proto::parse_request(&frame) {
             Ok(req) => handle_once(&dedup, handler.as_ref(), req),
             Err(e) => {
-                let _ = send(&mut s, &Response::err("", e)).await;
+                let _ = send(&mut s, &Response::err("", e), wt).await;
                 return; // a peer that sends garbage is disconnected
             }
         };
-        if send(&mut s, &resp).await.is_err() {
+        if send(&mut s, &resp, wt).await.is_err() {
             return;
         }
     }

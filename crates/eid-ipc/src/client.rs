@@ -70,7 +70,33 @@ pub struct Client {
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl Client {
+    /// Connect and authenticate. A refused token is retried twice (100 ms apart): a starting app
+    /// binds the endpoint a moment BEFORE it publishes its new token, so a client in that gap
+    /// still sees the previous run's token file; the retry re-reads the file.
     pub async fn connect(ep: &Endpoint) -> Result<Client, ClientError> {
+        Self::connect_with_retry(ep, 2, Duration::from_millis(100)).await
+    }
+
+    /// [`connect`](Self::connect) with an explicit number of retries after an authentication
+    /// failure and the pause between them.
+    pub async fn connect_with_retry(
+        ep: &Endpoint,
+        retries: u32,
+        pause: Duration,
+    ) -> Result<Client, ClientError> {
+        let mut left = retries;
+        loop {
+            match Self::connect_once(ep).await {
+                Err(ClientError::Auth(_)) if left > 0 => {
+                    left -= 1;
+                    tokio::time::sleep(pause).await;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    async fn connect_once(ep: &Endpoint) -> Result<Client, ClientError> {
         let mut stream = match ipc::connect(&ep.name).await {
             Ok(s) => s,
             Err(e) if ipc::is_absent(&e) => return Err(ClientError::NotRunning),

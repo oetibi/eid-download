@@ -357,9 +357,13 @@ async fn remote_add_never_lets_the_caller_choose_a_directory_and_keeps_secrets_o
         !file.contains("HUNTER2SECRET"),
         "password leaked into the queue file"
     );
+    // DECISION (DESIGN_NOTES Round 9): the query string is part of the address that must be
+    // fetched again after a restart, so the queue file keeps it (signed links need it); only the
+    // user:password part is dropped. IPC `list`, logs and errors never show it (asserted above
+    // and below). Pinning it here means a change of that decision has to change this test.
     assert!(
-        !file.contains("QUERYSECRET") || file.contains("token="),
-        "{file}"
+        file.contains("token=QUERYSECRET"),
+        "the query string must be kept in the queue file so the download can resume: {file}"
     );
     assert!(!file.contains("user:"), "{file}");
     let item: serde_json::Value = serde_json::from_str(&file).unwrap();
