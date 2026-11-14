@@ -30,7 +30,7 @@ pub struct AppLauncher {
 }
 
 impl AppLauncher {
-    fn resolve(&self) -> std::io::Result<std::path::PathBuf> {
+    pub fn resolve(&self) -> std::io::Result<std::path::PathBuf> {
         let exe = match &self.exe {
             Some(p) => p.clone(),
             None => std::env::current_exe()?

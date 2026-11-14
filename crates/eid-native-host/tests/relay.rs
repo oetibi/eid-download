@@ -339,3 +339,50 @@ async fn nm_survives_the_app_restarting_between_messages_without_double_running(
     assert_eq!(rec2.calls.lock().unwrap().len(), 1);
     run2.stop().await;
 }
+
+#[test]
+fn the_launcher_refuses_a_missing_program_whether_overridden_or_looked_up_next_to_the_host() {
+    use eid_native_host::AppLauncher;
+    let d = tempfile::tempdir().unwrap();
+    let ep = Endpoint {
+        name: "x".into(),
+        token_path: d.path().join("tok"),
+    };
+    // override pointing nowhere
+    let l = AppLauncher {
+        exe: Some(d.path().join("missing")),
+        endpoint: ep.clone(),
+    };
+    assert_eq!(
+        l.resolve().unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert!(l.launch().is_err());
+    // a directory is not a program either
+    let l = AppLauncher {
+        exe: Some(d.path().to_path_buf()),
+        endpoint: ep.clone(),
+    };
+    assert_eq!(
+        l.resolve().unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    // no override: looks for `eid` next to the running executable (this test binary's folder has
+    // none; its files are named `relay-<hash>` / `eid_native_host-<hash>`)
+    let l = AppLauncher {
+        exe: None,
+        endpoint: ep,
+    };
+    let sibling = std::env::current_exe()
+        .unwrap()
+        .with_file_name(format!("eid{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        !sibling.exists(),
+        "unexpected {} next to the test binary",
+        sibling.display()
+    );
+    assert_eq!(
+        l.resolve().unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+}

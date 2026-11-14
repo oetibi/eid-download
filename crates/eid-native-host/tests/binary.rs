@@ -191,17 +191,24 @@ async fn nm_binary_hostile_frames_end_the_session_with_frames_only_on_stdout() {
 async fn nm_binary_without_a_running_app_answers_with_an_error_frame() {
     let d = tempfile::tempdir().unwrap();
     let ep = endpoint("none", &d);
-    // a private copy of the host: there is no `eid` next to it and no override, so launching the
-    // app fails and the host must give up at its deadline with an error frame (no hang, no print)
-    let lone = d
+    // The program the host would launch does not exist, so launching fails and the host must give
+    // up at its deadline with an error frame (no hang, nothing printed to stdout). This uses
+    // `EID_NATIVE_HOST_APP` pointing at a missing file instead of copying the host to an empty
+    // directory: a test that WRITES an executable and then runs it races with the other tests of
+    // this process, whose fork() children briefly inherit the open write descriptor, and exec of a
+    // file that is open for writing fails with ETXTBSY ("Text file busy") on Linux.
+    let missing = d
         .path()
-        .join(format!("eid-native-host{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(HOST, &lone).unwrap();
+        .join(format!("no-such-app{}", std::env::consts::EXE_SUFFIX));
+    assert!(!missing.exists());
     let t = std::time::Instant::now();
     let (out, err, code) = host_at(
-        lone,
+        HOST.into(),
         &ep,
-        vec![("EID_NATIVE_HOST_READY_MS", "500".into())],
+        vec![
+            ("EID_NATIVE_HOST_READY_MS", "500".into()),
+            ("EID_NATIVE_HOST_APP", missing.into_os_string()),
+        ],
         req("q", json!({"cmd": "ping"})),
     )
     .await;
@@ -211,6 +218,7 @@ async fn nm_binary_without_a_running_app_answers_with_an_error_frame() {
     assert!(!r[0].ok && r[0].id == "q");
     assert!(r[0].error.as_deref().unwrap().contains("not running"));
     assert!(err.contains("cannot start the app"), "{err}");
+    assert!(err.contains("not found"), "{err}");
     assert!(t.elapsed() < Duration::from_secs(30));
 }
 
