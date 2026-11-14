@@ -302,7 +302,7 @@ mod tests {
         assert_eq!(s.segments.len(), 2);
         // Unix: proven owner-only (Some(true)). Windows: ACLs are not inspected yet (P3) => None,
         // which is "not verified", never counted as proof.
-        let want = if cfg!(unix) { Some(true) } else { None };
+        let want = (!eid_platform::IS_WINDOWS).then_some(true);
         assert_eq!(eid_platform::fs::owner_only(&p).unwrap(), want);
         assert_eq!(
             eid_platform::fs::owner_only(&bak_path(&p)).unwrap(),

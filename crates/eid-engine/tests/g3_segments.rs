@@ -289,40 +289,6 @@ async fn max_in_flight_bytes_bounded() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn handoff_engine_randomized_with_jitter() {
-    // Whole-engine version of the table-level arbiter: random cuts + jitter at the
-    // reserve/write/complete points, many connections, tiny min_split => constant splitting.
-    let len = 3u64 << 20;
-    for seed in 1..=30u64 {
-        eid_engine::fault::set_jitter(seed);
-        let content = Content::Generated { seed, len };
-        let (_srv, url) = serve(
-            "/h.bin",
-            content.clone(),
-            Behavior {
-                cut: Cut::Random {
-                    seed,
-                    min: 5_000,
-                    max: 400_000,
-                },
-                ..Behavior::default()
-            },
-        )
-        .await;
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg = fast_cfg(16);
-        cfg.min_split = 8 * 1024;
-        cfg.write_chunk = 4096;
-        cfg.max_attempts = 500;
-        let (o, _) = get(&url, dir.path(), cfg)
-            .await
-            .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
-        assert_eq!(sha_of_file(&o.path), content.sha256_hex(), "seed {seed}");
-    }
-    eid_engine::fault::set_jitter(0);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn file_changes_during_download_is_detected() {
     // After ~2 MB were sent, the server switches to different content (new ETag, same length).
     let a = Content::Generated {

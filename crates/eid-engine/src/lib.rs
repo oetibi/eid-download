@@ -7,6 +7,8 @@
 //! * file names / paths from the network are sanitized and confined to the download dir;
 //! * secrets (URL credentials, query tokens) never reach state files, logs or errors.
 
+pub mod batch;
+pub mod category;
 pub mod config;
 pub mod download;
 pub mod error;
@@ -16,6 +18,7 @@ pub mod http;
 pub mod limiter;
 pub mod sanitize;
 pub mod state;
+pub mod store;
 pub mod table;
 pub mod urlsafe;
 

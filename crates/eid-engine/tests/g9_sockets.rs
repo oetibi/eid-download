@@ -17,10 +17,12 @@ async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
     SERIAL.lock().await
 }
 
+/// PLAN G3 size: 50 MiB.
+const BIG_LEN: u64 = 50 * 1024 * 1024;
 fn big() -> Content {
     Content::Generated {
         seed: 7,
-        len: 20 * 1024 * 1024,
+        len: BIG_LEN,
     }
 }
 
@@ -30,7 +32,11 @@ async fn sha256_matches_with_1_8_32_connections() {
     let want = big().sha256_hex();
     for conns in [1usize, 8, 32] {
         let dir = tempfile::tempdir().unwrap();
-        let (srv, url) = serve("/f.bin", big(), Behavior::default()).await;
+        // per-connection cap sized so that the transfer takes ~1.5 s even with ALL requested
+        // connections active: the ramp (5 ms/worker) has time to reach 32 workers before the
+        // file is done (an unthrottled loopback transfer can end before they exist)
+        let per_conn_bps = BIG_LEN * 2 / (3 * conns as u64);
+        let (srv, url) = serve("/f.bin", big(), Behavior::slow(per_conn_bps)).await;
         let watch = SocketWatch::start(&srv.base_url());
         let (o, log) = get(&url, dir.path(), fast_cfg(conns)).await.unwrap();
         let sock = watch.map(SocketWatch::finish);
@@ -46,13 +52,21 @@ async fn sha256_matches_with_1_8_32_connections() {
             "{conns} connections"
         );
         assert_eq!(sha_of_file(&o.path), want);
-        assert_eq!(o.size, 20 * 1024 * 1024);
+        assert_eq!(o.size, BIG_LEN);
         let st = srv.stats("/f.bin");
         if conns > 1 {
+            // meaningful concurrency: a regression that silently caps 32 requested connections at
+            // two must fail (P1 review M7), so require at least 3/4 of the request to be reached
+            let need = conns * 3 / 4;
             assert!(
-                st.peak_concurrent > 1,
-                "{conns}: expected parallelism, peak {}",
+                st.peak_concurrent >= need,
+                "{conns}: expected at least {need} concurrent requests at the server, peak {}",
                 st.peak_concurrent
+            );
+            assert!(
+                o.peak_workers >= need,
+                "{conns}: only {} workers ever ran (need {need})",
+                o.peak_workers
             );
         }
         // Strict cap, real-socket kernel count is the strict one; engine/server counters are secondary (ADR-0011).

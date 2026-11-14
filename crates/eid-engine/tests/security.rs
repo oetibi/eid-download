@@ -242,11 +242,12 @@ fn symlink_capability_precheck() {
     let t = d.path().join("t");
     std::fs::write(&t, b"x").unwrap();
     let r = eid_platform::fs::symlink_file(&t, &d.path().join("l"));
-    if let Err(e) = &r {
-        eprintln!("SYMLINKS NOT AVAILABLE ON THIS RUNNER: {e}");
-    }
-    #[cfg(unix)]
-    assert!(r.is_ok());
+    // AGENTS §6: a symlink test must FAIL when the link cannot be created, on every OS (a
+    // Windows runner needs the symlink privilege; grant it in CI instead of skipping).
+    assert!(
+        r.is_ok(),
+        "this machine cannot create symlinks, so symlink safety cannot be tested: {r:?}"
+    );
 }
 
 /// M5: the part, its sidecars (state, backup, lock) and anything else a running job leaves are

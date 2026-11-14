@@ -112,13 +112,24 @@ mod imp {
         }
         Ok(())
     }
+    static JITTER_CALLS: AtomicU64 = AtomicU64::new(0);
+    /// Arm jitter with `seed` (0 = off). The delay DECISIONS are a pure function of
+    /// `(seed, call index)` (splitmix64), so a printed seed replays the same decision stream;
+    /// which thread consumes which decision is up to the OS scheduler (honest limit: the
+    /// interleaving itself is not bit-reproducible, a failing seed is replayed in a loop).
     pub fn set_jitter(seed: u64) {
+        JITTER_CALLS.store(0, Ordering::SeqCst);
         JITTER.store(seed, Ordering::SeqCst);
     }
     pub fn jitter() {
         let s = JITTER.load(Ordering::Relaxed);
         if s != 0 {
-            match fastrand::u8(..) % 8 {
+            let n = JITTER_CALLS.fetch_add(1, Ordering::Relaxed);
+            let mut z = s.wrapping_add(n.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            match z % 8 {
                 0 => std::thread::sleep(std::time::Duration::from_micros(50)),
                 1 | 2 => std::thread::yield_now(),
                 _ => {}

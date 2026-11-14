@@ -146,7 +146,8 @@ async fn cli_sigkill_then_resume_completes_from_frontier() {
         if let Some(sp) = state_file(dir.path()) {
             if let Ok(st) = state::load(&sp) {
                 let done: u64 = st.segments.iter().map(|s| s.next - s.start).sum();
-                if done > (4 << 20) {
+                // PLAN G2: kill only once >= 30% is DURABLE in the sidecar
+                if done * 10 >= 3 * content(2).len() {
                     break st;
                 }
             }
@@ -226,7 +227,7 @@ async fn cli_sigkill_then_resume_completes_from_frontier() {
         "first resumed request must start exactly at the persisted frontier"
     );
     assert!(
-        done >= (4 << 20),
+        done * 10 >= 3 * content(2).len(),
         "kill must happen after >=30% progress, done {done}"
     );
 }
@@ -323,6 +324,11 @@ async fn crash_at_every_persistence_fault_point_recovers() {
     }
 }
 
+/// Unix only (SIGINT). There is deliberately NO Windows body: a Windows console Ctrl-C/Ctrl-Break
+/// test needs a real console and is tracked in docs/MANUAL-TESTS.md (#14); the required list
+/// marks this test `unix:` so Windows CI reports it as NOT TESTED instead of a hollow pass (P1
+/// review M6: the old empty Windows branch passed and leaked its child process).
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cli_ctrl_c_prints_a_resume_command_and_it_works() {
     let srv = TestServer::start().await;
@@ -338,8 +344,7 @@ async fn cli_ctrl_c_prints_a_resume_command_and_it_works() {
         .unwrap();
     let pid = child.id();
     tokio::time::sleep(Duration::from_millis(1200)).await;
-    // SIGINT == Ctrl-C (sent through the kill utility; unix only)
-    #[cfg(unix)]
+    // SIGINT == Ctrl-C (sent through the kill utility)
     {
         assert!(command("kill", ["-INT", &pid.to_string()])
             .status()
@@ -367,10 +372,6 @@ async fn cli_ctrl_c_prints_a_resume_command_and_it_works() {
         .await;
         assert!(out.status.success());
         assert_eq!(sha(&dir.path().join("c.bin")), content(5).sha256_hex());
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (pid, child);
     }
 }
 

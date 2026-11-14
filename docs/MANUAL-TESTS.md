@@ -16,4 +16,6 @@
 | 11 | لا نافذة سوداء عند تحميل فيديو | Windows | لم يُختبر |
 | 12 | SmartScreen وMark-of-the-Web | Windows | لم يُختبر |
 | 13 | خط عربي وRTL في النافذة الحقيقية، DPI 125/150% | Windows | لم يُختبر |
+| 14 | Ctrl-C/Ctrl-Break في كونسول Windows حقيقي أثناء `eid get`: يطبع أمر الاستكمال ويعمل (مكافئ `cli_ctrl_c_prints_a_resume_command_and_it_works`) | Windows | لم يُختبر |
+| 15 | قراءة ACL فعلية لملفات `.eid-part`/`.eid-state`/`.eid-lock` على Windows: يجب أن تكون المالك فقط (اليوم ترث ACL المجلد؛ DACL المحمي مهمة P3) | Windows | لم يُختبر |
 </div>

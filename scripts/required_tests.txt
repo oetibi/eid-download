@@ -131,3 +131,7 @@ http_date_retry_after_is_honoured_relative_to_the_server_date
 retry_after_http_date_is_honoured_with_bounded_arithmetic
 numbered_names_keep_their_suffix_for_maximal_names
 second_download_of_a_maximal_name_gets_a_numbered_free_name
+# ---- P1 review M7 (gate evidence): 200 whole-engine seeded fault schedules; real-content arbiter
+# (handoff_randomized_200_seeds and handoff_engine_randomized_with_jitter keep their names)
+blocking_filesystem_work_does_not_stall_the_executor
+# ---- P1 closure: CI gate hygiene (M6), gate evidence (M7), executor responsiveness (m2)
