@@ -32,6 +32,8 @@ pub enum Command {
         file_name: Option<String>,
     },
     List {},
+    /// Ask the running app to exit (never allowed from a browser).
+    Shutdown {},
     Pause {
         item: u64,
     },
@@ -226,6 +228,7 @@ mod tests {
         }
         .allowed_from_browser());
         assert!(!Command::List {}.allowed_from_browser());
+        assert!(!Command::Shutdown {}.allowed_from_browser());
         assert!(!Command::Pause { item: 1 }.allowed_from_browser());
         assert!(!Command::Resume { item: 1 }.allowed_from_browser());
     }

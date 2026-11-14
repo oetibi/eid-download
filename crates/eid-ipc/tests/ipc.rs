@@ -21,6 +21,7 @@ impl Handler for Counting {
             Command::Ping {} => Ok(json!({"pong": true, "n": n})),
             Command::Add { url, .. } => Ok(json!({"added": url, "n": n})),
             Command::List {} => Ok(json!({"big": "x".repeat(MAX_FRAME)})),
+            Command::Shutdown {} => Ok(json!({})),
             Command::Pause { .. } => Err("no such item".into()),
             Command::Resume { .. } => panic!("handler bug"),
         }

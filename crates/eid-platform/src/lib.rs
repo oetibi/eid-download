@@ -5,6 +5,7 @@
 //! Windows implementations are compile-checked on Linux (`--target x86_64-pc-windows-gnu`)
 //! but NOT executed here: see docs/STATUS.md "not tested on real Windows".
 
+pub mod dirs;
 pub mod fs;
 pub mod ipc;
 pub mod net;

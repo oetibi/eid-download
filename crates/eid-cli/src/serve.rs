@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const HELP: &str = "\
-  eid serve -d DIR [--queues FILE] [--queue NAME] [--parallel N] [--add URL]... [-c N] [--limit RATE] [-q]\n\
+  eid serve [-d DIR] [--queues FILE] [--queue NAME] [--parallel N] [--add URL]... [-c N] [--limit RATE] [-q]\n\
             [--endpoint NAME] [--token-file PATH]\n\
-  eid add <url> [--subdir NAME] [--name FILE] | eid list | eid pause <id> | eid resume <id>\n\
+  eid add <url> [--subdir NAME] [--name FILE] | eid list | eid pause <id> | eid resume <id> | eid stop\n\
             [--endpoint NAME] [--token-file PATH]   (talk to the running `eid serve`)\n\n\
   serve runs the downloads of one queue and listens on a per-user local endpoint (no TCP port).\n\
   If one is already running, `serve --add URL` hands the URLs to it and exits.";
@@ -131,6 +131,8 @@ fn status_name(s: Status) -> &'static str {
 fn handler(
     sched: Scheduler,
     queue: String,
+    cancel: CancellationToken,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
 ) -> impl Fn(Command) -> Result<serde_json::Value, String> + Send + Sync + 'static {
     move |cmd| match cmd {
         Command::Ping {} => Ok(json!({"pong": true, "version": env!("CARGO_PKG_VERSION")})),
@@ -167,6 +169,16 @@ fn handler(
             .pause_item(item)
             .map(|_| json!({}))
             .map_err(|e| e.to_string()),
+        Command::Shutdown {} => {
+            // answer first, then stop: the reply must not be cut off by the server shutting down
+            stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+            let c = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                c.cancel();
+            });
+            Ok(json!({}))
+        }
         Command::Resume { item } => sched
             .resume_item(item)
             .map(|_| json!({}))
@@ -210,7 +222,8 @@ pub async fn run(a: ServeArgs, cancel: CancellationToken) -> Result<i32, String>
     let dir = a
         .dir
         .clone()
-        .ok_or("serve needs -d DIR (the download folder)")?;
+        .or_else(eid_platform::dirs::default_download_dir)
+        .ok_or("cannot find the Downloads folder; pass -d DIR")?;
     let dir = std::path::absolute(&dir).map_err(|e| e.to_string())?;
     let qfile = match &a.queues {
         Some(p) => p.clone(),
@@ -268,7 +281,13 @@ pub async fn run(a: ServeArgs, cancel: CancellationToken) -> Result<i32, String>
         })
         .map_err(|e| e.to_string())?;
 
-    let h = Arc::new(handler(sched.clone(), a.queue.clone()));
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let h = Arc::new(handler(
+        sched.clone(),
+        a.queue.clone(),
+        cancel.clone(),
+        stopped.clone(),
+    ));
     let running = match eid_ipc::start(&ep, h, ServeOptions::default()) {
         Ok(r) => r,
         // lost a start-up race with another instance: behave as the second instance
@@ -286,5 +305,12 @@ pub async fn run(a: ServeArgs, cancel: CancellationToken) -> Result<i32, String>
     running.stop().await;
     sched.flush().await.map_err(|e| e.to_string())?;
     r.map_err(|e| e.to_string())?;
-    Ok(if cancel.is_cancelled() { 130 } else { 0 })
+    // Ctrl-C = 130; a requested `eid stop` is a normal exit
+    Ok(
+        if cancel.is_cancelled() && !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            130
+        } else {
+            0
+        },
+    )
 }

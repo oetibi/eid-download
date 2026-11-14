@@ -55,6 +55,7 @@ pub enum Remote {
     List,
     Pause(u64),
     Resume(u64),
+    Stop,
 }
 
 #[derive(Debug, PartialEq)]
@@ -110,6 +111,12 @@ pub fn parse(argv: &[String]) -> Result<RemoteArgs, String> {
         }
         "pause" => Remote::Pause(id(one("an item id", &pos)?)?),
         "resume" => Remote::Resume(id(one("an item id", &pos)?)?),
+        "stop" => {
+            if !pos.is_empty() {
+                return Err("unexpected extra argument".into());
+            }
+            Remote::Stop
+        }
         other => return Err(format!("unknown command: {other}")),
     };
     Ok(RemoteArgs { conn, what })
@@ -185,6 +192,10 @@ pub async fn run(a: RemoteArgs) -> Result<i32, String> {
         Remote::Pause(id) => {
             call_retrying(&ep, Command::Pause { item: id }).await?;
             println!("paused #{id}");
+        }
+        Remote::Stop => {
+            call_retrying(&ep, Command::Shutdown {}).await?;
+            println!("stopping");
         }
         Remote::Resume(id) => {
             call_retrying(&ep, Command::Resume { item: id }).await?;

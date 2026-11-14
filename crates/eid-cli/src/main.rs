@@ -176,7 +176,7 @@ async fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if matches!(
         argv.first().map(String::as_str),
-        Some("serve" | "add" | "list" | "pause" | "resume")
+        Some("serve" | "add" | "list" | "pause" | "resume" | "stop")
     ) {
         std::process::exit(app_main(&argv).await);
     }

@@ -379,3 +379,39 @@ async fn remote_add_never_lets_the_caller_choose_a_directory_and_keeps_secrets_o
         "{log}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eid_stop_makes_the_running_app_exit_cleanly_and_free_its_endpoint() {
+    let mut app = App::start("stop", &[]).await;
+    let o = app.remote(&["stop"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    // the process exits by itself (exit code 0 = graceful), and the endpoint is free again
+    let t = Instant::now();
+    let status = loop {
+        if let Some(s) = app.child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "the app did not exit after `eid stop`"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(status.success(), "unclean exit: {status:?}");
+    let o = app.remote(&["list"]).await;
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o).contains("not running"), "{}", text(&o));
+    // a new instance can start on the same endpoint afterwards
+    let mut args = s(&["serve", "-q", "-d", app.dl.to_str().unwrap(), "--queues"]);
+    args.push(app.queues.to_str().unwrap().to_owned());
+    args.extend(app.conn.clone());
+    let mut again = command(EID, args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    app.wait_ready().await;
+    let o = app.remote(&["stop"]).await;
+    assert!(o.status.success());
+    assert!(again.wait().unwrap().success());
+}

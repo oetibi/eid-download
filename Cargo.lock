@@ -204,6 +204,13 @@ dependencies = [
 [[package]]
 name = "eid-native-host"
 version = "0.0.1"
+dependencies = [
+ "eid-ipc",
+ "eid-platform",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "eid-platform"
