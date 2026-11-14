@@ -265,7 +265,13 @@ mod imp {
     }
 
     /// Owns a self-relative security descriptor allocated by Windows.
-    struct SecDesc(*mut c_void);
+    pub(super) struct SecDesc(*mut c_void);
+    impl SecDesc {
+        #[cfg(test)]
+        pub(super) fn raw(&self) -> *mut c_void {
+            self.0
+        }
+    }
     // SAFETY: the descriptor is immutable after creation and only freed on drop.
     unsafe impl Send for SecDesc {}
     unsafe impl Sync for SecDesc {}
@@ -279,15 +285,16 @@ mod imp {
     /// Protected DACL with a single ACE: generic-all for the current user. No other principal
     /// (not even Administrators or SYSTEM) is granted access; inheritance is blocked (`P`).
     fn user_only_descriptor() -> io::Result<SecDesc> {
-        let sddl: Vec<u16> = format!("D:P(A;;GA;;;{})", current_user_sid()?)
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
+        descriptor_from_sddl(&format!("D:P(A;;GA;;;{})", current_user_sid()?))
+    }
+
+    pub(super) fn descriptor_from_sddl(sddl: &str) -> io::Result<SecDesc> {
+        let w: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
         let mut sd: *mut c_void = null_mut();
-        // SAFETY: sddl is NUL-terminated; sd receives a LocalAlloc'd descriptor.
+        // SAFETY: `w` is NUL-terminated; `sd` receives a LocalAlloc'd descriptor.
         let ok = unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl.as_ptr(),
+                w.as_ptr(),
                 SDDL_REVISION_1,
                 &mut sd,
                 null_mut(),
@@ -299,7 +306,11 @@ mod imp {
         Ok(SecDesc(sd))
     }
 
-    fn create_instance(name: &str, first: bool, sd: &SecDesc) -> io::Result<NamedPipeServer> {
+    pub(super) fn create_instance(
+        name: &str,
+        first: bool,
+        sd: &SecDesc,
+    ) -> io::Result<NamedPipeServer> {
         let mut sa = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: sd.0,
@@ -602,60 +613,182 @@ mod tests {
         assert_eq!(p, format!("\\\\.\\pipe\\EidDownload-{sid}-main"));
     }
 
+    /// What the live DACL of a pipe handle contains, read structurally (never as SDDL text).
     #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_pipe_has_a_protected_dacl_with_only_the_current_user() {
-        // Read the DACL back from the live pipe and check it: protected, exactly one allow ACE
-        // for our SID. (A second-user attempt is MANUAL-TESTS #9 and is not claimed here.)
-        use std::os::windows::io::AsRawHandle;
+    struct DaclInfo {
+        protected: bool,
+        /// (ACE type, access mask, SID == the current user's SID) for every ACE.
+        aces: Vec<(u8, u32, bool)>,
+        sddl: String,
+    }
+
+    #[cfg(windows)]
+    fn sddl_text(sd: *mut std::ffi::c_void) -> String {
         use windows_sys::Win32::Foundation::LocalFree;
         use windows_sys::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-            SE_KERNEL_OBJECT,
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
         };
-        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
-        let name = unique("dacl");
-        let l = Listener::bind(&name).unwrap();
-        let handle = l.0.next.as_raw_handle();
-        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        let mut text: *mut u16 = std::ptr::null_mut();
-        let sddl = unsafe {
-            let rc = GetSecurityInfo(
-                handle as _,
-                SE_KERNEL_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut sd,
+        use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+        // SAFETY: `sd` is a valid descriptor; the returned string is copied and freed.
+        unsafe {
+            let mut text: *mut u16 = std::ptr::null_mut();
+            assert_ne!(
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    sd,
+                    SDDL_REVISION_1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut text,
+                    std::ptr::null_mut(),
+                ),
+                0
             );
-            assert_eq!(rc, 0, "GetSecurityInfo failed: {rc}");
-            let ok = ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                sd,
-                SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
-                &mut text,
-                std::ptr::null_mut(),
-            );
-            assert_ne!(ok, 0);
             let mut n = 0;
             while *text.add(n) != 0 {
                 n += 1;
             }
             let s = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
             LocalFree(text.cast());
-            LocalFree(sd);
             s
+        }
+    }
+
+    #[cfg(windows)]
+    fn dacl_of(handle: std::os::windows::io::RawHandle) -> DaclInfo {
+        use std::ffi::c_void;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSidToSidW, GetSecurityInfo, SE_KERNEL_OBJECT,
         };
-        let sid = imp::current_user_sid().unwrap();
-        assert!(sddl.starts_with("D:P"), "DACL must be protected: {sddl}");
-        assert_eq!(sddl.matches("(A;").count(), 1, "{sddl}");
-        assert!(sddl.contains(&sid) || sddl.contains("OW"), "{sddl}");
-        assert!(!sddl.contains("(D;"), "{sddl}");
+        use windows_sys::Win32::Security::{
+            EqualSid, GetAce, GetSecurityDescriptorControl, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+            DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        };
+        let mine: Vec<u16> = imp::current_user_sid()
+            .unwrap()
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: out-pointers are valid; every allocation is freed before returning; the ACE
+        // pointers are only read while `sd` (which owns them) is alive.
+        unsafe {
+            let mut my_sid: *mut c_void = std::ptr::null_mut();
+            assert_ne!(ConvertStringSidToSidW(mine.as_ptr(), &mut my_sid), 0);
+            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let rc = GetSecurityInfo(
+                handle as _,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            );
+            assert_eq!(rc, 0, "GetSecurityInfo failed: {rc}");
+            assert!(!dacl.is_null(), "a NULL DACL means everyone has access");
+            let (mut ctrl, mut rev) = (0u16, 0u32);
+            assert_ne!(GetSecurityDescriptorControl(sd, &mut ctrl, &mut rev), 0);
+            let mut aces = vec![];
+            for i in 0..(*dacl).AceCount as u32 {
+                let mut ace: *mut c_void = std::ptr::null_mut();
+                assert_ne!(GetAce(dacl, i, &mut ace), 0);
+                let hdr = &*(ace as *const ACE_HEADER);
+                // allowed and denied ACEs share this layout (mask, then the SID)
+                let a = &*(ace as *const ACCESS_ALLOWED_ACE);
+                let sid = std::ptr::addr_of!(a.SidStart) as *mut c_void;
+                aces.push((hdr.AceType, a.Mask, EqualSid(sid, my_sid) != 0));
+            }
+            let sddl = sddl_text(sd);
+            let protected = ctrl & SE_DACL_PROTECTED != 0;
+            LocalFree(sd);
+            LocalFree(my_sid);
+            DaclInfo {
+                protected,
+                aces,
+                sddl,
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_pipe_has_a_protected_dacl_with_only_the_current_user() {
+        // Read the DACL back from the live pipe and check its STRUCTURE: protected, exactly one
+        // ACE, an *allow* ACE whose SID is the current user's SID (EqualSid), non-empty mask.
+        // This does not depend on how SDDL text spells the SID: for the built-in Administrator
+        // (the CI runner's account) SDDL prints the alias `LA`, and `GA` as `FA`.
+        // (A second-user attempt is MANUAL-TESTS #9 and is not claimed here.)
+        use std::os::windows::io::AsRawHandle;
+        let name = unique("dacl");
+        let mut l = Listener::bind(&name).unwrap();
+        let d = dacl_of(l.0.next.as_raw_handle());
+        assert!(d.protected, "DACL must not inherit anything: {}", d.sddl);
+        assert_eq!(d.aces.len(), 1, "exactly one ACE expected: {}", d.sddl);
+        let (ace_type, mask, is_me) = d.aces[0];
+        assert_eq!(ace_type, 0, "must be an ACCESS_ALLOWED ACE: {}", d.sddl);
+        assert!(is_me, "the only ACE must be the current user: {}", d.sddl);
+        assert_ne!(mask, 0, "{}", d.sddl);
+        // the instance created for the NEXT client carries the same descriptor
+        let n2 = name.clone();
+        let c = tokio::spawn(async move { connect(&n2).await.unwrap() });
+        let _s = l.accept().await.unwrap();
+        let _c = c.await.unwrap();
+        let d2 = dacl_of(l.0.next.as_raw_handle());
         assert!(
-            !sddl.contains(";WD)") && !sddl.contains(";BA)") && !sddl.contains(";SY)"),
-            "{sddl}"
+            d2.protected && d2.aces.len() == 1 && d2.aces[0].0 == 0 && d2.aces[0].2,
+            "{}",
+            d2.sddl
         );
+    }
+
+    /// Guards the premises of the test above: the checker must really tell "the current user"
+    /// from Everyone and from other principals, and SDDL text really hides the account SID
+    /// behind aliases (which is what broke the old string comparison on the CI runner).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_dacl_checker_rejects_everyone_and_other_principals_and_sddl_text_uses_aliases() {
+        use std::os::windows::io::AsRawHandle;
+        for (tag, sddl) in [
+            ("everyone", "D:P(A;;GA;;;WD)"),
+            ("system", "D:P(A;;GA;;;SY)"),
+        ] {
+            let name = unique(tag);
+            let path = imp::pipe_path(&name).unwrap();
+            let sd = imp::descriptor_from_sddl(sddl).unwrap();
+            let pipe = imp::create_instance(&path, true, &sd).unwrap();
+            let d = dacl_of(pipe.as_raw_handle());
+            assert_eq!(d.aces.len(), 1, "{}", d.sddl);
+            assert!(
+                !d.aces[0].2,
+                "{tag}: must NOT look like the current user: {}",
+                d.sddl
+            );
+        }
+        // a deny-everything-but-me style DACL is not "one allow ACE for me" either
+        let name = unique("mixed");
+        let path = imp::pipe_path(&name).unwrap();
+        let me = imp::current_user_sid().unwrap();
+        let sd = imp::descriptor_from_sddl(&format!("D:P(A;;GA;;;{me})(A;;GA;;;WD)")).unwrap();
+        let pipe = imp::create_instance(&path, true, &sd).unwrap();
+        let d = dacl_of(pipe.as_raw_handle());
+        assert_eq!(
+            d.aces.len(),
+            2,
+            "an extra Everyone ACE must be visible: {}",
+            d.sddl
+        );
+
+        // The SDDL spelling of this machine's RID-500 account is the alias LA (and the system maps GA to FA once the object exists):
+        // exactly what the CI runner printed (D:P(A;;FA;;;LA)).
+        let prefix = me.rsplit_once('-').unwrap().0; // S-1-5-21-a-b-c
+        assert!(
+            prefix.starts_with("S-1-5-21-"),
+            "unexpected account SID {me}"
+        );
+        let admin = imp::descriptor_from_sddl(&format!("D:P(A;;GA;;;{prefix}-500)")).unwrap();
+        let text = sddl_text(admin.raw());
+        assert!(text.contains(";LA)"), "{text}");
+        assert!(!text.contains("-500"), "{text}");
     }
 }
