@@ -854,7 +854,7 @@ fn claim_files(dir: &Path, base: &str, held: &mut Option<JobLock>) -> Result<Fil
                 }
             }
         };
-        match pfs::create_new_file(&part) {
+        match pfs::create_new_private(&part) {
             Ok(file) => {
                 return Ok(Files {
                     name: cand,
@@ -914,6 +914,9 @@ fn finalize_name(
     state_path: &Path,
     sha256: &str,
 ) -> Result<PathBuf> {
+    // The part was owner-only while it could hold authenticated bytes; the published file is the
+    // user's data and gets ordinary permissions (0666 & !umask), set on the verified handle.
+    pfs::set_default_data_permissions(file).map_err(Error::io("set final file permissions"))?;
     let mut st = state::load(state_path)?;
     for n in 0..1000u32 {
         let cand = if n == 0 {

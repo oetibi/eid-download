@@ -300,8 +300,15 @@ mod tests {
         assert!(bak_path(&p).exists());
         let s = load(&p).unwrap();
         assert_eq!(s.segments.len(), 2);
-        // Some(true) on Unix; None ("not verified") on Windows
-        assert_ne!(eid_platform::fs::owner_only(&p).unwrap(), Some(false));
+        // Unix: proven owner-only (Some(true)). Windows: ACLs are not inspected yet (P3) => None,
+        // which is "not verified", never counted as proof.
+        let want = if cfg!(unix) { Some(true) } else { None };
+        assert_eq!(eid_platform::fs::owner_only(&p).unwrap(), want);
+        assert_eq!(
+            eid_platform::fs::owner_only(&bak_path(&p)).unwrap(),
+            want,
+            "the .bak must be private too"
+        );
     }
 
     #[test]

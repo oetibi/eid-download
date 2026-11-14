@@ -355,9 +355,12 @@ async fn state_has_no_secrets_and_is_private() {
             !text.contains("HUNTER2pw") && !text.contains("bob"),
             "{p:?} leaks credentials"
         );
-        assert_ne!(
+        // Unix: must be PROVEN owner-only. Windows: ACLs are not inspected (P3), so the
+        // platform reports None and this loop proves nothing about privacy there.
+        let want = if cfg!(unix) { Some(true) } else { None };
+        assert_eq!(
             eid_platform::fs::owner_only(&p).unwrap(),
-            Some(false),
+            want,
             "{p:?} must be owner-only"
         );
     }
