@@ -20,7 +20,7 @@
 | استيراد/تصدير القوائم | ؟ | ؟ | ✔ | ✔ | P2 — txt/json/csv مختبرة (`export_then_import_returns_the_same_list_in_every_format`) |
 | Grabber (موقع/صفحة) | ✔ (مواقع كاملة) | ؟ | ✔ (صفحة) | CLI | P2 — صفحة واحدة بلا JS مختبرة (`grabber_*`)؛ بلا فلتر regex (glob فقط) |
 | مراقبة الحافظة | ✔ | ؟ | ✔ | ✔ (معطلة افتراضياً) | P5 (معطلة افتراضياً) |
-| إضافة المتصفح + Native Messaging | ✔ | ✔ | ✔ (Chrome/Edge/Firefox) | ✔ | P3 + P6 (Chrome/Edge أولاً) |
+| إضافة المتصفح + Native Messaging | ✔ | ✔ | ✔ (Chrome/Edge/Firefox) | ✔ | P3: **مضيف الرسائل** مختبر (`nm_binary_*`، `nm_rejects_malformed_oversized_and_extra_field_messages`) ببروتوكول حقيقي بلا متصفح؛ **الإضافة نفسها (P6) لم تُبنَ**، وتشغيله من Chrome/Edge حقيقيين **لم يُختبر** (MANUAL-TESTS #8) |
 | مفتاح/استثناءات لمنع الالتقاط | ✔ | ✔ | ؟ | ✔ | P6 |
 | لوحة «حمّل هذا الفيديو» فوق المشغّل | ✔ | ✔ (Video Button/Box) | ✔ (شريط) | ✔ (زر) | P6 |
 | HLS/DASH أصلي | ✔ | ✔ | ✔ (HLS/DASH) | عبر yt-dlp | لاحقاً (عبر yt-dlp في P4) |
@@ -34,7 +34,7 @@
 | تتبع/إحصاءات | ؟ | ؟ | لا (README) | لا | لا (متطلب) |
 | مفتوح المصدر | ✘ | ✘ | مصدر ظاهر، **حقوق محفوظة** | GPL-3.0 | رخصة مقترحة (ADR-0008) |
 | سعر | مدفوع | مدفوع/مجاني محدود | مجاني | مجاني | غير مقرر |
-| سطر أوامر | ✔ (`/d` ...) | ؟ | ؟ | ✔ | P1 (`eid get/resume`) ثم P3 |
+| سطر أوامر | ✔ (`/d` ...) | ؟ | ؟ | ✔ | `eid get/resume` (P1) + `eid serve/add/list/pause/resume/stop` عن بعد (P3، مختبرة: `remote_add_list_pause_resume_drive_the_running_app`) |
 | Torrent/FTP | FTP ✔ | ✔ torrent | ؟ | FTP لاحقاً | خارج النطاق |
 
 ## ما نتعلمه ولا ننسخه

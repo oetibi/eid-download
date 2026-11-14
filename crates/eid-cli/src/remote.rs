@@ -204,3 +204,100 @@ pub async fn run(a: RemoteArgs) -> Result<i32, String> {
     }
     Ok(0)
 }
+
+/// Does `argv` (without the program name) belong to `eid serve` / the remote commands?
+///
+/// `eid resume` exists twice: `eid resume <file.eid-state>` (P1, standalone engine) and
+/// `eid resume <item-id>` (P3, the running app). It is the remote one only when its first
+/// argument is a plain number or a connection flag; a state file path is never all digits and
+/// never one of those flags.
+pub fn is_app_command(argv: &[String]) -> bool {
+    match argv.first().map(String::as_str) {
+        Some("serve" | "add" | "list" | "pause" | "stop") => true,
+        Some("resume") => match argv.get(1).map(String::as_str) {
+            Some(a) => {
+                a == "--endpoint"
+                    || a == "--token-file"
+                    || (!a.is_empty() && a.bytes().all(|b| b.is_ascii_digit()))
+            }
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn resume_is_routed_to_the_app_only_for_an_item_id_or_a_connection_flag() {
+        for remote in [
+            v(&["serve"]),
+            v(&["add", "http://h/x"]),
+            v(&["list"]),
+            v(&["pause", "1"]),
+            v(&["stop"]),
+            v(&["resume", "12"]),
+            v(&["resume", "--endpoint", "x", "3"]),
+            v(&["resume", "--token-file", "t", "3"]),
+        ] {
+            assert!(is_app_command(&remote), "{remote:?}");
+        }
+        for legacy in [
+            v(&["resume", "file.eid-state"]),
+            v(&["resume", r"C:\dl\a.bin.eid-state", "-q"]),
+            v(&["resume", "-q", "x.eid-state"]),
+            v(&["resume", "12.eid-state"]),
+            v(&["resume"]),
+            v(&["get", "http://h/x"]),
+            v(&["queue", "list", "q.json"]),
+            v(&[]),
+        ] {
+            assert!(!is_app_command(&legacy), "{legacy:?}");
+        }
+    }
+
+    #[test]
+    fn remote_args_parse_and_reject() {
+        let a = parse(&v(&[
+            "add",
+            "http://h/a",
+            "--subdir",
+            "s",
+            "--name",
+            "n.bin",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            a.what,
+            Remote::Add {
+                subdir: Some(_),
+                file_name: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(parse(&v(&["pause", "7"])).unwrap().what, Remote::Pause(7));
+        assert_eq!(parse(&v(&["resume", "7"])).unwrap().what, Remote::Resume(7));
+        assert_eq!(parse(&v(&["stop"])).unwrap().what, Remote::Stop);
+        for bad in [
+            v(&["pause"]),
+            v(&["pause", "x"]),
+            v(&["pause", "-1"]),
+            v(&["pause", "1", "2"]),
+            v(&["add"]),
+            v(&["add", "a", "b"]),
+            v(&["list", "x"]),
+            v(&["stop", "x"]),
+            v(&["list", "--weird"]),
+            v(&["list", "--endpoint"]),
+            v(&["pause", "1", "--subdir", "x"]),
+        ] {
+            assert!(parse(&bad).is_err(), "{bad:?}");
+        }
+    }
+}

@@ -174,10 +174,7 @@ async fn app_main(argv: &[String]) -> i32 {
 #[tokio::main]
 async fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(
-        argv.first().map(String::as_str),
-        Some("serve" | "add" | "list" | "pause" | "resume" | "stop")
-    ) {
+    if eid_cli::remote::is_app_command(&argv) {
         std::process::exit(app_main(&argv).await);
     }
     if matches!(argv.first().map(String::as_str), Some("queue" | "grab")) {
