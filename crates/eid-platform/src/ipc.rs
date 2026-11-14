@@ -134,7 +134,7 @@ mod imp {
         Ok(dir)
     }
 
-    fn socket_path(name: &str) -> io::Result<PathBuf> {
+    pub(super) fn socket_path(name: &str) -> io::Result<PathBuf> {
         validate_name(name)?;
         Ok(socket_dir()?.join(format!("eid-{name}.sock")))
     }
@@ -142,28 +142,58 @@ mod imp {
     pub struct Listener {
         l: tokio::net::UnixListener,
         path: PathBuf,
+        /// Held for the listener's lifetime: the exclusive `flock` on `<socket>.lock` is what makes
+        /// "first instance wins" race-free (two starters can no longer both remove a stale socket
+        /// and both bind). The kernel releases it if the process dies.
+        _lock: std::fs::File,
+    }
+
+    /// Take the single-instance lock for `sock`; `AddrInUse` if another live instance holds it.
+    fn take_lock(sock: &Path) -> io::Result<std::fs::File> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let lock_path = sock.with_extension("lock");
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&lock_path)?;
+        // SAFETY: `f` is a valid open descriptor for the duration of the call.
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = io::Error::last_os_error();
+            return Err(if e.kind() == io::ErrorKind::WouldBlock {
+                io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "another instance is already listening",
+                )
+            } else {
+                e
+            });
+        }
+        Ok(f)
     }
 
     impl Listener {
         pub fn bind(name: &str) -> io::Result<Listener> {
             let path = socket_path(name)?;
-            if std::fs::symlink_metadata(&path).is_ok() {
-                // Something is there: a live peer means "already running"; a dead socket file
-                // left by a crash is removed.
-                match std::os::unix::net::UnixStream::connect(&path) {
-                    Ok(_) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::AddrInUse,
-                            "another instance is already listening",
-                        ))
-                    }
-                    Err(e) if is_absent(&e) => std::fs::remove_file(&path)?,
-                    Err(e) => return Err(e),
-                }
+            let lock = take_lock(&path)?;
+            // We are the only instance now: whatever sits at the socket path is a stale leftover
+            // (a crash) or hostile; never connect to it, just remove it.
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => std::fs::remove_file(&path)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
             }
             let l = tokio::net::UnixListener::bind(&path)?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-            Ok(Listener { l, path })
+            Ok(Listener {
+                l,
+                path,
+                _lock: lock,
+            })
         }
 
         pub async fn accept(&mut self) -> io::Result<Stream> {
@@ -190,6 +220,17 @@ mod imp {
     pub async fn connect(name: &str) -> io::Result<Stream> {
         let path = socket_path(name)?;
         let s = tokio::net::UnixStream::connect(&path).await?;
+        // Defence in depth (the socket directory is already private to this user): only talk to a
+        // server running as us.
+        match s.peer_cred() {
+            Ok(c) if c.uid() == uid() => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the socket is served by a process of a different user; refusing to talk to it",
+                ))
+            }
+        }
         Ok(Stream {
             inner: StreamInner::Unix(s),
         })
@@ -212,47 +253,108 @@ mod imp {
     use windows_sys::Win32::Security::{
         GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     const ERROR_PIPE_BUSY: i32 = 231;
     const ERROR_ACCESS_DENIED: i32 = 5;
 
+    /// String SID of the user a token belongs to (e.g. `S-1-5-21-...`).
+    ///
+    /// # Safety
+    /// `token` must be a valid token handle opened with `TOKEN_QUERY`.
+    unsafe fn token_user_sid(token: HANDLE) -> io::Result<String> {
+        // SAFETY: the caller guarantees `token`; buffers and out-pointers below are valid.
+        unsafe {
+            let mut len = 0u32;
+            GetTokenInformation(token, TokenUser, null_mut(), 0, &mut len);
+            if len == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // u64 elements keep the buffer 8-byte aligned for TOKEN_USER.
+            let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+            if GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let tu = &*(buf.as_ptr() as *const TOKEN_USER);
+            let mut w: *mut u16 = null_mut();
+            if ConvertSidToStringSidW(tu.User.Sid, &mut w) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut n = 0;
+            while *w.add(n) != 0 {
+                n += 1;
+            }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(w, n));
+            LocalFree(w.cast());
+            Ok(s)
+        }
+    }
+
     /// String SID of the current user (e.g. `S-1-5-21-...`).
     pub fn current_user_sid() -> io::Result<String> {
-        // SAFETY: plain Win32 calls with valid out-pointers; every allocation is freed below.
+        // SAFETY: plain Win32 calls with valid out-pointers; the token handle is closed below.
         unsafe {
             let mut token: HANDLE = null_mut();
             if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
                 return Err(io::Error::last_os_error());
             }
-            let result = (|| {
-                let mut len = 0u32;
-                GetTokenInformation(token, TokenUser, null_mut(), 0, &mut len);
-                if len == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                // u64 elements keep the buffer 8-byte aligned for TOKEN_USER.
-                let mut buf = vec![0u64; (len as usize).div_ceil(8)];
-                if GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len)
-                    == 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
-                let tu = &*(buf.as_ptr() as *const TOKEN_USER);
-                let mut w: *mut u16 = null_mut();
-                if ConvertSidToStringSidW(tu.User.Sid, &mut w) == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                let mut n = 0;
-                while *w.add(n) != 0 {
-                    n += 1;
-                }
-                let s = String::from_utf16_lossy(std::slice::from_raw_parts(w, n));
-                LocalFree(w.cast());
-                Ok(s)
-            })();
+            let result = token_user_sid(token);
             CloseHandle(token);
             result
+        }
+    }
+
+    /// String SID of the user the process serving the pipe behind `pipe` runs as.
+    fn pipe_server_sid(pipe: HANDLE) -> io::Result<String> {
+        // SAFETY: `pipe` is a live pipe handle owned by the caller; every handle opened here is
+        // closed before returning.
+        unsafe {
+            let mut pid = 0u32;
+            if GetNamedPipeServerProcessId(pipe, &mut pid) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let mut token: HANDLE = null_mut();
+            let result = if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                let r = token_user_sid(token);
+                CloseHandle(token);
+                r
+            };
+            CloseHandle(process);
+            result
+        }
+    }
+
+    /// Pipe names are global and predictable, so another user could create the pipe first.
+    /// Before anything (token, URLs) is sent, require that the process serving it runs as
+    /// `owner_sid`. Fails closed: a server that cannot be identified (for example an elevated
+    /// process seen from a non-elevated one) is refused too.
+    fn verify_server(
+        pipe: &tokio::net::windows::named_pipe::NamedPipeClient,
+        owner_sid: &str,
+    ) -> io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        let sid = pipe_server_sid(pipe.as_raw_handle() as HANDLE).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("cannot identify the process serving the pipe: {e}"),
+            )
+        })?;
+        if sid == owner_sid {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the pipe is served by a process of a different user; refusing to talk to it",
+            ))
         }
     }
 
@@ -306,6 +408,42 @@ mod imp {
         Ok(SecDesc(sd))
     }
 
+    /// Create a brand-new file (fails if anything exists there) whose DACL is protected and
+    /// grants only the current user: no inherited ACEs, so no Users/Administrators/Everyone entry.
+    pub(super) fn create_user_only_file(path: &Path) -> io::Result<std::fs::File> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_READ,
+        };
+        let sd = user_only_descriptor()?;
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd.0,
+            bInheritHandle: 0,
+        };
+        let w: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: `w` is NUL-terminated; `sa` and the descriptor outlive the call; the returned
+        // handle is owned by the `File` built from it.
+        unsafe {
+            let h = CreateFileW(
+                w.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                &sa,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            );
+            if h == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(std::fs::File::from_raw_handle(h as _))
+        }
+    }
+
     pub(super) fn create_instance(
         name: &str,
         first: bool,
@@ -339,7 +477,12 @@ mod imp {
 
     pub struct Listener {
         path: String,
+        /// The instance waiting for the next client.
         pub(super) next: NamedPipeServer,
+        /// A second, unconnected instance kept ready, so that while a connected instance is being
+        /// handed out there is never a moment with no instance (a client arriving then would see
+        /// "no such pipe", i.e. "app not running"). Re-created on the next `accept` if it failed.
+        pub(super) spare: Option<NamedPipeServer>,
         sd: SecDesc,
     }
 
@@ -348,13 +491,24 @@ mod imp {
             let path = pipe_path(name)?;
             let sd = user_only_descriptor()?;
             let next = create_instance(&path, true, &sd)?;
-            Ok(Listener { path, next, sd })
+            Ok(Listener {
+                path,
+                next,
+                spare: None,
+                sd,
+            })
         }
 
         pub async fn accept(&mut self) -> io::Result<Stream> {
+            if self.spare.is_none() {
+                self.spare = Some(create_instance(&self.path, false, &self.sd)?);
+            }
             self.next.connect().await?;
-            let fresh = create_instance(&self.path, false, &self.sd)?;
-            let connected = std::mem::replace(&mut self.next, fresh);
+            // `spare` exists (just checked), so it becomes the waiting instance without a gap.
+            let waiting = self.spare.take().expect("spare ensured above");
+            let connected = std::mem::replace(&mut self.next, waiting);
+            // Best effort: if this fails the next `accept` retries before it waits.
+            self.spare = create_instance(&self.path, false, &self.sd).ok();
             Ok(Stream {
                 inner: StreamInner::PipeServer(connected),
             })
@@ -362,14 +516,21 @@ mod imp {
     }
 
     pub async fn connect(name: &str) -> io::Result<Stream> {
+        let me = current_user_sid()?;
+        connect_expecting(name, &me).await
+    }
+
+    /// Connect, and refuse a pipe whose server does not run as `owner_sid`.
+    pub(super) async fn connect_expecting(name: &str, owner_sid: &str) -> io::Result<Stream> {
         let path = pipe_path(name)?;
         let mut last = io::Error::from(io::ErrorKind::TimedOut);
         for _ in 0..100 {
             match ClientOptions::new().open(&path) {
                 Ok(c) => {
+                    verify_server(&c, owner_sid)?;
                     return Ok(Stream {
                         inner: StreamInner::PipeClient(c),
-                    })
+                    });
                 }
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                     last = e;
@@ -425,7 +586,8 @@ fn is_valid_token(t: &str) -> bool {
 }
 
 /// Write `token` to `path` atomically (private temp file, then replace). Unix: mode 0600.
-/// Windows: the file inherits the ACL of its directory (the user's profile).
+/// Windows: the file is created with a protected DACL that grants only the current user access
+/// (the replace keeps it), instead of inheriting the directory's ACL.
 pub fn write_token_file(path: &Path, token: &str) -> io::Result<()> {
     use std::io::Write;
     if !is_valid_token(token) {
@@ -437,7 +599,7 @@ pub fn write_token_file(path: &Path, token: &str) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".eid-token-{}.tmp", new_token()?[..16].to_owned()));
-    let mut f = crate::fs::create_new_private(&tmp)?;
+    let mut f = create_token_file(&tmp)?;
     let r = f.write_all(token.as_bytes()).and_then(|_| f.sync_all());
     drop(f);
     if let Err(e) = r {
@@ -447,6 +609,16 @@ pub fn write_token_file(path: &Path, token: &str) -> io::Result<()> {
     crate::fs::replace_atomic(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+#[cfg(unix)]
+fn create_token_file(path: &Path) -> io::Result<std::fs::File> {
+    crate::fs::create_new_private(path)
+}
+
+#[cfg(windows)]
+fn create_token_file(path: &Path) -> io::Result<std::fs::File> {
+    imp::create_user_only_file(path)
 }
 
 /// Read the token (never follows a symlink; bounded; must be well formed).
@@ -471,20 +643,12 @@ pub fn read_token_file(path: &Path) -> io::Result<String> {
 pub fn config_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        std::env::var_os("APPDATA")
-            .filter(|v| !v.is_empty())
-            .map(|v| PathBuf::from(v).join("EidDownload"))
+        crate::dirs::env_dir("APPDATA").map(|p| p.join("EidDownload"))
     }
     #[cfg(not(windows))]
     {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .filter(|v| !v.is_empty())
-                    .map(|h| PathBuf::from(h).join(".config"))
-            })?;
+        let base = crate::dirs::env_dir("XDG_CONFIG_HOME")
+            .or_else(|| crate::dirs::env_dir("HOME").map(|h| h.join(".config")))?;
         Some(base.join("eid-download"))
     }
 }
@@ -534,6 +698,28 @@ mod tests {
         assert!(!token_eq("", &a));
     }
 
+    /// Unix: mode bits. Windows: the DACL itself (protected, exactly one allow ACE = this user).
+    /// Never skipped on either platform.
+    fn assert_token_file_is_private(p: &Path) {
+        #[cfg(unix)]
+        assert_eq!(crate::fs::owner_only(p).unwrap(), Some(true));
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
+            let f = std::fs::File::open(p).unwrap();
+            let d = dacl_of_kind(f.as_raw_handle(), SE_FILE_OBJECT);
+            assert!(d.protected, "token file DACL must not inherit: {}", d.sddl);
+            assert_eq!(d.aces.len(), 1, "exactly one ACE expected: {}", d.sddl);
+            assert_eq!(d.aces[0].0, 0, "must be an allow ACE: {}", d.sddl);
+            assert!(
+                d.aces[0].2,
+                "the only ACE must be the current user: {}",
+                d.sddl
+            );
+        }
+    }
+
     #[test]
     fn token_file_roundtrip_is_private_and_rejects_garbage() {
         let d = tempfile::tempdir().unwrap();
@@ -541,13 +727,12 @@ mod tests {
         let t = new_token().unwrap();
         write_token_file(&p, &t).unwrap();
         assert_eq!(read_token_file(&p).unwrap(), t);
-        if let Some(only) = crate::fs::owner_only(&p).unwrap() {
-            assert!(only, "token file must be owner-only");
-        }
+        assert_token_file_is_private(&p);
         // replacing works and leaves no temp file behind
         let t2 = new_token().unwrap();
         write_token_file(&p, &t2).unwrap();
         assert_eq!(read_token_file(&p).unwrap(), t2);
+        assert_token_file_is_private(&p); // the replace keeps the protection
         let leftovers: Vec<_> = std::fs::read_dir(p.parent().unwrap())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -604,6 +789,52 @@ mod tests {
         assert!(connect("../evil").await.is_err());
     }
 
+    /// Unix single-instance: a stale socket file left by a crash is replaced, and many starters
+    /// racing for the same name produce exactly one listener (the `flock` decides, not a
+    /// connect-then-remove probe).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stale_socket_is_replaced_and_racing_binds_have_exactly_one_winner() {
+        let name = unique("race");
+        // leave a dead socket file behind, as a crashed instance would
+        let l = Listener::bind(&name).unwrap();
+        let path = imp::socket_path(&name).unwrap();
+        drop(l);
+        assert!(!path.exists());
+        std::os::unix::net::UnixListener::bind(&path).unwrap(); // dropped: file stays, nobody listens
+        assert!(
+            path.exists(),
+            "the stale socket file must exist for this test"
+        );
+        // real threads released together by a barrier (the reactor is entered so tokio binds)
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let handle = tokio::runtime::Handle::current();
+        let mut threads = vec![];
+        for _ in 0..16 {
+            let (n, b, h) = (name.clone(), barrier.clone(), handle.clone());
+            threads.push(std::thread::spawn(move || {
+                let _guard = h.enter();
+                b.wait();
+                Listener::bind(&n)
+            }));
+        }
+        let mut winners = vec![];
+        let mut refused = 0;
+        for t in threads {
+            match t.join().unwrap() {
+                Ok(l) => winners.push(l),
+                Err(e) => {
+                    assert_eq!(e.kind(), io::ErrorKind::AddrInUse, "{e}");
+                    refused += 1;
+                }
+            }
+        }
+        assert_eq!((winners.len(), refused), (1, 15));
+        // and the winner really serves
+        let c = connect(&name).await.unwrap();
+        drop(c);
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_pipe_name_contains_the_user_sid_and_sid_looks_right() {
@@ -654,10 +885,21 @@ mod tests {
 
     #[cfg(windows)]
     fn dacl_of(handle: std::os::windows::io::RawHandle) -> DaclInfo {
+        dacl_of_kind(
+            handle,
+            windows_sys::Win32::Security::Authorization::SE_KERNEL_OBJECT,
+        )
+    }
+
+    #[cfg(windows)]
+    fn dacl_of_kind(
+        handle: std::os::windows::io::RawHandle,
+        kind: windows_sys::Win32::Security::Authorization::SE_OBJECT_TYPE,
+    ) -> DaclInfo {
         use std::ffi::c_void;
         use windows_sys::Win32::Foundation::LocalFree;
         use windows_sys::Win32::Security::Authorization::{
-            ConvertStringSidToSidW, GetSecurityInfo, SE_KERNEL_OBJECT,
+            ConvertStringSidToSidW, GetSecurityInfo,
         };
         use windows_sys::Win32::Security::{
             EqualSid, GetAce, GetSecurityDescriptorControl, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
@@ -677,7 +919,7 @@ mod tests {
             let mut dacl: *mut ACL = std::ptr::null_mut();
             let rc = GetSecurityInfo(
                 handle as _,
-                SE_KERNEL_OBJECT,
+                kind,
                 DACL_SECURITY_INFORMATION,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -708,6 +950,54 @@ mod tests {
                 aces,
                 sddl,
             }
+        }
+    }
+
+    /// Pipe squatting: the pipe name is global and predictable, so a client must refuse a server
+    /// that does not run as the expected user. A second real account is MANUAL-TESTS #17; here the
+    /// expected owner is set to principals this process is NOT, and the real answer is accepted.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_client_refuses_a_pipe_whose_server_is_not_the_expected_user() {
+        let name = unique("squat");
+        let mut l = Listener::bind(&name).unwrap();
+        let accept = tokio::spawn(async move {
+            let mut held = vec![];
+            loop {
+                held.push(l.accept().await.unwrap());
+            }
+        });
+        for other in ["S-1-5-18", "S-1-1-0", "S-1-5-32-544"] {
+            let e = imp::connect_expecting(&name, other)
+                .await
+                .err()
+                .expect("must refuse");
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{other}: {e}");
+            assert!(!is_absent(&e));
+        }
+        // the genuine owner (this process) is accepted, through the public entry point too
+        imp::connect_expecting(&name, &imp::current_user_sid().unwrap())
+            .await
+            .expect("the real owner must be accepted");
+        connect(&name)
+            .await
+            .expect("connect() uses the current user");
+        accept.abort();
+    }
+
+    /// While a connected instance is handed out there must always be an unconnected one, or a
+    /// client arriving in that instant would see "no such pipe" (= app not running).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn accept_always_leaves_a_spare_instance_so_there_is_no_gap() {
+        let name = unique("spare");
+        let mut l = Listener::bind(&name).unwrap();
+        for _ in 0..5 {
+            let n = name.clone();
+            let c = tokio::spawn(async move { connect(&n).await.unwrap() });
+            let _s = l.accept().await.unwrap();
+            let _c = c.await.unwrap();
+            assert!(l.0.spare.is_some(), "no spare instance after accept");
         }
     }
 

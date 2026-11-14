@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-fn env_dir(var: &str) -> Option<PathBuf> {
+pub(crate) fn env_dir(var: &str) -> Option<PathBuf> {
     std::env::var_os(var)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -23,6 +23,24 @@ pub fn default_download_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relative_or_empty_environment_directory_is_ignored() {
+        // a variable name nothing else reads, so no other test can race with it
+        let var = format!("EID_TEST_DIR_{}", std::process::id());
+        // SAFETY: only this test touches this uniquely named variable.
+        unsafe {
+            std::env::set_var(&var, "relative/dir");
+            assert_eq!(env_dir(&var), None);
+            std::env::set_var(&var, "");
+            assert_eq!(env_dir(&var), None);
+            let abs = std::env::temp_dir();
+            std::env::set_var(&var, &abs);
+            assert_eq!(env_dir(&var), Some(abs));
+            std::env::remove_var(&var);
+        }
+        assert_eq!(env_dir(&var), None);
+    }
 
     #[test]
     fn the_default_download_dir_is_absolute_and_named_downloads() {
