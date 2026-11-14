@@ -1682,7 +1682,9 @@ async fn resume_inner(
     // also covers a missing part, restarts and finalization (review M1).
     let lock = JobLock::for_state_file(state_path)?;
     let sp = state_path.to_path_buf();
-    let st = match blocking(move || state::load(&sp)).await {
+    // The job lock is held and no checkpoint task exists yet: the one place where quarantining a
+    // corrupt primary is safe. Every other reader uses the read-only `state::load`.
+    let st = match blocking(move || state::load_repairing(&sp)).await {
         Ok(st) => st,
         Err(e) => {
             if !state_path.exists() {
