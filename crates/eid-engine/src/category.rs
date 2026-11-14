@@ -149,7 +149,7 @@ impl Categorizer {
     /// (`Content-Type`, parameters ignored), then the fallback. First matching rule wins.
     pub fn classify(&self, file_name: &str, mime: Option<&str>) -> &Category {
         if let Some(ext) = last_extension(file_name) {
-            if let Some(c) = self.rules.iter().find(|c| c.exts.iter().any(|e| *e == ext)) {
+            if let Some(c) = self.rules.iter().find(|c| c.exts.contains(&ext)) {
                 return c;
             }
         }

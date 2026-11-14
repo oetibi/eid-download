@@ -129,7 +129,7 @@ pub fn expand(pattern: &str) -> Result<Vec<String>, BatchError> {
     }
     let mut total: u64 = 1;
     for g in &groups {
-        total = total.checked_mul(g.len()).unwrap_or(u64::MAX);
+        total = total.saturating_mul(g.len());
         if total > MAX_EXPANSION as u64 {
             return Err(BatchError::TooMany {
                 limit: MAX_EXPANSION,
