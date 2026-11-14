@@ -242,16 +242,26 @@ fn symlink_capability_precheck() {
     let t = d.path().join("t");
     std::fs::write(&t, b"x").unwrap();
     let r = eid_platform::fs::symlink_file(&t, &d.path().join("l"));
-    if let Err(e) = &r {
-        eprintln!("SYMLINKS NOT AVAILABLE ON THIS RUNNER: {e}");
-    }
-    #[cfg(unix)]
-    assert!(r.is_ok());
+    // AGENTS §6: a symlink test must FAIL when the link cannot be created, on every OS (a
+    // Windows runner needs the symlink privilege; grant it in CI instead of skipping).
+    assert!(
+        r.is_ok(),
+        "this machine cannot create symlinks, so symlink safety cannot be tested: {r:?}"
+    );
 }
 
+/// M5: the part, its sidecars (state, backup, lock) and anything else a running job leaves are
+/// owner-only EVEN IN A WORLD-WRITABLE, UMASK-022 DIRECTORY; the finished file is NOT private
+/// (ordinary `0666 & !umask`). Unix only: Windows ACL inspection is not implemented (P3), so
+/// this test does not exist there and the required list marks it `unix:` (NOT TESTED), instead
+/// of passing on an unknown ACL.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn security_generated_part_and_state_files_are_private() {
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
+    // permissive parent: the privacy must come from the files, not from the directory
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
     let cancel = eid_engine::CancellationToken::new();
     let (_srv, url) = serve(
         "/p.bin",
@@ -267,12 +277,12 @@ async fn security_generated_part_and_state_files_are_private() {
     .await;
     let c2 = cancel.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         c2.cancel();
     });
-    let _ = eid_engine::download(
+    let r = eid_engine::download(
         eid_engine::JobSpec {
-            url,
+            url: url.clone(),
             dir: dir.path().into(),
             file_name: None,
         },
@@ -281,6 +291,50 @@ async fn security_generated_part_and_state_files_are_private() {
         cancel,
     )
     .await;
+    assert!(matches!(r, Err(eid_engine::Error::Cancelled)), "{r:?}");
+    let names = only_files(dir.path());
+    for needed in ["p.bin.eid-part", "p.bin.eid-state", "p.bin.eid-lock"] {
+        assert!(
+            names.iter().any(|n| n == needed),
+            "{needed} missing in {names:?}"
+        );
+    }
+    let mut checked = 0;
+    for n in &names {
+        let p = dir.path().join(n);
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & 0o077, 0, "{n} must be owner-only, is {mode:o}");
+        assert_eq!(
+            eid_platform::fs::owner_only(&p).unwrap(),
+            Some(true),
+            "{n}: unknown is not proof"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 3);
+    // resume to completion: the PUBLISHED file is ordinary user data, not 0600
     let st = dir.path().join("p.bin.eid-state");
-    assert_ne!(eid_platform::fs::owner_only(&st).unwrap(), Some(false));
+    let done = eid_engine::resume(
+        &st,
+        fast_cfg(2),
+        Log::default().sink(),
+        eid_engine::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let mode = std::fs::metadata(&done.path).unwrap().permissions().mode() & 0o777;
+    let umask = eid_platform::fs::current_umask().expect("umask known on unix");
+    assert_eq!(
+        mode,
+        0o666 & !umask,
+        "final file mode {mode:o}, umask {umask:o}"
+    );
+    assert_eq!(
+        sha_of_file(&done.path),
+        Content::Generated {
+            seed: 1,
+            len: 8 << 20
+        }
+        .sha256_hex()
+    );
 }

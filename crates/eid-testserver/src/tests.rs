@@ -591,3 +591,57 @@ async fn unsupported_methods_missing_paths_and_bad_requests() {
         assert!(matches!(result, Ok(0) | Err(_)));
     }
 }
+
+#[tokio::test]
+async fn header_delay_withholds_headers_then_serves_only_the_selected_requests() {
+    let s = fixture(Behavior {
+        header_delay: Some(HeaderDelay {
+            skip: 1,
+            count: 1,
+            delay: Duration::from_millis(400),
+            partial: true,
+        }),
+        ..Behavior::default()
+    })
+    .await;
+    // request 1: not delayed
+    let t = Instant::now();
+    body(&request(&s, "GET", "").await, DATA);
+    assert!(
+        t.elapsed() < Duration::from_millis(300),
+        "{:?}",
+        t.elapsed()
+    );
+    // request 2: bytes arrive (a partial status line) but no complete header block for 400 ms
+    let mut socket = connect(&s).await;
+    socket
+        .write_all(b"GET /f HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut first = [0u8; 14];
+    timeout(Duration::from_secs(2), socket.read_exact(&mut first))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&first, b"HTTP/1.1 200 O");
+    let started = Instant::now();
+    let mut rest = vec![0u8; 1];
+    timeout(Duration::from_secs(5), socket.read_exact(&mut rest))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        started.elapsed() >= Duration::from_millis(300),
+        "headers arrived after only {:?}",
+        started.elapsed()
+    );
+    drop(socket);
+    // request 3: not delayed again
+    let t = Instant::now();
+    body(&request(&s, "GET", "").await, DATA);
+    assert!(
+        t.elapsed() < Duration::from_millis(300),
+        "{:?}",
+        t.elapsed()
+    );
+}

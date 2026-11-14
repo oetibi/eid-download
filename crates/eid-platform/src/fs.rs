@@ -665,6 +665,44 @@ pub fn symlink_file(target: &Path, link: &Path) -> io::Result<()> {
     }
 }
 
+/// The process umask (Linux: `Umask:` in `/proc/self/status`, read-only and race-free, unlike
+/// `umask(2)` which can only be read by changing it). Other Unix: the conventional `022`.
+/// `None` on Windows.
+pub fn current_umask() -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string("/proc/self/status").ok()?;
+        let v = s.lines().find_map(|l| l.strip_prefix("Umask:"))?;
+        u32::from_str_radix(v.trim(), 8).ok()
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        Some(0o022)
+    }
+    #[cfg(windows)]
+    {
+        None
+    }
+}
+
+/// Give a finished download the permissions an ordinary new file would have (`0666 & !umask`).
+/// While a transfer runs the part file is owner-only (it may hold authenticated content); the
+/// final file is the user's data and must not stay 0600 (P1 review M5). Windows: no-op (the
+/// file keeps the ACL inherited from the download directory; protected DACLs are P3).
+pub fn set_default_data_permissions(file: &File) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = 0o666 & !current_umask().unwrap_or(0o022);
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+    }
+    #[cfg(windows)]
+    {
+        let _ = file;
+        Ok(())
+    }
+}
+
 /// True if the file permits access to its owner only (Unix mode bits; on Windows this
 /// returns `None` = "not verified": real ACL inspection is a P3 task).
 pub fn owner_only(path: &Path) -> io::Result<Option<bool>> {

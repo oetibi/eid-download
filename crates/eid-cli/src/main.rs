@@ -11,6 +11,7 @@ use std::time::Duration;
 
 const HELP: &str = "eid - Eid Download command line\n\n\
 USAGE:\n  eid get <url> [-d DIR] [-o NAME] [-c N] [--limit RATE] [--sha256 HEX] [-q]\n  eid resume <file.eid-state> [-c N] [--limit RATE] [--sha256 HEX] [-q]\n\n\
+  eid queue ... / eid grab ...   download queues and the page link grabber (see `eid queue`)\n\n\
   -c N          connections (1..=32, default 8)\n  --limit RATE  bytes/s, e.g. 500K, 2M\n  -q            no progress output\n\n\
 Ctrl-C stops safely and prints the command that resumes the download.";
 
@@ -95,9 +96,49 @@ fn sink(quiet: bool, name: Arc<Mutex<Option<String>>>) -> EventSink {
     })
 }
 
+async fn queue_main(argv: &[String]) -> i32 {
+    use eid_cli::queue_cmd as q;
+    let cancel = CancellationToken::new();
+    {
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("stopping safely...");
+                c.cancel();
+            }
+        });
+    }
+    let result: Result<i32, String> = match argv[0].as_str() {
+        "grab" => match q::parse_grab(&argv[1..]) {
+            Ok(g) => q::run_grab(&g, &cancel).await.map(|_| 0),
+            Err(e) => Err(format!("usage: {e}")),
+        },
+        _ => match q::parse_queue(&argv[1..]) {
+            Ok(a) => match a.sub.as_str() {
+                "add" => q::run_add(&a).map(|_| 0),
+                "list" => q::run_list(&a).map(|_| 0),
+                "import" => q::run_import(&a).map(|_| 0),
+                "export" => q::run_export(&a).map(|_| 0),
+                _ => q::run_queue(&a, cancel).await,
+            },
+            Err(e) => Err(format!("usage: {e}")),
+        },
+    };
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}\n\n{}", q::HELP);
+            2
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(argv.first().map(String::as_str), Some("queue" | "grab")) {
+        std::process::exit(queue_main(&argv).await);
+    }
     let cmd = match args::parse(&argv) {
         Ok(c) => c,
         Err(e) => {

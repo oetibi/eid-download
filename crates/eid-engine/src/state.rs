@@ -207,6 +207,36 @@ pub fn load(path: &Path) -> Result<State> {
     }
 }
 
+/// Read-only validation of a sidecar: never renames or deletes anything (unlike [`load`]).
+pub fn peek(path: &Path) -> std::result::Result<State, String> {
+    read_validate(path)
+}
+
+/// The `.eid-state` file in `dir` that belongs to `url` (credential-free, canonical form), if any.
+/// Read-only; looks at regular files only and at most `MAX_SCAN` directory entries, so a hostile
+/// directory cannot make it run for long. Used to find the sidecar of a job whose file name was
+/// never recorded (killed right after the claim).
+pub fn find_for_url(dir: &Path, url: &str) -> Option<PathBuf> {
+    const MAX_SCAN: usize = 10_000;
+    let rd = std::fs::read_dir(dir).ok()?;
+    for entry in rd.take(MAX_SCAN).flatten() {
+        let name = entry.file_name();
+        let Some(n) = name.to_str() else { continue };
+        if !n.ends_with(".eid-state") {
+            continue;
+        }
+        let p = entry.path();
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.file_type().is_file() => {}
+            _ => continue,
+        }
+        if peek(&p).is_ok_and(|s| s.url == url) {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// Delete only the `.bak` generation (used when a restart replaces the state, so the backup can
 /// never certify data of a previous representation) and make the deletion durable.
 ///
@@ -300,8 +330,15 @@ mod tests {
         assert!(bak_path(&p).exists());
         let s = load(&p).unwrap();
         assert_eq!(s.segments.len(), 2);
-        // Some(true) on Unix; None ("not verified") on Windows
-        assert_ne!(eid_platform::fs::owner_only(&p).unwrap(), Some(false));
+        // Unix: proven owner-only (Some(true)). Windows: ACLs are not inspected yet (P3) => None,
+        // which is "not verified", never counted as proof.
+        let want = (!eid_platform::IS_WINDOWS).then_some(true);
+        assert_eq!(eid_platform::fs::owner_only(&p).unwrap(), want);
+        assert_eq!(
+            eid_platform::fs::owner_only(&bak_path(&p)).unwrap(),
+            want,
+            "the .bak must be private too"
+        );
     }
 
     #[test]

@@ -4,11 +4,9 @@ use crate::config::{Config, MAX_CONNECTIONS, MAX_TOTAL_BYTES};
 use crate::error::{Error, Result};
 use crate::fault;
 use crate::filename;
-use crate::http::{
-    self, parse_content_range, parse_retry_after, strong_etag, strong_last_modified,
-};
+use crate::http::{self, parse_content_range, strong_etag, strong_last_modified};
 use crate::limiter::Limiter;
-use crate::sanitize::sanitize_file_name;
+use crate::sanitize::{numbered_name as numbered, sanitize_file_name};
 use crate::state::{self, SegState, State, STATE_VERSION};
 use crate::table::Table;
 use crate::urlsafe;
@@ -287,8 +285,7 @@ impl Ctx {
             StatusCode::OK => return Err(Fail::Changed), // validator mismatch or Range ignored
             StatusCode::RANGE_NOT_SATISFIABLE => return Err(Fail::Changed),
             StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => {
-                let after = http::header_str(resp.headers(), "retry-after")
-                    .and_then(|v| parse_retry_after(&v, self.cfg.retry_after_cap));
+                let after = http::retry_after_of(resp.headers(), self.cfg.retry_after_cap);
                 return Err(Fail::Throttle {
                     status: st.as_u16(),
                     after,
@@ -372,6 +369,8 @@ impl Ctx {
             fault::hit("write_reserved");
             fault::jitter();
             if n > 0 {
+                // injectable disk error AFTER the reservation, BEFORE the bytes are written
+                fault::fail("write_data")?;
                 pfs::write_all_at(&file, &data[..n as usize], off)?;
             }
             fault::jitter();
@@ -410,10 +409,15 @@ impl Ctx {
                     return Err(Fail::Cancelled);
                 }
                 let sent = tokio::select! {
-                    r = self.request(start, end - 1).send() => r,
+                    r = http::send_bounded(self.request(start, end - 1), self.cfg.header_timeout) => r,
                     _ = self.cancel.cancelled() => return Err(Fail::Cancelled),
                 };
-                let r = sent.map_err(|e| Fail::Retryable(net_err(e)))?;
+                let r = sent.map_err(|e| match e {
+                    http::SendError::Net(e) => Fail::Retryable(net_err(e)),
+                    http::SendError::HeaderTimeout => {
+                        Fail::Retryable("timed out waiting for response headers".into())
+                    }
+                })?;
                 self.check_ranged(&r, start, end - 1)?;
                 r
             }
@@ -687,7 +691,7 @@ impl Net<'_> {
         loop {
             attempt += 1;
             let sent = tokio::select! {
-                r = self.get(range).send() => r,
+                r = http::send_bounded(self.get(range), self.cfg.header_timeout) => r,
                 _ = self.cancel.cancelled() => return Err(Error::Cancelled),
             };
             let delay = match sent {
@@ -701,8 +705,7 @@ impl Net<'_> {
                             return Err(Error::Forbidden(st.as_u16()))
                         }
                         StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => {
-                            let ra = http::header_str(r.headers(), "retry-after")
-                                .and_then(|v| parse_retry_after(&v, self.cfg.retry_after_cap));
+                            let ra = http::retry_after_of(r.headers(), self.cfg.retry_after_cap);
                             (self.sink)(Event::Throttled {
                                 status: st.as_u16(),
                                 retry_after_ms: ra.map_or(0, |d| d.as_millis() as u64),
@@ -718,12 +721,13 @@ impl Net<'_> {
                         }
                     }
                 }
-                Err(e) => {
+                Err(http::SendError::Net(e)) => {
                     if e.is_builder() || e.is_redirect() {
                         return Err(Error::Network(net_err(e)));
                     }
                     http::backoff(self.cfg, attempt)
                 }
+                Err(http::SendError::HeaderTimeout) => http::backoff(self.cfg, attempt),
             };
             if attempt >= self.cfg.max_attempts {
                 return Err(Error::NoProgress(attempt));
@@ -815,14 +819,6 @@ impl Net<'_> {
 
 // ---------------------------------------------------------------- files
 
-fn numbered(name: &str, n: u32) -> String {
-    let (stem, ext) = match name.rfind('.') {
-        Some(i) if i > 0 => (&name[..i], &name[i..]),
-        _ => (name, ""),
-    };
-    sanitize_file_name(&format!("{stem} ({n}){ext}"))
-}
-
 struct Files {
     name: String,
     part: PathBuf,
@@ -860,7 +856,7 @@ fn claim_files(dir: &Path, base: &str, held: &mut Option<JobLock>) -> Result<Fil
                 }
             }
         };
-        match pfs::create_new_file(&part) {
+        match pfs::create_new_private(&part) {
             Ok(file) => {
                 return Ok(Files {
                     name: cand,
@@ -920,6 +916,9 @@ fn finalize_name(
     state_path: &Path,
     sha256: &str,
 ) -> Result<PathBuf> {
+    // The part was owner-only while it could hold authenticated bytes; the published file is the
+    // user's data and gets ordinary permissions (0666 & !umask), set on the verified handle.
+    pfs::set_default_data_permissions(file).map_err(Error::io("set final file permissions"))?;
     let mut st = state::load(state_path)?;
     for n in 0..1000u32 {
         let cand = if n == 0 {
@@ -1381,6 +1380,15 @@ where
     }
 }
 
+/// Run disk work on the blocking pool and flatten the join error (AGENTS 6.7: no blocking I/O on
+/// the async executor). The closure cannot be cancelled once started; callers are supervised
+/// jobs that own their files until it returns (M4).
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Network(format!("blocking task failed: {e}")))?
+}
+
 async fn download_inner(
     spec: JobSpec,
     cfg: Config,
@@ -1411,6 +1419,17 @@ async fn download_inner(
             }
         };
         if files.is_none() {
+            // paths the OS cannot open are refused/shortened HERE, not discovered later as an
+            // obscure "path not found" from a rename (Windows MAX_PATH, CI run 43576537725)
+            let name = match cfg.max_path_units {
+                Some(limit) => {
+                    let abs = std::path::absolute(&st.dir).unwrap_or_else(|_| st.dir.clone());
+                    let dir_units = abs.to_string_lossy().encode_utf16().count();
+                    crate::sanitize::fit_name_to_path_limit(&name, dir_units, limit)
+                        .map_err(Error::InvalidInput)?
+                }
+                None => name,
+            };
             files = Some(claim_files(&st.dir, &name, &mut held)?);
             if let Some(old) = held.take() {
                 old.remove_file_keep_lock(); // handed-over lock for a name we did not end up using
@@ -1451,20 +1470,24 @@ async fn download_inner(
         };
         let sp = f.state.clone();
         let restarting = restart_reason.is_some();
+        // All of this is disk work (fsyncs, truncate, preallocation can take long on slow or
+        // non-sparse filesystems): one blocking-pool task, never the async executor (m2).
+        let (setup_file, total_for_prealloc) = (file.clone(), probe.total);
         tokio::task::spawn_blocking(move || -> Result<()> {
+            fault::hit("setup_blocking");
             if restarting {
                 fault::fail("restart_state_write").map_err(Error::io("restart state write"))?;
             }
             state::save(&sp, &init)?;
             state::remove_backup(&sp)?;
+            setup_file.set_len(0).map_err(Error::io("truncate"))?;
+            if let Some(t) = total_for_prealloc {
+                pfs::preallocate(&setup_file, t).map_err(Error::io("preallocate"))?;
+            }
             Ok(())
         })
         .await
         .map_err(|e| Error::Network(e.to_string()))??;
-        file.set_len(0).map_err(Error::io("truncate"))?;
-        if let Some(t) = probe.total {
-            pfs::preallocate(&file, t).map_err(Error::io("preallocate"))?;
-        }
         if let Some(reason) = restart_reason.take() {
             sink(Event::Restarted { reason });
         }
@@ -1658,7 +1681,8 @@ async fn resume_inner(
     // Job ownership FIRST: before the state is read, and independent of the part file, so it
     // also covers a missing part, restarts and finalization (review M1).
     let lock = JobLock::for_state_file(state_path)?;
-    let st = match state::load(state_path) {
+    let sp = state_path.to_path_buf();
+    let st = match blocking(move || state::load(&sp)).await {
         Ok(st) => st,
         Err(e) => {
             if !state_path.exists() {
@@ -1842,7 +1866,14 @@ async fn resume_inner(
         .ok_or_else(|| Error::BadState("ranged state without total".into()))?;
     let client = http::build_client(&cfg)?;
     let file = Arc::new(part_file);
-    pfs::preallocate(&file, total).map_err(Error::io("preallocate"))?;
+    {
+        let f = file.clone();
+        blocking(move || {
+            fault::hit("resume_preallocate");
+            pfs::preallocate(&f, total).map_err(Error::io("preallocate"))
+        })
+        .await?;
+    }
     let info = JobInfo {
         url_clean: url_clean.clone(),
         name: st.file_name.clone(),

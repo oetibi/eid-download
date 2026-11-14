@@ -8,4 +8,10 @@
 pub mod fs;
 pub mod net;
 pub mod process;
+pub mod time;
 pub const IS_WINDOWS: bool = cfg!(windows);
+/// Longest full path (in UTF-16 code units, without the terminating NUL) that ordinary file APIs
+/// accept: Windows `MAX_PATH` = 260. Windows only works beyond it with `\\?\` paths plus a
+/// `longPathAware` manifest, neither of which exists yet (planned P7/P8, MANUAL-TESTS #5), so the
+/// engine keeps every path it creates within this limit. `None` elsewhere (PATH_MAX is 4096).
+pub const MAX_PATH_UNITS: Option<usize> = if IS_WINDOWS { Some(259) } else { None };

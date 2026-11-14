@@ -235,10 +235,24 @@ mod tests {
         assert_eq!(t.cursor(a), (10, 100));
     }
 
-    /// ADR-0009 arbiter: many threads reserve/write/complete while a splitter thread keeps
-    /// stealing. Every byte must be written exactly once, no byte outside coverage.
+    fn content_byte(seed: u64, off: u64) -> u8 {
+        let x = off
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(seed.wrapping_mul(0xD6E8_FEB8_6659_FD93));
+        (x >> 24) as u8
+    }
+
+    /// ADR-0009 arbiter with REAL content. Many threads reserve/write/complete while the pool
+    /// keeps stealing (splitting). Each worker writes the true content bytes of its reservation
+    /// into a shared buffer; with some probability the "connection drops" MID-RESERVATION: only a
+    /// prefix of the reserved bytes is written and completed, then the segment is released and
+    /// the rest must be re-reserved by someone else. Checked per seed: every reservation lies
+    /// inside the segment's range at that moment (no write outside coverage), no byte is written
+    /// twice, the table invariants hold after every step, and the SHA-256 of the assembled
+    /// buffer equals the SHA-256 of the expected content.
     #[test]
     fn handoff_randomized_200_seeds() {
+        use sha2::{Digest, Sha256};
         for seed in 1..=200u64 {
             let mut rng = fastrand::Rng::with_seed(seed);
             let total = 20_000 + rng.u64(0..200_000);
@@ -247,10 +261,12 @@ mod tests {
             let table = Arc::new(Mutex::new(Table::new(total)));
             let writes: Arc<Vec<AtomicU8>> =
                 Arc::new((0..total).map(|_| AtomicU8::new(0)).collect());
+            let buf: Arc<Vec<AtomicU8>> = Arc::new((0..total).map(|_| AtomicU8::new(0)).collect());
             let mut handles = Vec::new();
             for w in 0..workers {
                 let table = table.clone();
                 let writes = writes.clone();
+                let buf = buf.clone();
                 let wseed = seed * 1000 + w as u64;
                 handles.push(std::thread::spawn(move || {
                     let mut rng = fastrand::Rng::with_seed(wseed);
@@ -276,22 +292,35 @@ mod tests {
                         let idx = cur.unwrap();
                         // "network chunk" of random size
                         let want = 1 + rng.u64(0..4096);
-                        let (off, n) = table.lock().unwrap().reserve(idx, want);
+                        let (off, n, seg_end) = {
+                            let mut t = table.lock().unwrap();
+                            let (next, end) = t.cursor(idx);
+                            let (off, n) = t.reserve(idx, want);
+                            (off, n, (next, end))
+                        };
                         if n == 0 {
                             cur = None; // segment ended (maybe cut by a split)
                             continue;
                         }
+                        assert!(
+                            off >= seg_end.0 && off + n <= seg_end.1 && off + n <= total,
+                            "seed {seed}: reservation {off}+{n} outside segment {seg_end:?}"
+                        );
                         if rng.u8(..).is_multiple_of(4) {
                             std::thread::yield_now(); // widen the reserve->write window
                         }
-                        for b in off..off + n {
+                        // a dropped connection mid-reservation writes only a prefix
+                        let drop_conn = rng.u8(..).is_multiple_of(25);
+                        let k = if drop_conn && n > 1 { rng.u64(0..n) } else { n };
+                        for b in off..off + k {
                             let prev = writes[b as usize].fetch_add(1, Ordering::SeqCst);
                             assert_eq!(prev, 0, "seed {seed}: byte {b} written twice");
+                            buf[b as usize].store(content_byte(seed, b), Ordering::SeqCst);
                         }
                         let mut t = table.lock().unwrap();
-                        t.complete(idx, off, n);
-                        if rng.u8(..).is_multiple_of(50) {
-                            // simulate a dropped connection: give the segment back
+                        t.complete(idx, off, k);
+                        if drop_conn || rng.u8(..).is_multiple_of(50) {
+                            // dropped connection: give the segment back
                             t.release(idx);
                             cur = None;
                         }
@@ -310,6 +339,13 @@ mod tests {
             assert!(
                 writes.iter().all(|b| b.load(Ordering::SeqCst) == 1),
                 "seed {seed}: some byte not written exactly once"
+            );
+            let got: Vec<u8> = buf.iter().map(|b| b.load(Ordering::SeqCst)).collect();
+            let want: Vec<u8> = (0..total).map(|o| content_byte(seed, o)).collect();
+            assert_eq!(
+                Sha256::digest(&got),
+                Sha256::digest(&want),
+                "seed {seed}: assembled content differs"
             );
         }
     }
