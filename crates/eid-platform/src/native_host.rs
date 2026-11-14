@@ -234,7 +234,8 @@ mod imp {
         }
     }
 
-    /// Read the default value of the registered key back (tests and diagnostics).
+    /// Read the default value of the registered key back (tests only).
+    #[cfg(test)]
     pub fn read_back(browser: Browser, name: &str) -> io::Result<Option<String>> {
         use windows_sys::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_SZ};
         let key = key_path(browser, name);
