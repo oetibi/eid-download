@@ -11,7 +11,8 @@ use std::time::Duration;
 
 const HELP: &str = "eid - Eid Download command line\n\n\
 USAGE:\n  eid get <url> [-d DIR] [-o NAME] [-c N] [--limit RATE] [--sha256 HEX] [-q]\n  eid resume <file.eid-state> [-c N] [--limit RATE] [--sha256 HEX] [-q]\n\n\
-  eid queue ... / eid grab ...   download queues and the page link grabber (see `eid queue`)\n\n\
+  eid queue ... / eid grab ...   download queues and the page link grabber (see `eid queue`)\n\
+  eid serve ... / eid add|list|pause|resume   the headless app and its remote control (see `eid serve`)\n\n\
   -c N          connections (1..=32, default 8)\n  --limit RATE  bytes/s, e.g. 500K, 2M\n  -q            no progress output\n\n\
 Ctrl-C stops safely and prints the command that resumes the download.";
 
@@ -133,9 +134,49 @@ async fn queue_main(argv: &[String]) -> i32 {
     }
 }
 
+/// `eid serve` and the remote commands (`add`, `list`, `pause`, `resume`).
+async fn app_main(argv: &[String]) -> i32 {
+    use eid_cli::{remote, serve};
+    let cancel = CancellationToken::new();
+    {
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("stopping safely...");
+                c.cancel();
+            }
+        });
+    }
+    let result: Result<i32, String> = if argv[0] == "serve" {
+        match serve::parse(&argv[1..]) {
+            Ok(a) => serve::run(a, cancel).await,
+            Err(e) => Err(format!("usage: {e}\n\n{}", serve::HELP)),
+        }
+    } else {
+        match remote::parse(argv) {
+            Ok(a) => remote::run(a).await,
+            Err(e) => Err(format!("usage: {e}\n\n{}", serve::HELP)),
+        }
+    };
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            if e.starts_with("usage:") {
+                2
+            } else {
+                1
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if eid_cli::remote::is_app_command(&argv) {
+        std::process::exit(app_main(&argv).await);
+    }
     if matches!(argv.first().map(String::as_str), Some("queue" | "grab")) {
         std::process::exit(queue_main(&argv).await);
     }

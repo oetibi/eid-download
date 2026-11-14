@@ -157,8 +157,10 @@ version = "0.0.1"
 dependencies = [
  "eid-cli",
  "eid-engine",
+ "eid-ipc",
  "eid-platform",
  "eid-testserver",
+ "serde_json",
  "sha2",
  "tempfile",
  "tokio",
@@ -188,11 +190,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "eid-ipc"
+version = "0.0.1"
+dependencies = [
+ "eid-platform",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "eid-native-host"
+version = "0.0.1"
+dependencies = [
+ "eid-ipc",
+ "eid-platform",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "eid-platform"
 version = "0.0.1"
 dependencies = [
+ "getrandom 0.2.17",
  "libc",
+ "serde_json",
  "tempfile",
+ "tokio",
  "windows-sys 0.59.0",
 ]
 

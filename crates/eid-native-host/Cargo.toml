@@ -1,0 +1,22 @@
+[package]
+name = "eid-native-host"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "eid-native-host"
+path = "src/main.rs"
+
+[dependencies]
+eid-ipc = { path = "../eid-ipc" }
+eid-platform = { path = "../eid-platform" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "time", "io-util", "io-std"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "io-std", "process"] }
+tempfile = "3"
+
+[lints]
+workspace = true

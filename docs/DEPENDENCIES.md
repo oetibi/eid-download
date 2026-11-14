@@ -7,3 +7,5 @@
 | Deno | إصدارات رسمية | MIT | JS runtime ليوتيوب |
 ## مكتبات Rust (P1)
 تُسجَّل كلها هنا قبل إضافتها مع ترخيصها: tokio (MIT)، reqwest (MIT/Apache-2.0)، serde/serde_json (MIT/Apache-2.0)، sha2 (MIT/Apache-2.0)، thiserror، url، percent-encoding، futures-util، tokio-util، fastrand، libc (MIT/Apache-2.0)، windows-sys (MIT/Apache-2.0). `cargo deny check` يُضاف إلى CI قبل إغلاق P1.
+## مكتبات Rust (P3)
+getrandom 0.2 (MIT/Apache-2.0، كانت في Cargo.lock أصلاً) لتوكن المصافحة 256-بت · tokio ميزتا `net` و`io-util` داخل eid-platform (MIT) · windows-sys ميزات `Win32_Security`/`Win32_Security_Authorization`/`Win32_System_Registry` (MIT/Apache-2.0).
