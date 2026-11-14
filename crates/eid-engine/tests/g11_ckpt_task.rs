@@ -278,7 +278,7 @@ async fn parked_checkpoint_cannot_overwrite_new_generation_state() {
             break job.await.expect("c: operation failed");
         }
         if sp.exists() {
-            if let Ok(st) = eid_engine::state::load(&sp) {
+            if let Ok(st) = eid_engine::state::peek(&sp) {
                 assert_eq!(
                     st.etag.as_deref(),
                     Some(etag_b.as_str()),

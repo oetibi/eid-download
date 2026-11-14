@@ -144,7 +144,7 @@ async fn cli_sigkill_then_resume_completes_from_frontier() {
     let t = Instant::now();
     let st = loop {
         if let Some(sp) = state_file(dir.path()) {
-            if let Ok(st) = state::load(&sp) {
+            if let Ok(st) = state::peek(&sp) {
                 let done: u64 = st.segments.iter().map(|s| s.next - s.start).sum();
                 // PLAN G2: kill only once >= 30% is DURABLE in the sidecar
                 if done * 10 >= 3 * content(2).len() {

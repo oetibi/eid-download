@@ -62,7 +62,7 @@ async fn run_until_progress(
         let t = std::time::Instant::now();
         loop {
             if let Some(sp) = state_file(&d) {
-                if let Ok(st) = state::load(&sp) {
+                if let Ok(st) = state::peek(&sp) {
                     let done: u64 = st.segments.iter().map(|s| s.next - s.start).sum();
                     if done >= min_done {
                         break;
@@ -594,9 +594,9 @@ async fn aborting_the_caller_drains_the_job_and_persists_a_final_checkpoint() {
     let sp = dir.path().join("m4.bin.eid-state");
     let t = std::time::Instant::now();
     let mut last_frontier: Option<u64> = None;
-    let mut last_load_error: Option<Error> = None;
+    let mut last_load_error: Option<String> = None;
     let frontier = loop {
-        match state::load(&sp) {
+        match state::peek(&sp) {
             Ok(st) => {
                 let done: u64 = st.segments.iter().map(|g| g.next - g.start).sum();
                 last_frontier = Some(done);
