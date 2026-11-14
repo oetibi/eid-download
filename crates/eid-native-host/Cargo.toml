@@ -1,0 +1,8 @@
+[package]
+name = "eid-native-host"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
