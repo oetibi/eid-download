@@ -80,6 +80,50 @@ pub fn sanitize_file_name(raw: &str) -> String {
     }
 }
 
+/// Longest sidecar suffix (`.eid-state.broken`) plus the longest collision suffix (` (999)`):
+/// what a file name needs on top of itself so that every file of its job fits a path limit.
+pub const NAME_PATH_RESERVE: usize = 17 + 6;
+
+/// Shorten `name` (keeping a short extension) so that `dir_units + 1 + name + NAME_PATH_RESERVE`
+/// stays within `limit` UTF-16 units. `Err` when the directory alone leaves no room for a useful
+/// name (then the caller must refuse with a clear message, not fail later with an obscure OS error).
+pub fn fit_name_to_path_limit(
+    name: &str,
+    dir_units: usize,
+    limit: usize,
+) -> Result<String, String> {
+    const MIN_NAME_UNITS: usize = 12;
+    let budget = limit
+        .checked_sub(dir_units.saturating_add(1 + NAME_PATH_RESERVE))
+        .filter(|b| *b >= MIN_NAME_UNITS)
+        .ok_or_else(|| {
+            format!(
+                "the download folder path is too long ({dir_units} characters): Windows accepts at most {limit} \
+                 characters per file path without long-path support; choose a shorter folder"
+            )
+        })?;
+    let units = |s: &str| s.encode_utf16().count();
+    if units(name) <= budget {
+        return Ok(name.to_string());
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 && units(&name[i..]) <= 16 && units(&name[i..]) < budget => {
+            (&name[..i], &name[i..])
+        }
+        _ => (name, ""),
+    };
+    let mut keep = String::new();
+    for c in stem.chars() {
+        if units(&keep) + c.len_utf16() + units(ext) > budget {
+            break;
+        }
+        keep.push(c);
+    }
+    let out = sanitize_file_name(&format!("{keep}{ext}"));
+    debug_assert!(units(&out) <= budget);
+    Ok(out)
+}
+
 /// Collision candidate `stem (n).ext` for an already-sanitized `name`. The bytes the suffix
 /// needs are reserved BEFORE the stem is shortened, so the number can never be truncated away
 /// (P1 review m1: a maximal stem used to lose its own ` (n)` and every candidate equalled the
@@ -204,6 +248,47 @@ mod tests {
         }
         let name = "ع".repeat(300);
         assert_safe(&sanitize_file_name(&name));
+    }
+
+    #[test]
+    fn names_are_fitted_to_a_path_limit_with_room_for_every_sidecar_and_suffix() {
+        let units = |s: &str| s.encode_utf16().count();
+        let limit = 259;
+        for dir_units in [3usize, 50, 120, 200, 215] {
+            for raw in [
+                "a".repeat(200),
+                format!("{}.zip", "b".repeat(196)),
+                "ع".repeat(100),
+                format!("{}.pdf", "ع".repeat(98)),
+                format!("{}.tar.gz", "😀".repeat(40)),
+                "short.txt".to_string(),
+            ] {
+                let base = sanitize_file_name(&raw);
+                let fitted = fit_name_to_path_limit(&base, dir_units, limit).unwrap();
+                assert!(is_safe_stored_name(&fitted), "{fitted:?}");
+                // the longest file of the job: collision suffix + longest sidecar suffix
+                let longest = dir_units + 1 + units(&numbered_name(&fitted, 999)) + 17;
+                assert!(
+                    longest <= limit,
+                    "dir {dir_units}: {longest} > {limit} for {fitted:?}"
+                );
+                assert!(units(&fitted) <= units(&base));
+                if raw.ends_with(".zip") || raw.ends_with(".pdf") {
+                    assert!(
+                        fitted.ends_with(&raw[raw.rfind('.').unwrap()..]),
+                        "extension kept: {fitted:?}"
+                    );
+                }
+                if units(&base) + dir_units + 1 + NAME_PATH_RESERVE <= limit {
+                    assert_eq!(fitted, base, "a name that fits is untouched");
+                }
+            }
+        }
+        // a directory that leaves no room is a clear error, not a truncation to nothing
+        let e = fit_name_to_path_limit("a.txt", 240, limit).unwrap_err();
+        assert!(e.contains("too long"), "{e}");
+        assert!(fit_name_to_path_limit("a.txt", usize::MAX, limit).is_err());
+        assert!(fit_name_to_path_limit("a.txt", 0, 0).is_err());
     }
 
     #[test]

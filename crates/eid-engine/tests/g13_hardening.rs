@@ -154,3 +154,90 @@ async fn second_download_of_a_maximal_name_gets_a_numbered_free_name() {
         }
     }
 }
+
+/// Windows MAX_PATH (CI run 43576537725: `replace state: path not found` for a 200-byte name in a
+/// deep temp dir). The engine must keep EVERY path it creates (final file, `.eid-part`,
+/// `.eid-state`, `.eid-lock`, `.broken`, numbered copies) within `max_path_units`. Windows sets it
+/// to 259; this test sets the same limit on Linux so the behaviour is exercised on every platform.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_created_path_stays_within_the_path_limit_and_an_impossible_folder_is_refused() {
+    let units = |p: &std::path::Path| p.to_string_lossy().encode_utf16().count();
+    let limit = 259usize;
+    for (i, name) in [
+        "a".repeat(200),
+        format!("{}.zip", "b".repeat(196)),
+        "ع".repeat(100),
+        format!("{}.pdf", "ع".repeat(98)),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let enc = percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC);
+        let b = Behavior {
+            content_disposition: Some(format!("attachment; filename*=UTF-8''{enc}")),
+            throttle_bps: Some(400_000),
+            ..Behavior::default()
+        };
+        let (_srv, url) = serve("/m.bin", gen(1 << 20), b).await;
+        // a folder about as deep as a CI temp dir
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("x".repeat(40));
+        std::fs::create_dir(&dir).unwrap();
+        let mut cfg = fast_cfg(1);
+        cfg.max_path_units = Some(limit);
+        // 1) interrupted job: all its sidecars exist at once
+        let cancel = eid_engine::CancellationToken::new();
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            c2.cancel();
+        });
+        let r = eid_engine::download(
+            eid_engine::JobSpec {
+                url: url.clone(),
+                dir: dir.clone(),
+                file_name: None,
+            },
+            cfg.clone(),
+            Log::default().sink(),
+            cancel,
+        )
+        .await;
+        assert!(matches!(r, Err(Error::Cancelled)), "case {i}: {r:?}");
+        for f in std::fs::read_dir(&dir).unwrap() {
+            let p = f.unwrap().path();
+            assert!(units(&p) <= limit, "case {i}: {} units: {p:?}", units(&p));
+        }
+        // 2) finish it, then two more copies: numbered names fit too
+        let (_srv2, url2) = serve(
+            "/m.bin",
+            gen(300_000),
+            Behavior {
+                content_disposition: Some(format!("attachment; filename*=UTF-8''{enc}")),
+                ..Behavior::default()
+            },
+        )
+        .await;
+        for k in 0..3 {
+            let (o, _) = get(&url2, &dir, cfg.clone())
+                .await
+                .unwrap_or_else(|e| panic!("case {i} copy {k}: {e}"));
+            assert!(units(&o.path) <= limit, "case {i} copy {k}: {:?}", o.path);
+            assert_eq!(sha_of_file(&o.path), gen(300_000).sha256_hex());
+        }
+    }
+    // a folder that leaves no room: a clear, early refusal (nothing created)
+    let (_srv, url) = serve("/f.bin", gen(1000), Behavior::default()).await;
+    let root = tempfile::tempdir().unwrap();
+    let deep = root.path().join("d".repeat(230));
+    std::fs::create_dir(&deep).unwrap();
+    let mut cfg = fast_cfg(1);
+    cfg.max_path_units = Some(limit);
+    let r = get(&url, &deep, cfg).await;
+    assert!(
+        matches!(&r, Err(Error::InvalidInput(m)) if m.contains("too long")),
+        "{:?}",
+        r.as_ref().map(|_| ())
+    );
+    assert_eq!(only_files(&deep), Vec::<String>::new());
+}

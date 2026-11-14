@@ -51,6 +51,10 @@ pub struct Config {
     /// Extra trusted root certificates (PEM), e.g. a corporate CA. This only *adds* trust
     /// anchors; certificate verification is never disabled (guard test enforces that).
     pub extra_root_certs_pem: Vec<Vec<u8>>,
+    /// Longest full path the engine may create (UTF-16 units). Defaults to the platform limit
+    /// (`eid_platform::MAX_PATH_UNITS`: 259 on Windows, none elsewhere); tests set it on Linux to
+    /// exercise the Windows behaviour.
+    pub max_path_units: Option<usize>,
 }
 
 impl Default for Config {
@@ -79,6 +83,7 @@ impl Default for Config {
             hash_on_finish: true,
             allow_unvalidated_segments: false,
             extra_root_certs_pem: Vec::new(),
+            max_path_units: eid_platform::MAX_PATH_UNITS,
         }
     }
 }

@@ -1419,6 +1419,17 @@ async fn download_inner(
             }
         };
         if files.is_none() {
+            // paths the OS cannot open are refused/shortened HERE, not discovered later as an
+            // obscure "path not found" from a rename (Windows MAX_PATH, CI run 43576537725)
+            let name = match cfg.max_path_units {
+                Some(limit) => {
+                    let abs = std::path::absolute(&st.dir).unwrap_or_else(|_| st.dir.clone());
+                    let dir_units = abs.to_string_lossy().encode_utf16().count();
+                    crate::sanitize::fit_name_to_path_limit(&name, dir_units, limit)
+                        .map_err(Error::InvalidInput)?
+                }
+                None => name,
+            };
             files = Some(claim_files(&st.dir, &name, &mut held)?);
             if let Some(old) = held.take() {
                 old.remove_file_keep_lock(); // handed-over lock for a name we did not end up using
