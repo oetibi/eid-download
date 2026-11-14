@@ -197,9 +197,8 @@ state_load_never_quarantines_a_valid_file_during_rotation
 load_never_changes_anything_on_disk_in_any_state_of_the_pair
 corrupt_primary_with_good_bak_is_served_from_the_bak_without_touching_the_primary
 load_repairing_never_moves_a_primary_that_was_merely_unreadable
-# ---- P3: IPC + Native Messaging (names of tests that run on every OS; the Windows-only ones
-#      (windows_pipe_has_a_protected_dacl_with_only_the_current_user, windows_registers_under_hkcu_...)
-#      are not listed because check_required.py has no `windows:` prefix; they ran on Windows locally)
+# ---- P3: IPC + Native Messaging. `windows:`/`unix:` names are required on their own platform
+#      (check_required.py reports them as NOT TESTED elsewhere); the rest run everywhere.
 endpoint_names_are_validated
 tokens_are_random_hex_and_compared_exactly
 token_file_roundtrip_is_private_and_rejects_garbage
@@ -248,3 +247,19 @@ a_failure_for_one_browser_registers_nothing
 resume_is_routed_to_the_app_only_for_an_item_id_or_a_connection_flag
 remote_args_parse_and_reject
 the_launcher_refuses_a_missing_program_whether_overridden_or_looked_up_next_to_the_host
+# ---- P3 review fixes (docs/reviews/P3.md): M1 pipe-server identity, M2 platform-gated names,
+#      M3/M4 token file, m3 write timeout, m4 token retry, m5 spare instance, m6 flock, m7, m8
+windows:windows_pipe_has_a_protected_dacl_with_only_the_current_user
+windows:the_dacl_checker_rejects_everyone_and_other_principals_and_sddl_text_uses_aliases
+windows:windows_pipe_name_contains_the_user_sid_and_sid_looks_right
+windows:the_client_refuses_a_pipe_whose_server_is_not_the_expected_user
+windows:accept_always_leaves_a_spare_instance_so_there_is_no_gap
+windows:windows_registers_under_hkcu_reads_back_and_unregisters
+unix:linux_writes_the_manifest_where_each_browser_looks
+unix:a_stale_socket_is_replaced_and_racing_binds_have_exactly_one_winner
+a_peer_that_stops_reading_is_dropped_and_its_slot_is_freed
+a_client_that_read_the_previous_runs_token_retries_and_gets_in
+nm_binary_launches_the_real_eid_serve_and_the_add_lands_in_its_queue
+server_text_cannot_drive_the_terminal
+a_panicking_edit_neither_poisons_the_queues_nor_changes_them
+a_relative_or_empty_environment_directory_is_ignored
