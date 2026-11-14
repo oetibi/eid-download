@@ -125,6 +125,8 @@
 | Grabber لصفحة واحدة يرفض الضخمة | `grabber.rs` (ماسح HTML بلا JS، يتجاهل script/style/تعليقات، يحل `<base>`، يحذف javascript:/data:/mailto:، سقف حجم وروابط، مهلة ترويسات) | `grabber_*` (4 + `read_capped…`)، `grabber_refuses_a_huge_page_before_reading_it_and_other_bad_pages` (300 MiB: يُرفض من Content-Length، الخادم لم يرسل إلا ما تتسع له مخازن النواة)، `cli_grab_lists_links_and_adds_them_to_a_queue` |
 | ساعة محلية | `eid_platform::time::local_now` (`localtime_r` / `GetLocalTime`) | `from_unix_weekday_minute_and_offsets` (Windows: يُترجَم فقط) |
 
+**أدلة التشغيل المحلي (Linux فقط، هذه الجلسة):** `scripts/check_required.py` في وضع **release: 174/174** (`required: 174  ok: 174  bad: 0`)؛ في وضع debug **173/173** قبل إضافة آخر اختبار (`cli_queue_categorize_…`) الذي نجح منفرداً في debug ولم تُعَد دورة debug الكاملة بعده. `cargo fmt --check` وclippy `-D warnings` و`cargo check --all-targets --target x86_64-pc-windows-gnu` نظيفة. أول تشغيل لـ`check_required` كشف فشل حارس `platform_code_and_process_spawning_only_in_eid_platform` (استعمال `cfg!(unix)` في الـengine) فأُصلح بـ`eid_platform::IS_WINDOWS`. **لم يُشغَّل CI على Windows/Linux (لا PR مفتوح).**
+
 **حدود صادقة لـP2:**
 - **`PowerControl` الحقيقي (إيقاف/سبات) غير موجود** — فقط الـtrait والمحاكاة؛ التنفيذ في `eid-platform` مع P3. لذلك لا يعرض CLI خيار `--after-done` إطلاقاً.
 - التصنيف في CLI يعتمد **امتداد المسار في الرابط** (اسم الملف الحقيقي من Content-Disposition/MIME لا يُعرف قبل بدء النقل). `Categorizer::classify` يدعم MIME لكنه غير موصول بالمحرك.
