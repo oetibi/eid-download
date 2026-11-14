@@ -6,6 +6,7 @@
 //! but NOT executed here: see docs/STATUS.md "not tested on real Windows".
 
 pub mod fs;
+pub mod ipc;
 pub mod net;
 pub mod process;
 pub mod time;
