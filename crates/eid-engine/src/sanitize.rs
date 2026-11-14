@@ -80,6 +80,25 @@ pub fn sanitize_file_name(raw: &str) -> String {
     }
 }
 
+/// Collision candidate `stem (n).ext` for an already-sanitized `name`. The bytes the suffix
+/// needs are reserved BEFORE the stem is shortened, so the number can never be truncated away
+/// (P1 review m1: a maximal stem used to lose its own ` (n)` and every candidate equalled the
+/// occupied base name). Result is `<= MAX_NAME_BYTES`, valid UTF-8, and unique per `n`.
+pub fn numbered_name(name: &str, n: u32) -> String {
+    let (stem, ext) = match name.rfind('.') {
+        // a normal extension only; a huge "extension" is part of the stem
+        Some(i) if i > 0 && name.len() - i <= 16 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let suffix = format!(" ({n})");
+    let budget = MAX_NAME_BYTES.saturating_sub(suffix.len() + ext.len());
+    let mut end = budget.min(stem.len());
+    while end > 0 && !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    sanitize_file_name(&format!("{}{suffix}{ext}", &stem[..end]))
+}
+
 /// `true` if `name` is exactly what [`sanitize_file_name`] would produce, i.e. safe to trust
 /// when read back from a state file.
 pub fn is_safe_stored_name(name: &str) -> bool {
@@ -185,6 +204,38 @@ mod tests {
         }
         let name = "ع".repeat(300);
         assert_safe(&sanitize_file_name(&name));
+    }
+
+    #[test]
+    fn numbered_names_keep_their_suffix_for_maximal_names() {
+        let maximal = [
+            "a".repeat(MAX_NAME_BYTES),                        // no extension
+            format!("{}.zip", "a".repeat(MAX_NAME_BYTES - 4)), // short extension
+            format!("{}.{}", "a".repeat(40), "e".repeat(MAX_NAME_BYTES - 41)), // huge "extension"
+            "ع".repeat(MAX_NAME_BYTES / 2),                    // 2-byte letters, no extension
+            format!("{}.pdf", "ع".repeat((MAX_NAME_BYTES - 4) / 2)),
+            format!("{}.tar.gz", "😀".repeat(48)), // 4-byte letters
+        ];
+        for raw in maximal {
+            let base = sanitize_file_name(&raw);
+            assert!(base.len() <= MAX_NAME_BYTES);
+            let mut seen = std::collections::HashSet::new();
+            seen.insert(base.clone());
+            for n in 1..1000u32 {
+                let c = numbered_name(&base, n);
+                assert!(c.len() <= MAX_NAME_BYTES, "n={n} len={}", c.len());
+                assert_ne!(c, base, "candidate {n} equals the occupied base");
+                assert!(c.contains(&format!(" ({n})")), "n={n}: {c:?}");
+                assert!(is_safe_stored_name(&c), "{c:?}");
+                assert!(seen.insert(c.clone()), "duplicate candidate {c:?}");
+                // engine side files fit too
+                assert!(c.len() + ".eid-state.tmp".len() < 255);
+            }
+        }
+        // small names are untouched apart from the suffix
+        assert_eq!(numbered_name("a.txt", 1), "a (1).txt");
+        assert_eq!(numbered_name("archive.tar.gz", 2), "archive.tar (2).gz");
+        assert_eq!(numbered_name(".bashrc", 3), ".bashrc (3)");
     }
 
     #[test]

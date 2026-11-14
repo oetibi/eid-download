@@ -308,6 +308,7 @@ struct Response {
     total: u64,
     etag: Option<String>,
     stall: Option<Stall>,
+    header_delay: Option<(Duration, bool)>,
     active: Active,
 }
 
@@ -388,6 +389,14 @@ fn prepare(shared: &Arc<Shared>, req: &Request, conn_id: usize) -> Option<Respon
     } else {
         None
     };
+    let header_delay = b
+        .header_delay
+        .as_ref()
+        .filter(|h| {
+            entry.requests > u64::from(h.skip)
+                && entry.requests <= u64::from(h.skip) + u64::from(h.count)
+        })
+        .map(|h| (h.delay, h.partial));
     let index = entry.stats.requests.len();
     let active_now = entry.active;
     entry.stats.events.push(crate::ServerEvent {
@@ -418,6 +427,7 @@ fn prepare(shared: &Arc<Shared>, req: &Request, conn_id: usize) -> Option<Respon
         total,
         etag,
         stall,
+        header_delay,
         active: Active {
             shared: shared.clone(),
             path: req.path.clone(),
@@ -530,6 +540,13 @@ async fn send_response(
     if r.status == 0 {
         return Ok(false);
     }
+    if let Some((delay, partial)) = r.header_delay {
+        if partial {
+            socket.write_all(b"HTTP/1.1 200 O").await?;
+            socket.flush().await?;
+        }
+        tokio::time::sleep(delay).await;
+    }
     let b = &r.behavior;
     let success = matches!(r.status, 200 | 206);
     let real = if success { r.len } else { 0 };
@@ -567,15 +584,15 @@ async fn send_response(
     if close {
         headers.push_str("Connection: close\r\n");
     }
+    if let Some(date) = &b.date {
+        headers.push_str(&format!("Date: {date}\r\n"));
+    }
     if success {
         if let Some(etag) = &r.etag {
             headers.push_str(&format!("ETag: {etag}\r\n"));
         }
         if let Some(date) = &b.last_modified {
             headers.push_str(&format!("Last-Modified: {date}\r\n"));
-        }
-        if let Some(date) = &b.date {
-            headers.push_str(&format!("Date: {date}\r\n"));
         }
         if b.advertise_ranges && !(b.head_lies && req.method == "HEAD") {
             headers.push_str("Accept-Ranges: bytes\r\n");
@@ -604,7 +621,9 @@ async fn send_response(
         headers.push_str(&format!("Content-Range: bytes */{}\r\n", r.total));
     }
     if matches!(r.status, 429 | 503) {
-        if let Some(seconds) = b.retry_after_secs {
+        if let Some(raw) = &b.retry_after_raw {
+            headers.push_str(&format!("Retry-After: {raw}\r\n"));
+        } else if let Some(seconds) = b.retry_after_secs {
             headers.push_str(&format!("Retry-After: {seconds}\r\n"));
         }
     }

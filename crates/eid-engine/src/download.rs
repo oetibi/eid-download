@@ -4,11 +4,9 @@ use crate::config::{Config, MAX_CONNECTIONS, MAX_TOTAL_BYTES};
 use crate::error::{Error, Result};
 use crate::fault;
 use crate::filename;
-use crate::http::{
-    self, parse_content_range, parse_retry_after, strong_etag, strong_last_modified,
-};
+use crate::http::{self, parse_content_range, strong_etag, strong_last_modified};
 use crate::limiter::Limiter;
-use crate::sanitize::sanitize_file_name;
+use crate::sanitize::{numbered_name as numbered, sanitize_file_name};
 use crate::state::{self, SegState, State, STATE_VERSION};
 use crate::table::Table;
 use crate::urlsafe;
@@ -287,8 +285,7 @@ impl Ctx {
             StatusCode::OK => return Err(Fail::Changed), // validator mismatch or Range ignored
             StatusCode::RANGE_NOT_SATISFIABLE => return Err(Fail::Changed),
             StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => {
-                let after = http::header_str(resp.headers(), "retry-after")
-                    .and_then(|v| parse_retry_after(&v, self.cfg.retry_after_cap));
+                let after = http::retry_after_of(resp.headers(), self.cfg.retry_after_cap);
                 return Err(Fail::Throttle {
                     status: st.as_u16(),
                     after,
@@ -410,10 +407,15 @@ impl Ctx {
                     return Err(Fail::Cancelled);
                 }
                 let sent = tokio::select! {
-                    r = self.request(start, end - 1).send() => r,
+                    r = http::send_bounded(self.request(start, end - 1), self.cfg.header_timeout) => r,
                     _ = self.cancel.cancelled() => return Err(Fail::Cancelled),
                 };
-                let r = sent.map_err(|e| Fail::Retryable(net_err(e)))?;
+                let r = sent.map_err(|e| match e {
+                    http::SendError::Net(e) => Fail::Retryable(net_err(e)),
+                    http::SendError::HeaderTimeout => {
+                        Fail::Retryable("timed out waiting for response headers".into())
+                    }
+                })?;
                 self.check_ranged(&r, start, end - 1)?;
                 r
             }
@@ -687,7 +689,7 @@ impl Net<'_> {
         loop {
             attempt += 1;
             let sent = tokio::select! {
-                r = self.get(range).send() => r,
+                r = http::send_bounded(self.get(range), self.cfg.header_timeout) => r,
                 _ = self.cancel.cancelled() => return Err(Error::Cancelled),
             };
             let delay = match sent {
@@ -701,8 +703,7 @@ impl Net<'_> {
                             return Err(Error::Forbidden(st.as_u16()))
                         }
                         StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => {
-                            let ra = http::header_str(r.headers(), "retry-after")
-                                .and_then(|v| parse_retry_after(&v, self.cfg.retry_after_cap));
+                            let ra = http::retry_after_of(r.headers(), self.cfg.retry_after_cap);
                             (self.sink)(Event::Throttled {
                                 status: st.as_u16(),
                                 retry_after_ms: ra.map_or(0, |d| d.as_millis() as u64),
@@ -718,12 +719,13 @@ impl Net<'_> {
                         }
                     }
                 }
-                Err(e) => {
+                Err(http::SendError::Net(e)) => {
                     if e.is_builder() || e.is_redirect() {
                         return Err(Error::Network(net_err(e)));
                     }
                     http::backoff(self.cfg, attempt)
                 }
+                Err(http::SendError::HeaderTimeout) => http::backoff(self.cfg, attempt),
             };
             if attempt >= self.cfg.max_attempts {
                 return Err(Error::NoProgress(attempt));
@@ -814,14 +816,6 @@ impl Net<'_> {
 }
 
 // ---------------------------------------------------------------- files
-
-fn numbered(name: &str, n: u32) -> String {
-    let (stem, ext) = match name.rfind('.') {
-        Some(i) if i > 0 => (&name[..i], &name[i..]),
-        _ => (name, ""),
-    };
-    sanitize_file_name(&format!("{stem} ({n}){ext}"))
-}
 
 struct Files {
     name: String,

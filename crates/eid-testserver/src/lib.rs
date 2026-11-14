@@ -63,6 +63,19 @@ pub struct Stall {
     pub once: bool,
 }
 
+/// Delay (or trickle) the response HEADERS: the socket stays open and no complete header block
+/// arrives until `delay` has passed. Applies to requests number `skip+1 ..= skip+count` of the
+/// path (one-based, in arrival order).
+#[derive(Clone, Debug)]
+pub struct HeaderDelay {
+    pub skip: u32,
+    pub count: u32,
+    pub delay: Duration,
+    /// Send an incomplete status line first (`HTTP/1.1 200 O`) so the peer has seen bytes but
+    /// never a complete header block (slow-loris on headers).
+    pub partial: bool,
+}
+
 #[derive(Clone, Debug)]
 pub enum LimitStatus {
     TooManyRequests,
@@ -103,6 +116,8 @@ pub struct Behavior {
     pub stall: Option<Stall>,
     pub max_concurrent: Option<(usize, LimitStatus)>,
     pub retry_after_secs: Option<u64>,
+    /// Raw `Retry-After` value (e.g. an HTTP-date); wins over `retry_after_secs`.
+    pub retry_after_raw: Option<String>,
     pub redirect: Option<Redirect>,
     pub content_disposition: Option<String>,
     pub content_type: Option<String>,
@@ -113,6 +128,7 @@ pub struct Behavior {
     pub fail_first_requests: u32,
     pub head_lies: bool,
     pub disconnect_before_headers: u32,
+    pub header_delay: Option<HeaderDelay>,
 }
 
 impl Default for Behavior {
@@ -130,6 +146,7 @@ impl Default for Behavior {
             stall: None,
             max_concurrent: None,
             retry_after_secs: None,
+            retry_after_raw: None,
             redirect: None,
             content_disposition: None,
             content_type: None,
@@ -139,6 +156,7 @@ impl Default for Behavior {
             fail_first_requests: 0,
             head_lies: false,
             disconnect_before_headers: 0,
+            header_delay: None,
         }
     }
 }
