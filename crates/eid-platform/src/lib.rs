@@ -8,6 +8,7 @@
 pub mod dirs;
 pub mod fs;
 pub mod ipc;
+pub mod native_host;
 pub mod net;
 pub mod process;
 pub mod time;
