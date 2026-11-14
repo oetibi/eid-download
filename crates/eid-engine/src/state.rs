@@ -171,43 +171,93 @@ pub fn save(path: &Path, state: &State) -> Result<()> {
     Ok(())
 }
 
-fn read_validate(path: &Path) -> std::result::Result<State, String> {
-    let f =
-        pfs::open_regular_nofollow_read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let len = f.metadata().map_err(|e| e.to_string())?.len();
+/// Why a sidecar could not be read. Only `Invalid` (the file was opened and read in full and its
+/// CONTENT is wrong) is evidence of corruption; `Unreadable` (missing, refused by the no-follow /
+/// single-link checks, a transient sharing violation on Windows, ...) says nothing about the
+/// bytes, so it must never lead to the file being moved.
+struct ReadFailure {
+    msg: String,
+    invalid_content: bool,
+}
+
+fn unreadable(msg: String) -> ReadFailure {
+    ReadFailure {
+        msg,
+        invalid_content: false,
+    }
+}
+
+fn invalid(msg: String) -> ReadFailure {
+    ReadFailure {
+        msg,
+        invalid_content: true,
+    }
+}
+
+fn read_classified(path: &Path) -> std::result::Result<State, ReadFailure> {
+    let f = pfs::open_regular_nofollow_read(path)
+        .map_err(|e| unreadable(format!("{}: {e}", path.display())))?;
+    let len = f.metadata().map_err(|e| unreadable(e.to_string()))?.len();
     if len > MAX_STATE_BYTES {
-        return Err("state file too large".into());
+        return Err(invalid("state file too large".into()));
     }
     let mut buf = Vec::with_capacity(len as usize);
     f.take(MAX_STATE_BYTES + 1)
         .read_to_end(&mut buf)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| unreadable(e.to_string()))?;
     if buf.len() as u64 > MAX_STATE_BYTES {
-        return Err("state file too large".into());
+        return Err(invalid("state file too large".into()));
     }
     let st: State =
-        serde_json::from_slice(&buf).map_err(|e| format!("not valid state JSON: {e}"))?;
-    st.validate()?;
+        serde_json::from_slice(&buf).map_err(|e| invalid(format!("not valid state JSON: {e}")))?;
+    st.validate().map_err(invalid)?;
     Ok(st)
 }
 
-/// Load `path`, falling back to `path.bak`. A corrupt primary is quarantined as `.broken`.
+fn read_validate(path: &Path) -> std::result::Result<State, String> {
+    read_classified(path).map_err(|e| e.msg)
+}
+
+/// Load `path`, falling back to `path.bak`. **Read-only**: it never renames, creates or deletes
+/// anything, so it is safe to call on a live sidecar while the job's checkpoint task rotates it
+/// (PLAN P1 open item (a)). A corrupt primary is left exactly where it is; the error (or the
+/// backup's state) is all the caller gets. Quarantining is a separate, explicit act:
+/// [`load_repairing`].
 pub fn load(path: &Path) -> Result<State> {
     match read_validate(path) {
         Ok(s) => Ok(s),
+        Err(primary) => from_backup(path, primary),
+    }
+}
+
+/// [`load`] for the one caller that owns the job: it moves a primary whose CONTENT is invalid
+/// aside as `.broken` (so the next [`save`] cannot rotate the corrupt file over a good `.bak`)
+/// before falling back to the backup.
+///
+/// The caller MUST hold the job's lock (`JobLock`) and have no checkpoint task running: that is
+/// what makes the rename safe against the rotation race. A primary that merely could not be read
+/// (missing, symlink or hard link refused, sharing violation) is never moved.
+pub fn load_repairing(path: &Path) -> Result<State> {
+    match read_classified(path) {
+        Ok(s) => Ok(s),
         Err(primary) => {
-            if path.exists() {
+            if primary.invalid_content {
                 let _ = std::fs::rename(path, broken_path(path));
             }
-            match read_validate(&bak_path(path)) {
-                Ok(s) => Ok(s),
-                Err(bak) => Err(Error::BadState(format!("{primary}; backup: {bak}"))),
-            }
+            from_backup(path, primary.msg)
         }
     }
 }
 
-/// Read-only validation of a sidecar: never renames or deletes anything (unlike [`load`]).
+fn from_backup(path: &Path, primary: String) -> Result<State> {
+    match read_validate(&bak_path(path)) {
+        Ok(s) => Ok(s),
+        Err(bak) => Err(Error::BadState(format!("{primary}; backup: {bak}"))),
+    }
+}
+
+/// Read-only validation of the primary sidecar alone (no `.bak` fallback). Like [`load`], it
+/// never renames or deletes anything.
 pub fn peek(path: &Path) -> std::result::Result<State, String> {
     read_validate(path)
 }
@@ -399,14 +449,105 @@ mod tests {
             std::fs::write(&p, bytes).unwrap();
             let _ = std::fs::remove_file(bak_path(&p));
             assert!(load(&p).is_err(), "{name} must be rejected");
+            // `load` is read-only: the corrupt file stays exactly where and what it was
             assert!(
-                broken_path(&p).exists() || !p.exists(),
-                "{name}: quarantined"
+                !broken_path(&p).exists(),
+                "{name}: load must not quarantine"
+            );
+            assert_eq!(std::fs::read(&p).unwrap(), bytes_of(&p));
+            // only the explicit, lock-holding repair moves it aside
+            assert!(load_repairing(&p).is_err(), "{name} must be rejected");
+            assert!(
+                broken_path(&p).exists() && !p.exists(),
+                "{name}: load_repairing quarantines invalid content"
             );
             let _ = std::fs::remove_file(broken_path(&p));
         }
         std::fs::write(&p, vec![b' '; (MAX_STATE_BYTES + 10) as usize]).unwrap();
         assert!(load(&p).is_err());
+        assert!(p.exists() && !broken_path(&p).exists());
+    }
+
+    fn bytes_of(p: &Path) -> Vec<u8> {
+        std::fs::read(p).unwrap()
+    }
+
+    /// Every file in `d` with its bytes, to prove a call changed nothing.
+    fn snapshot(d: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut v: Vec<_> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn load_never_changes_anything_on_disk_in_any_state_of_the_pair() {
+        let d = dir("ro");
+        let p = d.join("r.eid-state");
+        let good = serde_json::to_vec(&sample()).unwrap();
+        let bad: &[u8] = b"garbage";
+        // (primary, backup): each present-good / present-bad / absent
+        let kinds: [Option<&[u8]>; 3] = [Some(&good), Some(bad), None];
+        for prim in kinds {
+            for bak in kinds {
+                for f in [&p, &bak_path(&p), &broken_path(&p), &tmp_path(&p)] {
+                    let _ = std::fs::remove_file(f);
+                }
+                if let Some(b) = prim {
+                    std::fs::write(&p, b).unwrap();
+                }
+                if let Some(b) = bak {
+                    std::fs::write(bak_path(&p), b).unwrap();
+                }
+                let before = snapshot(&d);
+                let r = load(&p);
+                assert_eq!(
+                    r.is_ok(),
+                    prim == Some(&good[..]) || bak == Some(&good[..]),
+                    "primary {prim:?} backup {bak:?}"
+                );
+                assert_eq!(snapshot(&d), before, "load changed files");
+            }
+        }
+    }
+
+    #[test]
+    fn corrupt_primary_with_good_bak_is_served_from_the_bak_without_touching_the_primary() {
+        let d = dir("robak");
+        let p = d.join("b.eid-state");
+        save(&p, &sample()).unwrap();
+        save(&p, &sample()).unwrap();
+        std::fs::write(&p, b"garbage").unwrap();
+        let before = snapshot(&d);
+        assert_eq!(load(&p).unwrap().file_name, "f.bin");
+        assert_eq!(snapshot(&d), before);
+        // the repairing load serves the same state but sets the corrupt file aside
+        assert_eq!(load_repairing(&p).unwrap().file_name, "f.bin");
+        assert_eq!(bytes_of(&broken_path(&p)), b"garbage");
+        assert!(!p.exists());
+    }
+
+    #[test]
+    fn load_repairing_never_moves_a_primary_that_was_merely_unreadable() {
+        let d = dir("unread");
+        let p = d.join("u.eid-state");
+        // a DIRECTORY where the sidecar should be: the open is refused (not a regular file), which
+        // says nothing about content, exactly like a transient sharing violation on Windows
+        std::fs::create_dir(&p).unwrap();
+        assert!(load_repairing(&p).is_err());
+        assert!(p.is_dir() && !broken_path(&p).exists());
+        // and a missing primary is not "broken" either
+        std::fs::remove_dir(&p).unwrap();
+        assert!(load_repairing(&p).is_err());
+        assert!(!broken_path(&p).exists());
     }
 
     #[test]
