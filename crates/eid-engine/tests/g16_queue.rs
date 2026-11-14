@@ -702,3 +702,43 @@ async fn a_failing_power_action_is_reported_not_swallowed() {
     let ev = r.events.lock().unwrap().clone();
     assert!(ev.iter().any(|e| matches!(e, QueueEvent::PowerFailed { action: PowerAction::Hibernate, message } if message == "denied")), "{ev:?}");
 }
+
+/// P3 review m7: a panic in a caller's edit closure (an IPC handler bug) must not poison the
+/// queue lock; the queues stay untouched and every later request still works.
+#[tokio::test(start_paused = true)]
+async fn a_panicking_edit_neither_poisons_the_queues_nor_changes_them() {
+    /// The scheduler is never run here, so the runner is never called.
+    struct NeverRuns;
+    impl JobRunner for NeverRuns {
+        fn run(
+            &self,
+            _job: RunJob,
+            _started: Arc<dyn Fn(String) + Send + Sync>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'static, RunResult> {
+            Box::pin(async { unreachable!("not run in this test") })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queues.json");
+    let mut qs = QueueSet::default();
+    queue(&mut qs, 1, 1);
+    eid_engine::scheduler::save_queues(&path, &qs).unwrap();
+    let sched = Scheduler::open(
+        SchedulerConfig::new(&path),
+        Arc::new(NeverRuns),
+        Arc::new(SystemClock),
+        Arc::new(MockPower::default()),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let before = sched.snapshot();
+    let r: Result<(), _> = sched.edit(|qs| {
+        qs.queues.clear(); // a half-done change that must be thrown away
+        panic!("handler bug");
+    });
+    assert!(r.is_err(), "the panic must come back as an error");
+    // not poisoned: reads and writes still work, and nothing was applied
+    assert_eq!(sched.snapshot(), before);
+    sched.edit(|_| Ok(())).unwrap();
+}

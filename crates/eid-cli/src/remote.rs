@@ -149,6 +149,21 @@ pub async fn call_retrying(ep: &Endpoint, cmd: Command) -> Result<serde_json::Va
         .unwrap_or_else(|| "failed".into()))
 }
 
+/// Text from the server (URLs, error messages that may quote a remote host's words) is shown
+/// to a terminal: control characters would let it move the cursor or rewrite earlier lines, and
+/// bidi overrides (U+202A..202E, U+2066..2069) would reorder what the user reads.
+pub fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// Returns the exit code. Output goes to stdout; errors to the caller.
 pub async fn run(a: RemoteArgs) -> Result<i32, String> {
     let ep = a.conn.endpoint().map_err(|e| e.to_string())?;
@@ -175,11 +190,11 @@ pub async fn run(a: RemoteArgs) -> Result<i32, String> {
                 println!(
                     "#{} {} {}{}",
                     i["id"],
-                    i["status"].as_str().unwrap_or("?"),
-                    i["url"].as_str().unwrap_or("?"),
+                    printable(i["status"].as_str().unwrap_or("?")),
+                    printable(i["url"].as_str().unwrap_or("?")),
                     i["error"]
                         .as_str()
-                        .map(|e| format!("  ({e})"))
+                        .map(|e| format!("  ({})", printable(e)))
                         .unwrap_or_default()
                 );
             }
@@ -260,6 +275,13 @@ mod tests {
         ] {
             assert!(!is_app_command(&legacy), "{legacy:?}");
         }
+    }
+
+    #[test]
+    fn server_text_cannot_drive_the_terminal() {
+        assert_eq!(printable("a\u{1b}[2Jb\r\nc\u{7}"), "a?[2Jb??c?");
+        assert_eq!(printable("x\u{202E}gnp.exe"), "x?gnp.exe");
+        assert_eq!(printable("http://h/\u{0645}.zip"), "http://h/\u{0645}.zip");
     }
 
     #[test]

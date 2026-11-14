@@ -312,3 +312,80 @@ fn stdout_is_never_printed_to_in_the_host_sources() {
         }
     }
 }
+
+/// The `eid` program the host looks for by default: next to the host binary (same target dir).
+fn real_eid() -> PathBuf {
+    let p = std::path::Path::new(HOST)
+        .parent()
+        .unwrap()
+        .join(format!("eid{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        p.is_file(),
+        "the `eid` binary was not built next to the host ({}): run `cargo test --workspace`",
+        p.display()
+    );
+    p
+}
+
+/// The production launch path end to end (no fake app): the host starts the REAL
+/// `eid serve --endpoint .. --token-file ..` (null stdio, detached), waits for it, delivers the
+/// `add`, and the item is really in that app's queue. The program's per-user directories are
+/// pointed into a temp dir so nothing touches the tester's profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nm_binary_launches_the_real_eid_serve_and_the_add_lands_in_its_queue() {
+    let d = tempfile::tempdir().unwrap();
+    let ep = endpoint("real", &d);
+    let home = d.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let env = |k: &'static str, v: &std::path::Path| (k, v.as_os_str().to_owned());
+    let mut input = req("p", json!({"cmd": "ping"}));
+    input.extend(req(
+        "a",
+        json!({"cmd": "add", "url": "http://127.0.0.1:1/real-launch.bin"}),
+    ));
+    let (out, err, code) = host_at(
+        HOST.into(),
+        &ep,
+        vec![
+            ("EID_NATIVE_HOST_APP", real_eid().into_os_string()),
+            env("APPDATA", &home),
+            env("USERPROFILE", &home),
+            env("HOME", &home),
+            env("XDG_CONFIG_HOME", &home.join("cfg")),
+        ],
+        input,
+    )
+    .await;
+    assert_eq!(code, Some(0), "{err}");
+    let r = frames(&out);
+    assert_eq!(r.len(), 2, "{r:?} / {err}");
+    assert!(r.iter().all(|x| x.ok), "{r:?} / {err}");
+    assert_eq!(r[0].result.as_ref().unwrap()["pong"], true);
+
+    // the host has exited; the app it started is still there and holds the item
+    let mut c = Client::connect(&ep)
+        .await
+        .expect("the real app must outlive the host");
+    let list = c.call(Command::List {}).await.unwrap();
+    let urls: Vec<_> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["url"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(urls, ["http://127.0.0.1:1/real-launch.bin"], "{list}");
+    c.call(Command::Shutdown {}).await.unwrap();
+    let t = std::time::Instant::now();
+    loop {
+        match Client::connect(&ep).await {
+            Err(ClientError::NotRunning) => break,
+            _ => {
+                assert!(
+                    t.elapsed() < Duration::from_secs(30),
+                    "the real app did not stop"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}

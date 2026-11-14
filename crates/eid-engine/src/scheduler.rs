@@ -239,7 +239,12 @@ impl Scheduler {
     ) -> Result<T> {
         let mut g = self.inner.qs.lock().unwrap();
         let mut copy = g.clone();
-        let out = f(&mut copy).map_err(Error::InvalidInput)?;
+        // A panic inside the caller's closure must not poison the queue lock (it would turn every
+        // later request into a panic): catch it here, while the guard is still held and intact.
+        // `copy` is thrown away on a panic, so the real queues are untouched.
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut copy)))
+            .map_err(|_| Error::InvalidInput("internal error while editing the queues".into()))?
+            .map_err(Error::InvalidInput)?;
         copy.validate().map_err(Error::InvalidInput)?;
         // queues that gained pending work are armed again
         let mut armed = self.inner.armed.lock().unwrap();

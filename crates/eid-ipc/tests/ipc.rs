@@ -452,6 +452,152 @@ async fn a_symlinked_or_garbage_token_file_is_refused_by_the_client() {
         Err(ClientError::Io(_))
     ));
     f.stop().await;
-    // FrameError is public API for the native host
+    // A token file that is a SYMLINK is refused even though its target holds the right token
+    // (otherwise anyone able to plant a link could redirect which file the client trusts).
+    // Creating the link must work in tests: it fails loudly instead of skipping.
+    let f = fixture("tokfile-link").await;
+    let real = f.ep.token_path.with_file_name("real-token");
+    std::fs::copy(&f.ep.token_path, &real).unwrap();
+    // sanity: the very same bytes work as a plain file, so the refusal below is about the link
+    assert!(Client::connect(&f.ep).await.is_ok());
+    std::fs::remove_file(&f.ep.token_path).unwrap();
+    eid_platform::fs::symlink_file(&real, &f.ep.token_path)
+        .expect("symlink creation must work in tests (grant the privilege in CI)");
+    assert!(
+        matches!(Client::connect(&f.ep).await, Err(ClientError::Io(_))),
+        "a symlinked token file must be refused"
+    );
+    f.stop().await;
     let _ = FrameError::Closed;
+}
+
+/// Returns a ~300 KB result for `list` (fits one frame, far larger than any pipe buffer).
+struct Bulky;
+impl Handler for Bulky {
+    fn handle(&self, cmd: Command) -> Result<serde_json::Value, String> {
+        match cmd {
+            Command::List {} => Ok(json!({"big": "x".repeat(300_000)})),
+            _ => Ok(json!({"pong": true})),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_peer_that_stops_reading_is_dropped_and_its_slot_is_freed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ep = Endpoint {
+        name: format!(
+            "wt{}-{}",
+            std::process::id(),
+            &ipc::new_token().unwrap()[..8]
+        ),
+        token_path: dir.path().join("tok"),
+    };
+    // ONE slot: while the stuck peer holds it nobody else can be served.
+    let run = start(
+        &ep,
+        Arc::new(Bulky),
+        ServeOptions {
+            max_connections: 1,
+            write_timeout: Duration::from_millis(300),
+            idle_timeout: Duration::from_secs(120),
+            ..opts()
+        },
+    )
+    .unwrap();
+    let mut stuck = ipc::connect(&ep.name).await.unwrap();
+    let token = ipc::read_token_file(&ep.token_path).unwrap();
+    hello(&mut stuck, &token).await;
+    // Pipes/sockets buffer some replies, so one unread reply does not block the server: keep
+    // asking (and never reading) until the server's side is genuinely full and it stops reading
+    // our requests too (our own write then stalls).
+    let mut sent = 0;
+    for i in 0..400 {
+        let req = serde_json::to_vec(&Request {
+            v: VERSION,
+            id: format!("big{i}"),
+            command: Command::List {},
+        })
+        .unwrap();
+        match tokio::time::timeout(Duration::from_millis(400), write_frame(&mut stuck, &req)).await
+        {
+            Ok(Ok(())) => sent += 1,
+            _ => break,
+        }
+    }
+    assert!(sent > 0);
+    // ... and never read the ~900 KB reply. The server must give up on this peer by itself.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Ok(mut c) = Client::connect_with_retry(&ep, 0, Duration::ZERO).await {
+            if c.call(Command::Ping {}).await.is_ok() {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the slot of a peer that never reads was never freed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop(stuck);
+    run.stop().await;
+}
+
+#[tokio::test]
+async fn a_client_that_read_the_previous_runs_token_retries_and_gets_in() {
+    let f = fixture("stale").await;
+    let real = ipc::read_token_file(&f.ep.token_path).unwrap();
+    // the state of the startup gap: the endpoint is up, the token file still holds the old token
+    ipc::write_token_file(&f.ep.token_path, &ipc::new_token().unwrap()).unwrap();
+    assert!(matches!(
+        Client::connect_with_retry(&f.ep, 0, Duration::ZERO).await,
+        Err(ClientError::Auth(_))
+    ));
+    let (path, real2) = (f.ep.token_path.clone(), real.clone());
+    let publisher = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        ipc::write_token_file(&path, &real2).unwrap();
+    });
+    let mut c = Client::connect_with_retry(&f.ep, 200, Duration::from_millis(20))
+        .await
+        .expect("must get in once the token is published");
+    assert_eq!(c.call(Command::Ping {}).await.unwrap()["pong"], true);
+    publisher.await.unwrap();
+    f.stop().await;
+}
+
+/// KNOWN LIMIT (documented in DESIGN_NOTES Round 8): request ids live in memory, so a retried id
+/// after the app restarted runs again. This pins the behaviour so a change is a conscious one.
+#[tokio::test]
+async fn a_retried_id_after_an_app_restart_runs_again_known_limit() {
+    let f = fixture("restartid").await;
+    let add = Command::Add {
+        url: "http://h/x".into(),
+        subdir: None,
+        file_name: None,
+    };
+    Client::connect(&f.ep)
+        .await
+        .unwrap()
+        .call_with_id("same", add.clone())
+        .await
+        .unwrap();
+    assert_eq!(f.calls(), 1);
+    let ep = f.ep.clone();
+    f.stop().await;
+    let second = Arc::new(Counting(AtomicUsize::new(0)));
+    let run = start(&ep, second.clone(), opts()).unwrap();
+    Client::connect(&ep)
+        .await
+        .unwrap()
+        .call_with_id("same", add)
+        .await
+        .unwrap();
+    assert_eq!(
+        second.0.load(Ordering::SeqCst),
+        1,
+        "known limit: runs again"
+    );
+    run.stop().await;
 }

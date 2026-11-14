@@ -325,7 +325,7 @@ async fn nm_gives_up_with_an_error_response_when_the_app_never_comes_up() {
 }
 
 #[tokio::test]
-async fn nm_survives_the_app_restarting_between_messages_without_double_running() {
+async fn nm_survives_the_app_restarting_between_messages() {
     let mut f = fixture("restart");
     let c = cfg(&f.ep);
     let (r1, _) = session(&c, add("one", "http://h/a")).await;
