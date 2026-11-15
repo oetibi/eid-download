@@ -2,7 +2,7 @@
 //! eid-testserver through the `test-hooks` environment (test builds only); the fake writes a
 //! call log (URL parameter `log=`) so the tests can see every tool invocation.
 mod video_env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use video_env::*;
 
@@ -201,41 +201,6 @@ async fn planted_symlink_or_junction_is_never_followed() {
         assert!(e.calls().is_empty(), "{kind}: the tool ran");
         remove_link(&staging);
     }
-}
-
-fn make_dir_link(target: &Path, link: &Path) {
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(target, link)
-        .expect("cannot create a symlink: this test must not pass without one");
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(target, link)
-        .expect("cannot create a directory symlink: this test must not pass without one");
-}
-
-fn make_junction(target: &Path, link: &Path) {
-    // a junction needs no privilege; `mklink /J` is the documented way to make one
-    let o = std::process::Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(link)
-        .arg(target)
-        .output()
-        .unwrap();
-    assert!(o.status.success(), "cannot create a junction: {o:?}");
-}
-
-fn remove_link(p: &Path) {
-    match std::fs::symlink_metadata(p) {
-        Ok(md) if md.file_type().is_symlink() => {
-            let _ = std::fs::remove_file(p).or_else(|_| std::fs::remove_dir(p));
-        }
-        Ok(_) => std::fs::remove_dir_all(p).unwrap(),
-        Err(_) => {}
-    }
-    assert!(
-        std::fs::symlink_metadata(p).is_err(),
-        "could not remove {}",
-        p.display()
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

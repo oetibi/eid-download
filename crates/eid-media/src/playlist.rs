@@ -135,13 +135,16 @@ impl State {
     }
 }
 
+/// The listing's distinct entries in playlist order, each with its number.
+pub type Planned<'a> = Vec<(u32, &'a Entry)>;
+
 /// Merge the current listing into the state (rules 1, 2, 3, 5). Returns the state and the
 /// listing's distinct entries in playlist order, each with its number.
 pub fn plan<'a>(
     old: Option<State>,
     playlist_id: &str,
     entries: &'a [Entry],
-) -> Result<(State, Vec<(u32, &'a Entry)>), MediaError> {
+) -> Result<(State, Planned<'a>), MediaError> {
     let mut seen = std::collections::HashSet::new();
     let distinct: Vec<&Entry> = entries
         .iter()
@@ -195,10 +198,11 @@ pub fn item_name(width: u8, number: u32, title: &str, ext: &str) -> String {
     } else {
         title
     };
-    eid_engine::sanitize::sanitize_file_name(&format!(
-        "{number:0w$} - {title}.{ext}",
-        w = width as usize
-    ))
+    // The title is made safe on its own first: sanitizing "<number> - <title>" as a whole would
+    // let a title like "../../x" cut the number off with the "directory" part, and the names
+    // would stop being unique (rule 6). The number prefix is digits and " - " only.
+    let safe = eid_engine::sanitize::sanitize_file_name(&format!("{title}.{ext}"));
+    eid_engine::sanitize::sanitize_file_name(&format!("{number:0w$} - {safe}", w = width as usize))
 }
 
 /// Load the state of a playlist folder. Missing = `None`. A link, an oversized, malformed,
@@ -309,5 +313,27 @@ mod tests {
         assert_eq!(item_name(2, 7, "x", "mp4"), "07 - x.mp4");
         assert_eq!(item_name(2, 100, "x", "mp4"), "100 - x.mp4");
         assert_eq!(item_name(3, 7, "", "mp3"), "007 - video.mp3");
+    }
+
+    #[test]
+    fn hostile_titles_never_remove_the_number_prefix() {
+        for t in [
+            "../../evil",
+            "..\\..\\evil",
+            "/abs/path",
+            "C:\\x\\y",
+            "a\u{202E}4pm.exe",
+            "x:ads",
+            "CON",
+            "...",
+            "   ",
+            &"ع".repeat(300),
+        ] {
+            let n = item_name(2, 4, t, "mp4");
+            assert!(n.starts_with("04 - "), "{t:?} -> {n:?}");
+            assert!(n.ends_with(".mp4"), "{t:?} -> {n:?}");
+            assert!(!n.contains(['/', '\\', ':']), "{t:?} -> {n:?}");
+            assert!(n.len() <= 255, "{t:?} -> {} bytes", n.len());
+        }
     }
 }

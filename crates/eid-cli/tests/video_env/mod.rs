@@ -183,10 +183,14 @@ impl Env {
     }
     pub fn calls(&self) -> Vec<serde_json::Value> {
         match std::fs::read_to_string(self.log()) {
-            Ok(s) => s
-                .lines()
-                .map(|l| serde_json::from_str(l).unwrap())
-                .collect(),
+            Ok(s) => {
+                // a last line without its newline is still being written: not a call yet
+                let complete = s.rfind('\n').map_or("", |i| &s[..i]);
+                complete
+                    .lines()
+                    .map(|l| serde_json::from_str(l).unwrap())
+                    .collect()
+            }
             Err(_) => vec![],
         }
     }
@@ -208,4 +212,39 @@ pub fn text(o: &std::process::Output) -> String {
         String::from_utf8_lossy(&o.stdout),
         String::from_utf8_lossy(&o.stderr)
     )
+}
+
+pub fn make_dir_link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link)
+        .expect("cannot create a symlink: this test must not pass without one");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(target, link)
+        .expect("cannot create a directory symlink: this test must not pass without one");
+}
+
+pub fn make_junction(target: &Path, link: &Path) {
+    // a junction needs no privilege; `mklink /J` is the documented way to make one
+    let o = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "cannot create a junction: {o:?}");
+}
+
+pub fn remove_link(p: &Path) {
+    match std::fs::symlink_metadata(p) {
+        Ok(md) if md.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(p).or_else(|_| std::fs::remove_dir(p));
+        }
+        Ok(_) => std::fs::remove_dir_all(p).unwrap(),
+        Err(_) => {}
+    }
+    assert!(
+        std::fs::symlink_metadata(p).is_err(),
+        "could not remove {}",
+        p.display()
+    );
 }

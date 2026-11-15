@@ -206,8 +206,12 @@ fn playlist_json(name: &str, url: &url::Url) -> String {
         .map(|it| {
             let id = it["id"].as_str().unwrap();
             let avail = it["availability"].as_str();
-            let path = match avail {
-                Some("private" | "needs_auth" | "unavailable") => "error/private".to_string(),
+            // `"error": KIND` makes the item fail with that error kind when downloaded
+            let path = match (it["error"].as_str(), avail) {
+                (Some(kind), _) => format!("error/{kind}"),
+                (None, Some("private" | "needs_auth" | "unavailable")) => {
+                    "error/private".to_string()
+                }
                 _ => format!("video/{id}"),
             };
             serde_json::json!({
@@ -238,7 +242,8 @@ fn log_call(path: &str, argv: &[String], resumed_from: Option<u64>) {
         .append(true)
         .open(path)
         .unwrap_or_else(|e| die(9, &format!("fake-yt-dlp: cannot open log {path}: {e}")));
-    let _ = writeln!(f, "{line}");
+    // one write for the whole line (and its newline), so a reader never sees half of it
+    let _ = f.write_all(format!("{line}\n").as_bytes());
 }
 
 fn main() {
