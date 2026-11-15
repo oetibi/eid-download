@@ -29,6 +29,8 @@ pub enum MediaError {
     NotInstalled,
     #[error("{file}: SHA-256 does not match the pinned value; refused")]
     HashMismatch { file: String },
+    #[error("playlist: {0}")]
+    Playlist(String),
     #[error("archive: {0}")]
     Archive(String),
     #[error("tool download failed: {0}")]
