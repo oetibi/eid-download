@@ -221,3 +221,22 @@
 - **فحص أحمر:** تعطيل القفل (`Ok(false) => Ok(lock)`) يُفشل `two_runs_on_one_playlist_folder_cannot_overlap` بعد 30 ث («the second run was not refused and kept running»). **عيبان حقيقيان وجدتهما الاختبارات وأُصلحا:** (1) عنوان مثل `../../evil:x` كان **يقصّ الرقم البادئ** من اسم الملف لأن `item_name` كان ينظّف «رقم - عنوان» كله (فتسقط الفرادة D8 قاعدة 6) — يُنظَّف العنوان وحده الآن ثم يُضاف الرقم؛ (2) سباق في اختبار: قراءة سطر سجل استدعاءات ناقص أثناء كتابته (الأداة المزيّفة تكتب السطر بكتابة واحدة والقارئ يتجاهل سطراً أخيراً بلا نهاية سطر).
 - **سلوك موثَّق:** قائمتان مختلفتا المعرّف بالاسم المنظَّف نفسه في مجلد إخراج واحد: التشغيل الثاني يُرفض («this folder belongs to a different playlist; choose another folder»)، لا يُدمج في المجلد (مُختبَر ضمن `playlist_folder_name_is_sanitized_and_confined` بمجلد إخراج لكل حالة). عنوان بجهاز محجوز (`CON`) يصير `05 - _CON.mp4`.
 - **لم يُختبر:** yt-dlp الحقيقي على قوائم حقيقية؛ سلوك `--download-archive` الحقيقي (الأداة المزيّفة تحاكيه بسطر `fake ID`، وصيغة yt-dlp الحقيقية `extractor id` لم تُفحص)؛ Ctrl-C حقيقي في كونسول Windows (الاختبار يقتل `eid` قسراً على Windows؛ MANUAL-TESTS #14)؛ مسارات Unix (`unix:` أعلاه، CI)؛ التشغيل في CI لم يتم (الفرع غير مدفوع)؛ اختبار `real_ytdlp_startup_time` (ج) وبقية (ج) تنتظر إذن المالك؛ MANUAL-TESTS #11 و#19؛ مراجعة مستقلة لـP4 كلها لم تُجرَ بعد.
+
+## P4 — حالة الإغلاق (2026-11-15) — **P4 غير مغلقة**
+**تسلسل الفروع (فُحص بـ`git merge-base --is-ancestor` و`git rev-list` على `origin`):** `main` (`b9aeb9b`، يحوي خطة P4 عبر PR #15) ← `docs/p4-g0` ← `feat/p4-g1-process` ← `feat/p4-g2-tools` ← `feat/p4-g3-video`. خط مستقيم بلا تفرّع. G4 (`feat/p4-g4-playlists`، `9ed022e`) **دُمجت في `feat/p4-g3-video` عبر PR #16** (`e26a64a`)، فرأس `feat/p4-g3-video` يحوي الآن G0–G4. **لا commit ضائع:** عدد الـcommits في كل فرع من P4 وفي `main` وفي `docs/p4-plan` وليس في رأس `feat/p4-g3-video` = 0 لكلها. الفرق بين `main` ورأس `feat/p4-g3-video`: 65 ملفاً، +9222/−23. **الخطوة الباقية للوصول إلى `main`:** PR واحد `feat/p4-g3-video` → `main` (لم يُفتح ولم يُدمج؛ بموافقة المالك فقط). لم يُحذف أي فرع.
+
+**ما اكتمل (بدليل):** البوابات G0–G4 (انظر أقسامها أعلاه)؛ كل أسماء PLAN/P4 في `scripts/required_tests.txt` عدا اختبارات (ج) الحقيقية (قورنت آلياً: الناقص فقط `real_*` و`real_tool_install_from_official_release` وهي `#[ignore]` عمداً)؛ `cargo deny check` إلزامي في `ci-linux.yml` (D10)؛ خطوة ffprobe في `ci-windows.yml` (D3).
+**CI:** أفاد المالك أن PR #16 اجتاز فحوص Linux وWindows. **لم أطّلع على سجلات CI بنفسي** (لا `gh` ولا دخول للمتصفح)؛ فهذا «بإفادة المالك» لا دليل مباشر. لم يُتحقق من أن خطوة `cargo deny` ومسارات `unix:` (مثل `unix:killpg_kills_the_group`) نفّذت فعلاً في تلك الجولة؛ **يُرجى لصق/تأكيد سطر «required: N ok: N bad: 0» من سجل كل من الجولتين.**
+
+**المعلَّق قبل إغلاق P4:**
+| البند | الحالة |
+|---|---|
+| (ج) `real_tool_install_from_official_release`، `real_cc_video_has_video_and_audio_by_ffprobe`، `real_ytdlp_with_percent_and_dollar_in_paths`، `real_ytdlp_does_not_load_a_planted_plugin`، `real_ytdlp_startup_time` | **لم تُشغَّل** — تنزيل ~230 MB أدوات + فيديو CC حقيقي؛ تنتظر إذن المالك الصريح. نتائجها تُسجَّل هنا في STATUS (غير إلزامية للنجاح لكن مطلوبة للتوثيق) |
+| MANUAL-TESTS #11 (لا نافذة سوداء على سطح مكتب حقيقي) | لم يُختبر |
+| MANUAL-TESTS #14 (Ctrl-C حقيقي في كونسول Windows) | لم يُختبر |
+| MANUAL-TESTS #19 (أدوات حقيقية على Windows: موافقة، تنزيل، مضاد فيروسات/SmartScreen على `yt-dlp.exe`) | لم يُختبر |
+| أول تشغيل لـ`cargo deny` مع `zip` وتبعياتها، وخطوة ffprobe في CI | بإفادة المالك فقط (انظر أعلاه) |
+| ما لم يُفحص قط: صيغة `--download-archive` الحقيقية لـyt-dlp (الأداة المزيّفة تكتب `fake ID`)؛ yt-dlp/FFmpeg/Deno الحقيقية | لم يُختبر |
+| مراجعة مستقلة لـP4 (`docs/reviews/P4.md`) | **لم تُجرَ** — البرومبت جاهز في `docs/prompts/review-p4.md`؛ تُشغَّل في جلسة جديدة منفصلة |
+| معالجة ملاحظات المراجعة (أو تسجيلها «مرفوضة + السبب» في DESIGN_NOTES) | بعد المراجعة |
+| دمج `feat/p4-g3-video` → `main` | بموافقة المالك |
