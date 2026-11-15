@@ -8,6 +8,12 @@
 use std::ffi::OsStr;
 use std::process::Command;
 
+mod supervised;
+pub use supervised::{
+    process_is_alive, spawn, system_program_dirs, validate_program, Captured, ChildSpec, Finished,
+    Keep, StreamSpec, Supervised, ENV_PASSTHROUGH,
+};
+
 /// `CREATE_NO_WINDOW` process-creation flag value (winbase.h).
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 

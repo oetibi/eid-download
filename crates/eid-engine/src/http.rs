@@ -10,6 +10,7 @@ use std::time::Duration;
 /// multiplex them over a single congestion window), identity encoding, bounded safe redirects.
 pub fn build_client(cfg: &Config) -> Result<reqwest::Client> {
     let max = cfg.max_redirects;
+    let hosts = cfg.allowed_hosts.clone();
     let policy = Policy::custom(move |attempt| {
         let prev = attempt.previous().last().map(|u| u.scheme().to_string());
         match redirect_verdict(
@@ -18,6 +19,9 @@ pub fn build_client(cfg: &Config) -> Result<reqwest::Client> {
             attempt.previous().len(),
             max,
         ) {
+            Ok(()) if !host_allowed(hosts.as_deref(), attempt.url().host_str()) => {
+                attempt.error("redirect to a host that is not allowed for this download")
+            }
             Ok(()) => attempt.follow(),
             Err(why) => attempt.error(why),
         }
@@ -67,6 +71,42 @@ pub async fn send_bounded(
         Ok(Ok(r)) => Ok(r),
         Ok(Err(e)) => Err(SendError::Net(e)),
         Err(_) => Err(SendError::HeaderTimeout),
+    }
+}
+
+/// Pure host policy (unit-tested): with an allowlist, only an exact (ASCII case-insensitive)
+/// host match passes; a URL without a host never passes.
+pub fn host_allowed(allowed: Option<&[String]>, host: Option<&str>) -> bool {
+    match (allowed, host) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(list), Some(h)) => list.iter().any(|a| a.eq_ignore_ascii_case(h)),
+    }
+}
+
+/// The initial URL must satisfy [`host_allowed`] too.
+pub fn check_host(allowed: Option<&[String]>, url: &url::Url) -> Result<()> {
+    if host_allowed(allowed, url.host_str()) {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput(format!(
+            "host {} is not allowed for this download",
+            url.host_str().unwrap_or("<none>")
+        )))
+    }
+}
+
+/// Pure size policy: with a cap, the total must be known and within it.
+pub fn check_size_cap(cap: Option<u64>, total: Option<u64>) -> Result<()> {
+    match (cap, total) {
+        (None, _) => Ok(()),
+        (Some(_), None) => Err(Error::BadResponse(
+            "size unknown, but this download has a size limit".into(),
+        )),
+        (Some(c), Some(t)) if t > c => Err(Error::BadResponse(format!(
+            "{t} bytes is more than the {c} bytes allowed for this download"
+        ))),
+        _ => Ok(()),
     }
 }
 

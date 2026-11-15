@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/eid-engine", "crates/eid-platform", "crates/eid-testserver", "crates/eid-cli", "crates/eid-ipc", "crates/eid-native-host"]
+members = ["crates/eid-engine", "crates/eid-platform", "crates/eid-testserver", "crates/eid-cli", "crates/eid-ipc", "crates/eid-native-host", "crates/eid-media", "crates/eid-fake-ytdlp"]
 
 [workspace.package]
 version = "0.0.1"

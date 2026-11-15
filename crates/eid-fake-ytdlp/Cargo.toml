@@ -1,0 +1,20 @@
+[package]
+name = "eid-fake-ytdlp"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Test double for yt-dlp (P4). Never shipped."
+
+[[bin]]
+name = "fake-yt-dlp"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+url = "2"
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true

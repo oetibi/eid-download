@@ -787,6 +787,7 @@ impl Net<'_> {
                 if total == 0 || total > MAX_TOTAL_BYTES {
                     return Err(Error::BadResponse("implausible total length".into()));
                 }
+                http::check_size_cap(self.cfg.max_total_bytes, Some(total))?;
                 Ok(Probe {
                     resp,
                     ranged: true,
@@ -799,6 +800,7 @@ impl Net<'_> {
             }
             StatusCode::OK => {
                 let total = resp.content_length().filter(|&n| n <= MAX_TOTAL_BYTES);
+                http::check_size_cap(self.cfg.max_total_bytes, total)?;
                 Ok(Probe {
                     resp,
                     ranged: false,
@@ -1398,6 +1400,7 @@ async fn download_inner(
     mut restart_reason: Option<String>,
 ) -> Result<Outcome> {
     let st = prepare(&spec)?;
+    http::check_host(cfg.allowed_hosts.as_deref(), &st.url_clean)?;
     let client = http::build_client(&cfg)?;
     let mut restarts = 0u32;
     let mut files: Option<Files> = None;
@@ -1863,6 +1866,7 @@ async fn resume_inner(
     };
 
     let (url_clean, _) = urlsafe::parse_and_strip(&st.url).map_err(Error::BadState)?;
+    http::check_host(cfg.allowed_hosts.as_deref(), &url_clean)?;
     let total = st
         .total
         .ok_or_else(|| Error::BadState("ranged state without total".into()))?;

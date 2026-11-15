@@ -27,6 +27,51 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
+      # ---- P4 D3: ffprobe for fake_clip_has_video_and_audio_by_ffprobe, the SAME build and
+      # hashes the product pins in tools/manifest.json (no other version, no PATH tool).
+      - name: Read the pinned FFmpeg asset from tools/manifest.json
+        id: ffm
+        shell: pwsh
+        run: |
+          $m = Get-Content tools/manifest.json -Raw | ConvertFrom-Json
+          $t = $m.tools | Where-Object { $_.name -eq 'ffmpeg' }
+          $p = $t.files | Where-Object { $_.name -eq 'ffprobe.exe' }
+          "url=$($t.url)" >> $env:GITHUB_OUTPUT
+          "sha=$($t.sha256)" >> $env:GITHUB_OUTPUT
+          "entry=$($p.entry)" >> $env:GITHUB_OUTPUT
+          "probe_sha=$($p.sha256)" >> $env:GITHUB_OUTPUT
+      - name: Cache the pinned FFmpeg asset (keyed by its SHA-256)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-pinned
+          key: ffmpeg-${{ steps.ffm.outputs.sha }}
+      - name: Download, verify and unpack ffprobe (fails on any hash mismatch)
+        shell: pwsh
+        env:
+          FF_URL: ${{ steps.ffm.outputs.url }}
+          FF_SHA: ${{ steps.ffm.outputs.sha }}
+          FF_ENTRY: ${{ steps.ffm.outputs.entry }}
+          FF_PROBE_SHA: ${{ steps.ffm.outputs.probe_sha }}
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'ffmpeg-pinned'
+          New-Item -ItemType Directory -Force $d | Out-Null
+          $zip = Join-Path $d 'ffmpeg.zip'
+          if (-not (Test-Path $zip)) { Invoke-WebRequest -Uri $env:FF_URL -OutFile $zip }
+          $h = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:FF_SHA) { Remove-Item $zip; throw "FFmpeg asset SHA-256 $h != pinned $env:FF_SHA" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $e = $z.Entries | Where-Object { $_.FullName -eq $env:FF_ENTRY }
+            if (-not $e) { throw "entry $env:FF_ENTRY not in the archive" }
+            $out = Join-Path $d 'ffprobe.exe'
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $out, $true)
+          } finally { $z.Dispose() }
+          $ph = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+          if ($ph -ne $env:FF_PROBE_SHA) { throw "ffprobe.exe SHA-256 $ph != pinned $env:FF_PROBE_SHA" }
+          "ffprobe.exe verified: $ph"
+          "EID_FFPROBE=$out" >> $env:GITHUB_ENV
+          "EID_REQUIRE_FFPROBE=1" >> $env:GITHUB_ENV
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: CPU count of this runner
         run: echo "NUMBER_OF_PROCESSORS=$env:NUMBER_OF_PROCESSORS"

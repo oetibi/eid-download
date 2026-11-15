@@ -589,18 +589,28 @@ fn is_valid_token(t: &str) -> bool {
 /// Windows: the file is created with a protected DACL that grants only the current user access
 /// (the replace keeps it), instead of inheriting the directory's ACL.
 pub fn write_token_file(path: &Path, token: &str) -> io::Result<()> {
-    use std::io::Write;
     if !is_valid_token(token) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "malformed token",
         ));
     }
+    write_private_atomic(path, token.as_bytes())
+}
+
+/// Write `data` to `path` atomically as a private file (private temp file in the same folder,
+/// then replace). Unix: mode 0600. Windows: protected DACL granting only the current user
+/// (the replace keeps it). Used for the IPC token and for `settings.json`.
+pub fn write_private_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
+    use std::io::Write;
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".eid-token-{}.tmp", new_token()?[..16].to_owned()));
+    let tmp = dir.join(format!(
+        ".eid-private-{}.tmp",
+        new_token()?[..16].to_owned()
+    ));
     let mut f = create_token_file(&tmp)?;
-    let r = f.write_all(token.as_bytes()).and_then(|_| f.sync_all());
+    let r = f.write_all(data).and_then(|_| f.sync_all());
     drop(f);
     if let Err(e) = r {
         let _ = std::fs::remove_file(&tmp);

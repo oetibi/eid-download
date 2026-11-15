@@ -276,6 +276,53 @@ pub fn open_regular_nofollow_read(path: &Path) -> io::Result<File> {
     Ok(f)
 }
 
+/// Whether [`open_tool_locked`] really locks on this platform.
+pub const TOOL_LOCK_ENFORCED: bool = cfg!(windows);
+
+/// Open an installed tool for hashing and keep it locked while it runs (P4 D11, ADR-0007).
+///
+/// Windows: read access with share mode `FILE_SHARE_READ` only, so while the handle is open
+/// nobody can open the file for writing, delete it, rename it or rename a folder above it,
+/// while `CreateProcess` (which only reads) still works; a file that someone already holds
+/// open for writing makes this open fail with a sharing violation (refused). The final
+/// component is not followed if it is a reparse point, and the opened handle must be a plain
+/// regular file. Unix: the same checks without any lock (there is no equivalent; documented).
+pub fn open_tool_locked(path: &Path) -> io::Result<File> {
+    let mut o = OpenOptions::new();
+    o.read(true);
+    apply_open_flags(&mut o);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        o.share_mode(FILE_SHARE_READ);
+    }
+    let f = o.open(path)?;
+    reject_if_not_plain(&f)?;
+    Ok(f)
+}
+
+/// Whether an error from [`open_tool_locked`] means "someone else has the file open in a way
+/// our lock does not allow" (Windows `ERROR_SHARING_VIOLATION`).
+pub fn is_sharing_violation(e: &io::Error) -> bool {
+    cfg!(windows) && e.raw_os_error() == Some(32)
+}
+
+/// Make a file we just created executable by its owner (Unix `0755` via `fchmod` on the
+/// handle; Windows has no such bit, nothing to do).
+pub fn set_executable(f: &File) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o755))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = f;
+        Ok(())
+    }
+}
+
 /// Pre-size a file. On NTFS first marks it sparse (avoids the zero-fill stall when writing
 /// far offsets first). Falls back to plain `set_len` where sparse is unsupported.
 pub fn preallocate(file: &File, len: u64) -> io::Result<()> {

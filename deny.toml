@@ -1,0 +1,43 @@
+# cargo-deny configuration (P4 G0, owner decision D10). CI runs `cargo deny check` as a
+# blocking step. Any new license or source needs a line in docs/DEPENDENCIES.md as well.
+
+[graph]
+# The targets we build and test; dependencies of other targets (wasm, macOS, aarch64) are
+# never compiled for us and are not judged.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-pc-windows-gnu",
+    "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+# Known vulnerabilities fail the build (cargo-deny default). "Unmaintained" notices fail only
+# for crates we depend on directly; transitive ones are reported but do not block.
+unmaintained = "workspace"
+
+[licenses]
+# Exactly the licenses present in the dependency tree on 2026-11-15 (cargo metadata for both
+# Windows targets; Linux-only crates are MIT/Apache-2.0 dual licensed).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "BSL-1.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0", # webpki-roots (Mozilla root store data)
+]
+confidence-threshold = 0.9
+# Our own crates are `publish = false` and carry no license yet (ADR-0008).
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
