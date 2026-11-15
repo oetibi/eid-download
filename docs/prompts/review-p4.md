@@ -5,7 +5,7 @@
 **يُشغَّل في جلسة جديدة منفصلة عن جلسات التنفيذ (AGENTS §4). لا تعدّل الكود ولا الاختبارات ولا PLAN؛ اكتب الملاحظات فقط في `docs/reviews/P4.md`.** لا تدمج ولا تحذف فروعاً ولا تنزّل أدوات ولا تشغّل اختبارات (ج) ولا تتصل بالإنترنت.
 
 ## النطاق
-- الفرع: `feat/p4-g3-video` (يحوي G0–G4). الأساس للمقارنة: `main` (`b9aeb9b`). الفرق: `git diff origin/main...origin/feat/p4-g3-video` (~65 ملفاً).
+- الفرع: `main` (يحوي G0–G4 بعد دمج PR #17، `ce80cc9`). الأساس للمقارنة: `b9aeb9b` (`main` قبل P4). الفرق: `git diff b9aeb9b origin/main` (67 ملفاً، +9271/−24). **لا تستعمل** `git diff origin/main...origin/feat/p4-g3-video`: بعد الدمج يعطي فرقاً فارغاً. اعمل على فرع جديد من `origin/main` (مثلاً `docs/p4-review`).
 - اقرأ: AGENTS.md، README، docs/REQUIREMENTS (F11، F11a)، docs/ARCHITECTURE (§6 وما يخص الفيديو)، docs/adr (خاصة 0003 و0007)، docs/PLAN.md (P4)، **docs/plans/P4.md** (القرارات D1–D16 والتصميم الأمني §3 وقواعد الترقيم §4 وجدول الاختبارات §6)، docs/STATUS.md (أقسام P4 وحالة الإغلاق)، docs/DESIGN_NOTES.md (Rounds 10–13)، docs/DEPENDENCIES.md، docs/MANUAL-TESTS.md.
 - الكود: `crates/eid-platform` (`process::spawn`، `fs` القفل والفتح بلا روابط)، `crates/eid-media` (args، run، info، progress، redact، hints، manifest، fetch، zipx، tools، consent، settings، playlist)، `crates/eid-cli/src/video.rs`، `crates/eid-fake-ytdlp`، الاختبارات `crates/eid-cli/tests/{video,playlist}.rs` و`video_env/`، `crates/eid-media/tests`، `.github/workflows/*`، `deny.toml`، `scripts/required_tests.txt`.
 
