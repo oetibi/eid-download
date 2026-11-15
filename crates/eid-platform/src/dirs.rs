@@ -20,6 +20,22 @@ pub fn default_download_dir() -> Option<PathBuf> {
     base.map(|b| b.join("Downloads"))
 }
 
+/// Per-user local data directory: `%LOCALAPPDATA%\EidDownload` on Windows (video tools live in
+/// its `tools` sub-folder, ARCHITECTURE section 6), `$XDG_DATA_HOME/eid-download` (or
+/// `~/.local/share/eid-download`) elsewhere. `None` if the base is unknown or not absolute.
+pub fn local_data_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        env_dir("LOCALAPPDATA").map(|p| p.join("EidDownload"))
+    }
+    #[cfg(not(windows))]
+    {
+        let base = env_dir("XDG_DATA_HOME")
+            .or_else(|| env_dir("HOME").map(|h| h.join(".local").join("share")))?;
+        Some(base.join("eid-download"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,6 +56,15 @@ mod tests {
             std::env::remove_var(&var);
         }
         assert_eq!(env_dir(&var), None);
+    }
+
+    #[test]
+    fn the_local_data_dir_is_absolute_and_ours() {
+        if let Some(d) = local_data_dir() {
+            assert!(d.is_absolute());
+            let n = d.file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+            assert!(n == "eiddownload" || n == "eid-download", "{n}");
+        }
     }
 
     #[test]

@@ -172,7 +172,7 @@ pub fn spawn(spec: ChildSpec) -> io::Result<Supervised> {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let pending = Tree::start(&mut c)?;
-    let mut child = c.spawn()?;
+    let mut child = spawn_retrying_busy(&mut c)?;
     let tree = match pending.adopt(&child) {
         Ok(t) => t,
         Err(e) => {
@@ -195,6 +195,25 @@ pub fn spawn(spec: ChildSpec) -> io::Result<Supervised> {
         out,
         err,
     })
+}
+
+/// Linux refuses to exec a file that some process holds open for writing (`ETXTBSY`). A tool
+/// we have just installed and closed can still be "busy" for a moment when another thread of
+/// ours forked in between (the child holds a copy of the descriptor until its own exec closes
+/// it). Retry up to 5 times (pauses of 10..50 ms, 150 ms in all: a short blocking pause of the
+/// calling thread, like the process creation itself); any other error is returned at once.
+fn spawn_retrying_busy(c: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
+    const ETXTBSY: i32 = 26;
+    let mut tries = 0;
+    loop {
+        match c.spawn() {
+            Err(e) if cfg!(unix) && e.raw_os_error() == Some(ETXTBSY) && tries < 5 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10 * tries));
+            }
+            r => return r,
+        }
+    }
 }
 
 impl Supervised {
