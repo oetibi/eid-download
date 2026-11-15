@@ -62,7 +62,11 @@ mod tests {
     fn the_local_data_dir_is_absolute_and_ours() {
         if let Some(d) = local_data_dir() {
             assert!(d.is_absolute());
-            let n = d.file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+            let n = d
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_ascii_lowercase();
             assert!(n == "eiddownload" || n == "eid-download", "{n}");
         }
     }

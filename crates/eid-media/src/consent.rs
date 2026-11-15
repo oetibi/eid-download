@@ -55,11 +55,7 @@ pub fn consent_text(lang: Lang, m: &Manifest) -> ConsentText {
         .collect();
     let text = template(lang).replace("{tools}", &tools.join("\n"));
     let sha256 = hex(&Sha256::digest(text.as_bytes()));
-    ConsentText {
-        lang,
-        text,
-        sha256,
-    }
+    ConsentText { lang, text, sha256 }
 }
 
 /// Whether the stored consent covers the current text (in either language).
