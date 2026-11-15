@@ -1,0 +1,11 @@
+Video and audio downloads (optional)
+
+To download video and audio from web pages, Eid Download needs three programs made by other projects. They are not part of Eid Download and are not included in its installer. If you agree, they are downloaded once from their official release pages, checked against the SHA-256 fingerprints pinned in this version of Eid Download, and kept in your user folder:
+
+{tools}
+
+A file whose fingerprint does not match is refused and never run. Nothing is updated silently: new tool versions only come with a new version of Eid Download.
+
+You are responsible for having the right to download the media and for respecting the terms of the sites you use. Content protected by DRM is refused; Eid Download does not try to get around any protection. Videos that require signing in are not supported.
+
+You can withdraw this consent at any time; the tools are then deleted.

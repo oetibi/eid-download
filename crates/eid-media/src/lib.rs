@@ -14,12 +14,18 @@
 //! * tool output is bounded and every text we show is redacted first ([`redact`]).
 
 pub mod args;
+pub mod consent;
 pub mod env;
 pub mod error;
+pub mod fetch;
 pub mod hints;
 pub mod info;
+pub mod manifest;
 pub mod progress;
 pub mod redact;
 pub mod run;
+pub mod settings;
+pub mod tools;
+pub mod zipx;
 
 pub use error::MediaError;
