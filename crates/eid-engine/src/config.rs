@@ -55,6 +55,12 @@ pub struct Config {
     /// (`eid_platform::MAX_PATH_UNITS`: 259 on Windows, none elsewhere); tests set it on Linux to
     /// exercise the Windows behaviour.
     pub max_path_units: Option<usize>,
+    /// When set, only these hosts (exact match, ASCII case-insensitive) may be contacted: the
+    /// initial URL and every redirect hop (P4 D14, tool downloads). `None` = any host.
+    pub allowed_hosts: Option<Vec<String>>,
+    /// When set, a response whose total length is unknown or larger than this is refused
+    /// before any byte is written (P4 tool downloads: the manifest knows the size).
+    pub max_total_bytes: Option<u64>,
 }
 
 impl Default for Config {
@@ -84,6 +90,8 @@ impl Default for Config {
             allow_unvalidated_segments: false,
             extra_root_certs_pem: Vec::new(),
             max_path_units: eid_platform::MAX_PATH_UNITS,
+            allowed_hosts: None,
+            max_total_bytes: None,
         }
     }
 }
