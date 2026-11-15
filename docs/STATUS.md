@@ -239,4 +239,11 @@
 | ما لم يُفحص قط: صيغة `--download-archive` الحقيقية لـyt-dlp (الأداة المزيّفة تكتب `fake ID`)؛ yt-dlp/FFmpeg/Deno الحقيقية | لم يُختبر |
 | مراجعة مستقلة لـP4 (`docs/reviews/P4.md`) | **لم تُجرَ** — البرومبت جاهز في `docs/prompts/review-p4.md`؛ تُشغَّل في جلسة جديدة منفصلة |
 | معالجة ملاحظات المراجعة (أو تسجيلها «مرفوضة + السبب» في DESIGN_NOTES) | بعد المراجعة |
-| دمج `feat/p4-g3-video` → `main` | بموافقة المالك |
+| دمج `feat/p4-g3-video` → `main` | **تم** عبر PR #17 (`ce80cc9`) — انظر القسم التالي |
+
+## P4 — بعد الدمج في main (2026-11-15) — **P4 ما زالت غير مغلقة**
+- **الدمج:** دُمج PR #17 (`docs/p4-closure`، مبنيّ فوق `feat/p4-g3-video`) في `main` عند `ce80cc9`، فدخلت G0–G4 كلها. فُحص على `origin` بـ`git merge-base --is-ancestor`: `docs/p4-g0` و`feat/p4-g1-process` و`feat/p4-g2-tools` و`feat/p4-g3-video` و`feat/p4-g4-playlists` و`docs/p4-closure` كلها أسلاف لـ`origin/main`؛ الفرق بين رأس `feat/p4-g3-video` و`main` أربعة ملفات وثائق فقط؛ بين `b9aeb9b` و`main` 67 ملفاً (+9271/−24). (الجملتان «لم يُدمج شيء في main» و«PR لم يُفتح» أعلاه كُتبتا قبل PR #17 وقد تقادمتا.)
+- **فحص ثابت على `origin/main` (قراءة فقط، لم يُشغَّل أي اختبار):** كل أسماء `required_tests.txt` (315 اسماً بعد إزالة البادئات) لها دالة في المصدر؛ لا اسم مطلوب عليه `#[ignore]`؛ المتجاهَل عمداً هو (ج) فقط (`real_*` الخمسة) إضافة إلى اختبارين قديمين في `bench_tls` وواحد في `g5_one_connection`؛ لا `std::process::Command` ولا `tokio::process` ولا `cfg(windows)` في `src` خارج `eid-platform` (الاستثناءات في `tests/` فقط). **هذا ليس تشغيلاً للاختبارات ولا بديلاً عن المراجعة المستقلة.**
+- **CI على `main`:** لم تُفحص السجلات (لا `gh` ولا متصفح بلا إذن). المطلوب من المالك: سطر `required: N ok: N bad: 0` لـ`ci-linux` و`ci-windows` على آخر push إلى `main`، وتأكيد أن `cargo deny` وخطوة ffprobe ومسارات `unix:` نفّذت.
+- **ما يمنع الإغلاق:** (1) المراجعة المستقلة لم تُجرَ (`docs/reviews/P4.md` غير موجود) ثم معالجة ملاحظاتها أو تسجيلها «مرفوضة + السبب»؛ (2) (ج) الخمسة لم تُشغَّل؛ (3) MANUAL-TESTS #11 و#14 و#19 «لم يُختبر»؛ (4) CI على `main` بإفادة المالك فقط؛ (5) صيغة `--download-archive` الحقيقية وyt-dlp/FFmpeg/Deno الحقيقية لم تُفحص.
+- **للمراجعة:** الفرق بعد الدمج = `git diff b9aeb9b origin/main` (انظر `docs/prompts/review-p4.md`).
