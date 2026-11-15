@@ -36,5 +36,7 @@ jobs:
       - run: python3 scripts/check_required.py --release   # overflow/security tests in release mode
       - name: Windows target still compiles (compile-check only, never executed here)
         run: cargo check --workspace --all-targets --target x86_64-pc-windows-gnu
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        continue-on-error: true            # becomes blocking once deny.toml exists (P7)
+      - name: cargo deny check (blocking, deny.toml; owner decision D10)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
