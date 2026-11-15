@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 pub const HELP: &str = "eid video - video and audio through yt-dlp (after your consent)\n\n\
 USAGE:\n  eid video info <page-url> [--yes-i-agree] [--lang ar|en]\n\
   eid video get <page-url> [-d DIR] [--quality best|audio|720p] [--limit RATE] [--yes-i-agree] [--lang ar|en] [-q]\n\
-  eid video consent [--lang ar|en]   show the consent text and whether it was given\n\
+  eid video playlist <playlist-url> [-d DIR] [--quality Q] [--limit RATE] [--skip 2,5] [--list] [--yes-i-agree] [-q]
+\n                                     every item, numbered 01 - ... in a folder named after the playlist
+\n  eid video consent [--lang ar|en]   show the consent text and whether it was given\n\
   eid video revoke                   withdraw consent and delete the video tools\n\n\
 The first use asks for consent (or takes --yes-i-agree) and then downloads yt-dlp, FFmpeg and\n\
 Deno from their official releases, checked against the SHA-256 pinned in this program.\n\
@@ -37,6 +39,7 @@ pub enum Sub {
     Get,
     Consent,
     Revoke,
+    Playlist,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +52,10 @@ pub struct VideoArgs {
     pub yes_i_agree: bool,
     pub lang: Lang,
     pub quiet: bool,
+    /// Playlist item numbers NOT to download (F11a(1): everything else is selected).
+    pub skip: Vec<u32>,
+    /// Playlist: print the numbered plan and stop.
+    pub list_only: bool,
 }
 
 fn parse_quality(s: &str) -> Result<Quality, String> {
@@ -74,6 +81,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         Some("get") => Sub::Get,
         Some("consent") => Sub::Consent,
         Some("revoke") => Sub::Revoke,
+        Some("playlist") => Sub::Playlist,
         other => {
             return Err(format!(
                 "expected info, get, consent or revoke, got {other:?}"
@@ -89,6 +97,8 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         yes_i_agree: false,
         lang: Lang::En,
         quiet: false,
+        skip: vec![],
+        list_only: false,
     };
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -108,6 +118,22 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
                 }
             }
             "-q" => a.quiet = true,
+            "--list" => a.list_only = true,
+            "--skip" => {
+                for n in it
+                    .next()
+                    .ok_or("--skip needs item numbers, e.g. 2,5")?
+                    .split(',')
+                {
+                    let n: u32 = n
+                        .trim()
+                        .parse()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| format!("bad item number {n:?}"))?;
+                    a.skip.push(n);
+                }
+            }
             // `--` ends the options: everything after it is the page URL
             "--" => {
                 a.url = Some(it.next().ok_or("an address must follow --")?.clone());
@@ -123,7 +149,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
             }
         }
     }
-    let needs_url = matches!(a.sub, Sub::Info | Sub::Get);
+    let needs_url = matches!(a.sub, Sub::Info | Sub::Get | Sub::Playlist);
     if needs_url != a.url.is_some() {
         return Err(if needs_url {
             "a page address is required".into()
@@ -131,7 +157,10 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
             "this command takes no address".into()
         });
     }
-    if a.sub != Sub::Get && (a.dir.is_some() || a.limit_bps.is_some()) {
+    if (a.sub != Sub::Playlist) && (!a.skip.is_empty() || a.list_only) {
+        return Err("--skip and --list only apply to `eid video playlist`".into());
+    }
+    if !matches!(a.sub, Sub::Get | Sub::Playlist) && (a.dir.is_some() || a.limit_bps.is_some()) {
         return Err("-d and --limit only apply to `eid video get`".into());
     }
     Ok(a)
@@ -479,12 +508,12 @@ async fn run_inner(a: &VideoArgs, cancel: eid_engine::CancellationToken) -> Resu
     let url = MediaUrl::parse(a.url.as_deref().unwrap_or("")).map_err(Fail::media)?;
     ensure_consent(a, &settings, &m).await?;
     let out_dir = match (&a.sub, &a.dir) {
-        (Sub::Get, Some(d)) => d.clone(),
-        (Sub::Get, None) => eid_platform::dirs::default_download_dir()
+        (Sub::Get | Sub::Playlist, Some(d)) => d.clone(),
+        (Sub::Get | Sub::Playlist, None) => eid_platform::dirs::default_download_dir()
             .ok_or_else(|| Fail::Other("no download folder; pass -d DIR".into()))?,
         _ => PathBuf::new(),
     };
-    if a.sub == Sub::Get {
+    if matches!(a.sub, Sub::Get | Sub::Playlist) {
         let ok = std::fs::metadata(&out_dir).is_ok_and(|m| m.is_dir());
         if !ok {
             return Err(Fail::Other(format!("not a folder: {}", out_dir.display())));
@@ -526,6 +555,7 @@ async fn run_inner(a: &VideoArgs, cancel: eid_engine::CancellationToken) -> Resu
             Ok(())
         }
         Sub::Get => get(a, &url, &out_dir, &runner, locked, cancel).await,
+        Sub::Playlist => playlist(a, &url, &out_dir, &tools, &runner, locked, cancel).await,
         _ => unreachable!(),
     }
 }
@@ -610,6 +640,213 @@ async fn get(
     let dest = publish(&staged, out_dir, &name).map_err(Fail::Other)?;
     let _ = std::fs::remove_dir_all(&staging);
     println!("{}", dest.display());
+    Ok(())
+}
+
+/// Playlist folder inside `out_dir`, named after the sanitized playlist title (F11a(2)).
+pub fn playlist_folder(out_dir: &Path, title: &str) -> Result<PathBuf, String> {
+    let t = if title.trim().trim_matches('.').is_empty() {
+        "playlist"
+    } else {
+        title
+    };
+    let mut name = eid_engine::sanitize::sanitize_file_name(t);
+    if name.starts_with('.') {
+        name = format!("_{name}");
+    }
+    if let Some(limit) = eid_platform::MAX_PATH_UNITS {
+        // room for the folder, a staging folder, and yt-dlp's own file names inside it
+        let reserve = 1 + 27 + 1 + TOOL_NAME_RESERVE;
+        name = eid_engine::sanitize::fit_name_to_path_limit(
+            &name,
+            units(out_dir),
+            limit.saturating_sub(reserve),
+        )?;
+    }
+    let p = out_dir.join(&name);
+    match std::fs::symlink_metadata(&p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&p).map_err(|e| format!("cannot create {}: {e}", p.display()))?
+        }
+        Err(e) => return Err(format!("cannot inspect {}: {e}", p.display())),
+        Ok(md) if md.file_type().is_symlink() || !md.is_dir() => {
+            return Err(format!(
+                "refusing to use {}: it is a link, junction or file, not a folder",
+                p.display()
+            ))
+        }
+        Ok(_) => {}
+    }
+    Ok(p)
+}
+
+/// Items yt-dlp reports as not downloadable without signing in (skipped, number kept).
+fn unavailable(availability: Option<&str>) -> bool {
+    matches!(
+        availability,
+        Some("private" | "needs_auth" | "subscriber_only" | "premium_only" | "unavailable")
+    )
+}
+
+async fn playlist(
+    a: &VideoArgs,
+    url: &MediaUrl,
+    out_dir: &Path,
+    tools: &ToolStore,
+    runner: &Runner,
+    locked: eid_media::tools::LockedTools,
+    cancel: eid_engine::CancellationToken,
+) -> Result<(), Fail> {
+    use eid_media::playlist::{self as pl, Status};
+    let work = tools.root().join(format!(".list-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir(&work).map_err(|e| Fail::Other(e.to_string()))?;
+    let listed = tokio::select! {
+        r = runner.playlist(url, &work) => r,
+        _ = cancel.cancelled() => Err(MediaError::Playlist("stopped".into())),
+    };
+    let _ = std::fs::remove_dir_all(&work);
+    let info = listed.map_err(Fail::media)?;
+    let folder = playlist_folder(out_dir, &info.title).map_err(Fail::Other)?;
+    let _lock = pl::lock_folder(&folder).map_err(Fail::media)?;
+    let old = pl::load(&folder).map_err(Fail::media)?;
+    let (mut state, planned) = pl::plan(old, &info.id, &info.entries).map_err(Fail::media)?;
+    let p = crate::remote::printable;
+    if a.list_only {
+        for (n, e) in &planned {
+            let tag = match state.get(&e.id).map(|i| i.status) {
+                Some(Status::Done) => "done",
+                Some(Status::Unavailable) => "unavailable",
+                _ if a.skip.contains(n) => "deselected",
+                _ => "to download",
+            };
+            println!(
+                "{n:0w$}  {tag:<12} {}",
+                p(&e.title),
+                w = state.width as usize
+            );
+        }
+        return Ok(());
+    }
+    // numbers are fixed from here on (D8)
+    pl::save(&folder, &state).map_err(Fail::media)?;
+    let ext = if a.quality == Quality::AudioMp3 {
+        "mp3"
+    } else {
+        "mp4"
+    };
+    let (mut got, mut skipped, mut gone, mut failed) = (0u32, 0u32, 0u32, 0u32);
+    let empty = |s: &Path| std::fs::read_dir(s).is_ok_and(|mut d| d.next().is_none());
+    for (n, e) in &planned {
+        let status = state.get(&e.id).map(|i| i.status);
+        if status == Some(Status::Done) {
+            continue;
+        }
+        if status == Some(Status::Unavailable) || unavailable(e.availability.as_deref()) {
+            if let Some(i) = state.get_mut(&e.id) {
+                i.status = Status::Unavailable;
+            }
+            pl::save(&folder, &state).map_err(Fail::media)?;
+            gone += 1;
+            if !a.quiet {
+                eprintln!(
+                    "{n}: unavailable (private, removed or sign-in only); skipped, number kept"
+                );
+            }
+            continue;
+        }
+        if a.skip.contains(n) {
+            skipped += 1;
+            continue;
+        }
+        let item_url = match e.url.as_deref().map(MediaUrl::parse) {
+            Some(Ok(u)) => u,
+            _ => {
+                failed += 1;
+                eprintln!("{n}: the playlist gave no usable address for this item");
+                continue;
+            }
+        };
+        if !a.quiet {
+            eprintln!("{n}: {}", p(&e.title));
+        }
+        let staging =
+            prepare_staging(&folder, &staging_name(&item_url, &a.quality)).map_err(Fail::Other)?;
+        let r = tokio::select! {
+            r = runner.download(&item_url, &staging, a.quality.clone(), a.limit_bps, true, None) => r,
+            _ = cancel.cancelled() => {
+                drop(locked);
+                return Err(Fail::Cancelled(format!(
+                    "stopped at item {n}; finished items are kept. Run the same command again \
+                     to continue."
+                )));
+            }
+        };
+        match r {
+            Ok(_) => match finished_file(&staging, ext) {
+                Ok(staged) => {
+                    let name = pl::item_name(state.width, *n, &e.title, ext);
+                    let name = match eid_platform::MAX_PATH_UNITS {
+                        Some(l) => {
+                            eid_engine::sanitize::fit_name_to_path_limit(&name, units(&folder), l)
+                                .map_err(Fail::Other)?
+                        }
+                        None => name,
+                    };
+                    let dest = publish(&staged, &folder, &name).map_err(Fail::Other)?;
+                    let _ = std::fs::remove_dir_all(&staging);
+                    if let Some(i) = state.get_mut(&e.id) {
+                        i.status = Status::Done;
+                        i.file = dest.file_name().map(|f| f.to_string_lossy().into_owned());
+                    }
+                    got += 1;
+                }
+                // nothing new: yt-dlp skipped it because the archive already lists it
+                Err(_) if empty(&staging) => {
+                    let _ = std::fs::remove_dir(&staging);
+                    if let Some(i) = state.get_mut(&e.id) {
+                        i.status = Status::Done;
+                    }
+                }
+                Err(m) => {
+                    failed += 1;
+                    eprintln!("{n}: {m}");
+                }
+            },
+            Err(err) => {
+                if empty(&staging) {
+                    let _ = std::fs::remove_dir(&staging);
+                }
+                let permanent = matches!(
+                    &err,
+                    MediaError::ToolFailed {
+                        hint: Some(
+                            Hint::Unavailable | Hint::SignInRequired | Hint::Drm | Hint::Geo
+                        ),
+                        ..
+                    }
+                );
+                eprintln!("{n}: {}", describe(&err));
+                if permanent {
+                    if let Some(i) = state.get_mut(&e.id) {
+                        i.status = Status::Unavailable;
+                    }
+                    gone += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+        }
+        pl::save(&folder, &state).map_err(Fail::media)?;
+    }
+    drop(locked);
+    eprintln!("{got} downloaded, {skipped} deselected, {gone} unavailable, {failed} failed");
+    println!("{}", folder.display());
+    if failed > 0 {
+        return Err(Fail::Other(format!(
+            "{failed} item(s) failed; run again to retry them"
+        )));
+    }
     Ok(())
 }
 

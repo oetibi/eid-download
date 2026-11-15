@@ -21,6 +21,7 @@ pub mod fetch;
 pub mod hints;
 pub mod info;
 pub mod manifest;
+pub mod playlist;
 pub mod progress;
 pub mod redact;
 pub mod run;

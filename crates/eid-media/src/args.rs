@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 /// is a fresh staging directory we created. The final, human-readable name is given by us when
 /// we publish the file, never by yt-dlp.
 pub const OUTPUT_TEMPLATE: &str = "%(id)s.%(ext)s";
-/// Download-archive file name, relative to the working directory (G4: inside the playlist
-/// folder).
-pub const ARCHIVE_FILE: &str = ".eid-archive.txt";
+/// Download archive, relative to the working directory. The working directory of a playlist
+/// item is its staging folder, which we create directly inside the playlist folder, so this
+/// constant names `<playlist folder>/.eid-archive.txt` (D13). No user or network text in it.
+pub const ARCHIVE_FILE: &str = "../.eid-archive.txt";
 /// Prefix of our progress lines on stdout.
 pub const PROGRESS_PREFIX: &str = "[eid-progress]";
 /// Progress template: constant, only numeric fields.

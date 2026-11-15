@@ -9,6 +9,7 @@
 //! * `/flood-json/MIB`     print a JSON document of about MIB MiB (bounded-output tests)
 //! * `/error/KIND`         print a yt-dlp-style error for KIND and exit 1
 //! * `/sleep/SECS`         sleep, then exit 0 (cancellation tests)
+//! * `/playlist/NAME?list=FILE&ptitle=T`   `--flat-playlist -J` of the entries in FILE
 //! * `/video/ID?title=T`   `--dump-single-json`: print video info; otherwise "download":
 //!   write the fixture clip (mp4, or mp3 with `--extract-audio`) as `ID.EXT` in the working
 //!   directory, printing progress lines in our progress template
@@ -121,6 +122,17 @@ fn download(flags: &[String], id: &str, stall_flag: Option<&str>) -> u64 {
     let total = data.len();
     let name = format!("{id}.{ext}");
     let part = format!("{name}.part");
+    // --download-archive: an id already recorded is skipped (no file, exit 0), like yt-dlp
+    let archive = value(flags, "--download-archive");
+    let line = format!("fake {id}");
+    if let Some(a) = archive {
+        if std::fs::read_to_string(a).is_ok_and(|s| s.lines().any(|l| l == line)) {
+            out(&format!(
+                "[download] {id}: has already been recorded in the archive"
+            ));
+            std::process::exit(0);
+        }
+    }
     if std::fs::symlink_metadata(&name).is_ok() {
         die(1, &format!("ERROR: {name} already exists"));
     }
@@ -158,7 +170,59 @@ fn download(flags: &[String], id: &str, stall_flag: Option<&str>) -> u64 {
     f.sync_all().unwrap();
     drop(f);
     std::fs::rename(&part, &name).unwrap();
+    if let Some(a) = archive {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(a)
+            .unwrap_or_else(|e| die(1, &format!("ERROR: archive {a}: {e}")));
+        let _ = writeln!(f, "{line}");
+    }
     resumed
+}
+
+/// `--flat-playlist -J` of a fake playlist whose entries come from the JSON file named by the
+/// URL's `list` parameter: `[{"id": .., "title": .., "availability": ..}]`. Entry URLs keep the
+/// playlist URL's other parameters (log, stall, ...); unavailable entries point at an error.
+fn playlist_json(name: &str, url: &url::Url) -> String {
+    let q = |k: &str| {
+        url.query_pairs()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.into_owned())
+    };
+    let list = q("list").unwrap_or_else(|| die(9, "fake-yt-dlp: playlist without list="));
+    let text = std::fs::read_to_string(&list)
+        .unwrap_or_else(|e| die(9, &format!("fake-yt-dlp: list {list}: {e}")));
+    let items: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
+    let mut rest = url::form_urlencoded::Serializer::new(String::new());
+    for (k, v) in url.query_pairs() {
+        if k != "list" && k != "ptitle" {
+            rest.append_pair(&k, &v);
+        }
+    }
+    let rest = rest.finish();
+    let entries: Vec<serde_json::Value> = items
+        .iter()
+        .map(|it| {
+            let id = it["id"].as_str().unwrap();
+            let avail = it["availability"].as_str();
+            let path = match avail {
+                Some("private" | "needs_auth" | "unavailable") => "error/private".to_string(),
+                _ => format!("video/{id}"),
+            };
+            serde_json::json!({
+                "_type": "url", "id": id, "title": it["title"],
+                "url": format!("https://fake.test/{path}?{rest}"),
+                "availability": avail,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "_type": "playlist", "id": name,
+        "title": q("ptitle").unwrap_or_else(|| "Fake playlist".into()),
+        "entries": entries,
+    })
+    .to_string()
 }
 
 /// Append one JSON line per invocation to the file named by the URL's `log` parameter.
@@ -244,6 +308,19 @@ fn main() {
             let s: u64 = segs.get(1).and_then(|s| s.parse().ok()).unwrap_or(600);
             std::thread::sleep(Duration::from_secs(s));
         }
+        Some("playlist") => {
+            let name = segs.get(1).cloned().unwrap_or_default();
+            if !flags.iter().any(|f| f == "--flat-playlist") {
+                die(
+                    9,
+                    "fake-yt-dlp: playlists are only listed (--flat-playlist)",
+                );
+            }
+            if let Some(l) = query("log") {
+                log_call(&l, &argv, None);
+            }
+            out(&playlist_json(&name, &url));
+        }
         Some("video") => {
             let id = segs.get(1).cloned().unwrap_or_default();
             if id.is_empty()
@@ -274,7 +351,9 @@ fn main() {
                 if let Some(l) = &log {
                     log_call(l, &argv, Some(resumed));
                 }
-                download(flags, &id, query("stall").as_deref());
+                // `stall_id=X`: only item X stalls (playlist tests)
+                let stall = query("stall").filter(|_| query("stall_id").is_none_or(|s| s == id));
+                download(flags, &id, stall.as_deref());
             }
         }
         _ => die(9, &format!("fake-yt-dlp: unknown fake URL {}", url.path())),
