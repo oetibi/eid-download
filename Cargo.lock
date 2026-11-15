@@ -176,12 +176,14 @@ dependencies = [
  "eid-cli",
  "eid-engine",
  "eid-ipc",
+ "eid-media",
  "eid-platform",
  "eid-testserver",
  "serde_json",
  "sha2",
  "tempfile",
  "tokio",
+ "zip",
 ]
 
 [[package]]

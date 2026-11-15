@@ -12,7 +12,8 @@ use std::time::Duration;
 const HELP: &str = "eid - Eid Download command line\n\n\
 USAGE:\n  eid get <url> [-d DIR] [-o NAME] [-c N] [--limit RATE] [--sha256 HEX] [-q]\n  eid resume <file.eid-state> [-c N] [--limit RATE] [--sha256 HEX] [-q]\n\n\
   eid queue ... / eid grab ...   download queues and the page link grabber (see `eid queue`)\n\
-  eid serve ... / eid add|list|pause|resume   the headless app and its remote control (see `eid serve`)\n\n\
+  eid serve ... / eid add|list|pause|resume   the headless app and its remote control (see `eid serve`)\n\
+  eid video info|get|consent|revoke ...       video and audio through yt-dlp, after consent (see `eid video`)\n\n\
   -c N          connections (1..=32, default 8)\n  --limit RATE  bytes/s, e.g. 500K, 2M\n  -q            no progress output\n\n\
 Ctrl-C stops safely and prints the command that resumes the download.";
 
@@ -134,6 +135,29 @@ async fn queue_main(argv: &[String]) -> i32 {
     }
 }
 
+/// `eid video ...` (P4): standalone in this process.
+async fn video_main(argv: &[String]) -> i32 {
+    use eid_cli::video;
+    let a = match video::parse(argv) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}\n\n{}", video::HELP);
+            return 2;
+        }
+    };
+    let cancel = CancellationToken::new();
+    {
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("stopping the tool and everything it started...");
+                c.cancel();
+            }
+        });
+    }
+    video::run(a, cancel).await
+}
+
 /// `eid serve` and the remote commands (`add`, `list`, `pause`, `resume`).
 async fn app_main(argv: &[String]) -> i32 {
     use eid_cli::{remote, serve};
@@ -179,6 +203,9 @@ async fn main() {
     }
     if matches!(argv.first().map(String::as_str), Some("queue" | "grab")) {
         std::process::exit(queue_main(&argv).await);
+    }
+    if argv.first().map(String::as_str) == Some("video") {
+        std::process::exit(video_main(&argv[1..]).await);
     }
     let cmd = match args::parse(&argv) {
         Ok(c) => c,
