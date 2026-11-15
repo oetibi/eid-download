@@ -8,6 +8,8 @@
 
 **الإصدارات المبدئية (D16، تُعاد مراجعتها يوم بدء G2 وتُسجَّل البصمات من الملفات الرسمية لا من الذاكرة):** yt-dlp `2026.10.26` (بصمة `yt-dlp.exe` الرسمية `f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d`)، Deno `v2.9.8`، FFmpeg `n8.1.3` (`autobuild-2026-11-14-12-37`، `ffmpeg-n8.1.3-35-gf1acb0a266-win64-lgpl-8.1.zip`). المرجع الملزم هو `tools/manifest.json` حين يُنشأ في G2.
 
+**إعادة التحقق يوم بدء G2 (2026-11-15، من الملفات الرسمية):** لا إصدار أحدث لأي أداة (آخر إصدار yt-dlp = `2026.10.26`، Deno = `v2.9.8`، أحدث وسم مؤرَّخ لـBtbN = `autobuild-2026-11-14-12-37`). `SHA2-256SUMS` لـyt-dlp يذكر `yt-dlp.exe` = `f5389d36…7a7d` (23 575 744 بايت). `deno-x86_64-pc-windows-msvc.zip.sha256sum` = `cba84b26…93bf`؛ نُزِّل الأرشيف بإذن المالك وطابق، و`deno.exe` بداخله = `92439780…8266` (98 081 568 بايت). أرشيف FFmpeg طابق `checksums.sha256` للوسم (`9a1c8c9f…e56c`)، و`ffmpeg.exe` = `260c6a99…b027`، `ffprobe.exe` = `39a014a6…f9f7`. **ملاحظة:** مستودع BtbN انتقل إلى `github.com/FFmpeg-Builds/FFmpeg-Builds` (‏`BtbN/...` يحوِّل إليه بـ301)، فالـmanifest يستعمل العنوان الجديد مباشرة (نفس المشروع ونفس الأصول والبصمات). مضيفو التنزيل الفعليون: `github.com` ثم `release-assets.githubusercontent.com`.
+
 **اتصال شبكي جديد معتمد (D14، AGENTS §8):** تنزيل الأدوات بعد الموافقة فقط، HTTPS فقط، من `github.com` ومضيفي أصول إصدارات GitHub فقط (القائمة الدقيقة في الـmanifest، واختبار `tool_manifest_rejects_non_https_and_unknown_hosts`). لا تحديث صامت: «التحديث» = تثبيت ما يثبّته manifest الإصدار الحالي من البرنامج.
 
 ## مكتبات Rust (P1)
@@ -16,6 +18,8 @@
 getrandom 0.2 (MIT/Apache-2.0، كانت في Cargo.lock أصلاً) لتوكن المصافحة 256-بت · tokio ميزتا `net` و`io-util` داخل eid-platform (MIT) · (مراجعة P3) windows-sys ميزة `Win32_System_Pipes` (للتحقق من خادم الأنبوب) · windows-sys ميزات `Win32_Security`/`Win32_Security_Authorization`/`Win32_System_Registry` (MIT/Apache-2.0).
 ## مكتبات Rust (P4) — معتمدة، تُضاف في بوابتها
 - **zip** (MIT) بـ`default-features = false` وميزة `deflate` فقط (D5)، لفك أرشيفات FFmpeg/Deno في G2 (مدخلات مسمّاة فقط، سقف حجم، SHA-256 لكل ملف مفكوك). تبعياتها المتعدية تُسجَّل هنا عند الإضافة بعد `cargo deny check`.
+- **G2 — أُضيف فعلاً:** `zip 9.5.1` (MIT) بـ`default-features = false` وميزة **`deflate-flate2-zlib-rs`** وحدها (فك deflate فقط؛ ميزة `deflate` العامة كانت ستجلب `zopfli` للضغط ولا نحتاجه). التبعيات المتعدية الجديدة في Cargo.lock وتراخيصها (من ملفات Cargo.toml لكل حزمة): `flate2` 1.1.11 (MIT OR Apache-2.0)، `zlib-rs` 0.6.8 (Zlib)، `crc32fast` 1.5.5 (MIT OR Apache-2.0)، `indexmap` 2.14.2 و`equivalent` 1.0.3 و`hashbrown` 0.17.1 (Apache-2.0 OR MIT)، `typed-path` 0.13.0 (MIT OR Apache-2.0)، `constant_time_eq` 0.6.1 (CC0-1.0 OR MIT-0 OR Apache-2.0)، `nix` 0.31.3 (MIT، على Unix فقط)، `zeroize_derive` 1.5.0 (Apache-2.0 OR MIT). كلها داخل قائمة `deny.toml`. حزمة `eid-media` صارت تعتمد على `eid-engine` (تنزيل الأدوات عبر المحرك، D4) وعلى `sha2`.
+- **G2 — eid-platform:** لا مكتبة جديدة (`open_tool_locked` بخيار `share_mode` من std، `set_executable`، `write_private_atomic`، `dirs::local_data_dir`).
 - **G1 (بلا مكتبة جديدة في Cargo.lock):** eid-platform: ميزات tokio `process`/`rt`/`sync` (MIT)، وميزتا windows-sys `Win32_System_JobObjects` و`Win32_System_Diagnostics_ToolHelp` (MIT/Apache-2.0). حزمة `eid-media` تستعمل ما في الشجرة أصلاً: serde/serde_json، thiserror، url، tokio. حزمة الاختبار `eid-fake-ytdlp` (لا تُشحن): serde_json، url، وsha2 للاختبار.
 
 ## فحص الرخص (`cargo deny`، D10)
