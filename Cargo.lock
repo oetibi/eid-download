@@ -190,6 +190,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "eid-fake-ytdlp"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "sha2",
+ "url",
+]
+
+[[package]]
 name = "eid-ipc"
 version = "0.0.1"
 dependencies = [
@@ -199,6 +208,19 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "eid-media"
+version = "0.0.1"
+dependencies = [
+ "eid-platform",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "url",
 ]
 
 [[package]]
