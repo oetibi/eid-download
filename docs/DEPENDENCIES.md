@@ -16,6 +16,7 @@
 getrandom 0.2 (MIT/Apache-2.0، كانت في Cargo.lock أصلاً) لتوكن المصافحة 256-بت · tokio ميزتا `net` و`io-util` داخل eid-platform (MIT) · (مراجعة P3) windows-sys ميزة `Win32_System_Pipes` (للتحقق من خادم الأنبوب) · windows-sys ميزات `Win32_Security`/`Win32_Security_Authorization`/`Win32_System_Registry` (MIT/Apache-2.0).
 ## مكتبات Rust (P4) — معتمدة، تُضاف في بوابتها
 - **zip** (MIT) بـ`default-features = false` وميزة `deflate` فقط (D5)، لفك أرشيفات FFmpeg/Deno في G2 (مدخلات مسمّاة فقط، سقف حجم، SHA-256 لكل ملف مفكوك). تبعياتها المتعدية تُسجَّل هنا عند الإضافة بعد `cargo deny check`.
+- **G1 (بلا مكتبة جديدة في Cargo.lock):** eid-platform: ميزات tokio `process`/`rt`/`sync` (MIT)، وميزتا windows-sys `Win32_System_JobObjects` و`Win32_System_Diagnostics_ToolHelp` (MIT/Apache-2.0). حزمة `eid-media` تستعمل ما في الشجرة أصلاً: serde/serde_json، thiserror، url، tokio. حزمة الاختبار `eid-fake-ytdlp` (لا تُشحن): serde_json، url، وsha2 للاختبار.
 
 ## فحص الرخص (`cargo deny`، D10)
 `deny.toml` في جذر المستودع؛ CI (`ci-linux`) يشغّل `cargo deny check` **إلزامياً** (لا `continue-on-error`). الرخص المسموحة فيه هي الموجودة فعلاً في شجرة التبعيات (فُحصت من `cargo metadata` لهدفي Windows في 2026-11-15): MIT، Apache-2.0، ISC، BSD-3-Clause، Unicode-3.0، Zlib، BSL-1.0، Unlicense، CDLA-Permissive-2.0 (بيانات `webpki-roots`). حزمنا `publish = false` وبلا رخصة بعد (ADR-0008) فتُتجاهل كحزم خاصة. أي رخصة جديدة = تعديل `deny.toml` + سطر هنا.
