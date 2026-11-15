@@ -100,7 +100,10 @@ fn info_json(id: &str, title: &str) -> String {
     .to_string()
 }
 
-fn download(flags: &[String], id: &str) {
+/// "Download" like yt-dlp: write `<id>.<ext>.part` in the working directory, continue an
+/// existing `.part` from its length (resume), optionally stall half-way while `stall_flag`
+/// exists (cancellation tests), then rename to `<id>.<ext>`. Returns the resume offset.
+fn download(flags: &[String], id: &str, stall_flag: Option<&str>) -> u64 {
     match value(flags, "--output") {
         Some("%(id)s.%(ext)s") => {}
         other => die(
@@ -117,19 +120,61 @@ fn download(flags: &[String], id: &str) {
     let progress = value(flags, "--progress-template").is_some();
     let total = data.len();
     let name = format!("{id}.{ext}");
+    let part = format!("{name}.part");
+    if std::fs::symlink_metadata(&name).is_ok() {
+        die(1, &format!("ERROR: {name} already exists"));
+    }
+    let resumed = std::fs::symlink_metadata(&part)
+        .map(|m| m.len().min(total as u64))
+        .unwrap_or(0);
     let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&name)
-        .unwrap_or_else(|e| die(1, &format!("ERROR: unable to open {name}: {e}")));
-    for (i, chunk) in data.chunks(total.div_ceil(4)).enumerate() {
-        f.write_all(chunk).unwrap();
+        .create(true)
+        .append(true)
+        .open(&part)
+        .unwrap_or_else(|e| die(1, &format!("ERROR: unable to open {part}: {e}")));
+    let step = total.div_ceil(4);
+    let mut done = resumed as usize;
+    while done < total {
+        if let Some(flag) = stall_flag {
+            if done >= total / 2 && std::path::Path::new(flag).exists() {
+                f.sync_all().unwrap();
+                out(&format!("[eid-progress] {done} {total} NA 0 NA"));
+                std::thread::sleep(Duration::from_secs(600));
+            }
+        }
+        let n = step
+            .min(total - done)
+            .min(if stall_flag.is_some() && done < total / 2 {
+                total / 2 - done
+            } else {
+                usize::MAX
+            });
+        f.write_all(&data[done..done + n]).unwrap();
+        done += n;
         if progress {
-            let done = ((i + 1) * total.div_ceil(4)).min(total);
             out(&format!("[eid-progress] {done} {total} NA 1000.0 0"));
         }
     }
     f.sync_all().unwrap();
+    drop(f);
+    std::fs::rename(&part, &name).unwrap();
+    resumed
+}
+
+/// Append one JSON line per invocation to the file named by the URL's `log` parameter.
+fn log_call(path: &str, argv: &[String], resumed_from: Option<u64>) {
+    let line = serde_json::json!({
+        "pid": std::process::id(),
+        "argv": argv,
+        "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+        "resumed_from": resumed_from,
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|e| die(9, &format!("fake-yt-dlp: cannot open log {path}: {e}")));
+    let _ = writeln!(f, "{line}");
 }
 
 fn main() {
@@ -208,11 +253,28 @@ fn main() {
             {
                 die(9, "fake-yt-dlp: bad id");
             }
+            let log = query("log");
             if flags.iter().any(|f| f == "--dump-single-json") {
+                if let Some(l) = &log {
+                    log_call(l, &argv, None);
+                }
                 let title = query("title").unwrap_or_else(|| "Fake video".into());
                 out(&info_json(&id, &title));
             } else {
-                download(flags, &id);
+                // log first (with the resume offset), so a test can see this process even if
+                // it is killed while it stalls
+                let ext = if flags.iter().any(|f| f == "--extract-audio") {
+                    "mp3"
+                } else {
+                    "mp4"
+                };
+                let resumed = std::fs::symlink_metadata(format!("{id}.{ext}.part"))
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if let Some(l) = &log {
+                    log_call(l, &argv, Some(resumed));
+                }
+                download(flags, &id, query("stall").as_deref());
             }
         }
         _ => die(9, &format!("fake-yt-dlp: unknown fake URL {}", url.path())),
