@@ -188,11 +188,28 @@ impl ToolStore {
         m: &Manifest,
         fetcher: &dyn Fetcher,
     ) -> Result<ToolPaths, MediaError> {
+        self.install_cancellable(m, fetcher, &eid_engine::CancellationToken::new())
+            .await
+    }
+
+    /// [`ToolStore::install`] that stops with [`MediaError::Cancelled`] when `cancel` fires:
+    /// the running download is cancelled and awaited until it has released its files, then the
+    /// staging folder is removed like after any other failure. The previous set stays current.
+    /// Cancel through the token, never by dropping this future: a dropped future cannot clean up.
+    pub async fn install_cancellable(
+        &self,
+        m: &Manifest,
+        fetcher: &dyn Fetcher,
+        cancel: &eid_engine::CancellationToken,
+    ) -> Result<ToolPaths, MediaError> {
         m.validate()?;
+        if cancel.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
         std::fs::create_dir_all(&self.root)?;
         let staging = self.root.join(format!(".staging-{}", random_suffix()?));
         std::fs::create_dir(&staging)?;
-        let r = self.install_into(m, fetcher, &staging).await;
+        let r = self.install_into(m, fetcher, &staging, cancel).await;
         if r.is_err() {
             let _ = std::fs::remove_dir_all(&staging);
         }
@@ -204,12 +221,21 @@ impl ToolStore {
         m: &Manifest,
         fetcher: &dyn Fetcher,
         staging: &Path,
+        cancel: &eid_engine::CancellationToken,
     ) -> Result<ToolPaths, MediaError> {
+        let stop = || -> Result<(), MediaError> {
+            if cancel.is_cancelled() {
+                Err(MediaError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
         let dl = staging.join("dl");
         let out = staging.join("out");
         std::fs::create_dir(&dl)?;
         std::fs::create_dir(&out)?;
         for (i, t) in m.tools.iter().enumerate() {
+            stop()?;
             let asset = format!("asset-{i}");
             let path = fetcher
                 .fetch(FetchRequest {
@@ -219,31 +245,40 @@ impl ToolStore {
                     size: t.size,
                     sha256: &t.sha256,
                     allowed_hosts: &m.allowed_hosts,
+                    cancel: cancel.clone(),
                 })
                 .await?;
+            stop()?;
             let direct: Vec<&ToolFile> = t.files.iter().filter(|f| f.entry.is_none()).collect();
             let archived: Vec<&ToolFile> = t.files.iter().filter(|f| f.entry.is_some()).collect();
             if let [f] = direct.as_slice() {
                 std::fs::rename(&path, out.join(&f.name))?;
             } else {
-                let (p, files, o) = (
+                let (p, files, o, c) = (
                     path.clone(),
                     archived.iter().map(|f| (*f).clone()).collect::<Vec<_>>(),
                     out.clone(),
+                    cancel.clone(),
                 );
+                // awaited, never abandoned: it checks the token before every block, so a cancel
+                // ends it within one 256 KiB read and it removes what it created
                 tokio::task::spawn_blocking(move || {
                     let refs: Vec<&ToolFile> = files.iter().collect();
-                    crate::zipx::extract_named(&p, &refs, &o)
+                    crate::zipx::extract_named_cancellable(&p, &refs, &o, &|| c.is_cancelled())
                 })
                 .await
                 .map_err(|e| MediaError::Io(std::io::Error::other(e)))??;
                 let _ = std::fs::remove_file(&path);
             }
         }
+        stop()?;
         // verify the complete set once more, through handles, and make it executable
-        let (o2, m2) = (out.clone(), m.clone());
+        let (o2, m2, c2) = (out.clone(), m.clone(), cancel.clone());
         tokio::task::spawn_blocking(move || -> Result<(), MediaError> {
             for f in m2.files() {
+                if c2.is_cancelled() {
+                    return Err(MediaError::Cancelled);
+                }
                 let h = eid_platform::fs::open_regular_nofollow(&o2.join(&f.name))?;
                 if h.metadata()?.len() != f.size || sha256_of_handle(&h)? != f.sha256 {
                     return Err(MediaError::HashMismatch {
@@ -257,6 +292,8 @@ impl ToolStore {
         })
         .await
         .map_err(|e| MediaError::Io(std::io::Error::other(e)))??;
+        // last point to stop: from here the new set is switched in as one step
+        stop()?;
         let previous = self.read_current().ok().flatten();
         let set = format!("set-{}-{}", m.id, random_suffix()?);
         std::fs::rename(&out, self.root.join(&set))?;

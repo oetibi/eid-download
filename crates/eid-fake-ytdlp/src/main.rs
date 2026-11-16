@@ -340,6 +340,14 @@ fn main() {
                 if let Some(l) = &log {
                     log_call(l, &argv, None);
                 }
+                // `stall_info=<flag file>`: hang in `-J` while the file exists (cancel tests;
+                // logged first, so a test sees this process while it hangs)
+                if let Some(flag) = query("stall_info") {
+                    let t = std::time::Instant::now();
+                    while std::path::Path::new(&flag).exists() && t.elapsed().as_secs() < 600 {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
                 let title = query("title").unwrap_or_else(|| "Fake video".into());
                 out(&info_json(&id, &title));
             } else {

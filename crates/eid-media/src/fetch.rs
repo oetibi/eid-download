@@ -21,6 +21,9 @@ pub struct FetchRequest<'a> {
     pub size: u64,
     pub sha256: &'a str,
     pub allowed_hosts: &'a [String],
+    /// Stops the download; the fetcher returns [`MediaError::Cancelled`] once its own work
+    /// (open files, partial data) has been released.
+    pub cancel: eid_engine::CancellationToken,
 }
 
 pub trait Fetcher: Send + Sync {
@@ -60,9 +63,14 @@ pub async fn engine_fetch(
         file_name: Some(req.file_name.to_string()),
     };
     let sink: eid_engine::EventSink = std::sync::Arc::new(|_| {});
-    let o = eid_engine::download(spec, cfg, sink, eid_engine::CancellationToken::new())
+    // the engine runs the job on its own task and, when cancelled, returns only after it has
+    // released its files, so the caller can then remove the staging folder
+    let o = eid_engine::download(spec, cfg, sink, req.cancel.clone())
         .await
-        .map_err(|e| MediaError::Fetch(e.to_string()))?;
+        .map_err(|e| match e {
+            eid_engine::Error::Cancelled => MediaError::Cancelled,
+            e => MediaError::Fetch(e.to_string()),
+        })?;
     if o.size != req.size {
         let _ = std::fs::remove_file(&o.path);
         return Err(MediaError::Fetch(format!(

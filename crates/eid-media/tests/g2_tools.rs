@@ -508,6 +508,7 @@ fn tool_manifest_rejects_non_https_and_unknown_hosts() {
                 size: 3,
                 sha256: &hex(&[1, 2, 3]),
                 allowed_hosts: &hosts,
+                cancel: Default::default(),
             })
             .await;
         assert!(matches!(r, Err(MediaError::BadManifest(_))), "{r:?}");
