@@ -627,3 +627,259 @@ async fn cancel_during_media_info_kills_the_tool_and_exits() {
     );
     assert_eq!(e.calls().len(), 1, "no download after the cancel");
 }
+
+// ------------------------------------------------------------------ remux to MP4 (P4 review M4)
+
+/// The fake's stand-in WebM (same bytes as `webm_bytes` in eid-fake-ytdlp).
+fn fake_webm() -> Vec<u8> {
+    let mut v = vec![0x1a, 0x45, 0xdf, 0xa3];
+    v.extend((0..30_000u32).map(|i| (i % 251) as u8));
+    v
+}
+
+/// The only staging folder in `out` (panics if there is not exactly one).
+fn the_staging(out: &std::path::Path) -> PathBuf {
+    let s: Vec<String> = entries(out)
+        .into_iter()
+        .filter(|n| n.starts_with(".eid-video-"))
+        .collect();
+    assert_eq!(s.len(), 1, "staging folders: {s:?} in {:?}", entries(out));
+    out.join(&s[0])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn single_file_formats_are_remuxed_to_mp4_and_checked_before_publishing() {
+    let e = Env::new().await;
+    let out = e.out().display().to_string();
+    // the site serves a single WebM file (the `/b` fallback): yt-dlp is asked to remux it
+    let url = e.url("video/abc", "&container=webm");
+    let o = e
+        .run(&["video", "get", &url, "-d", &out, "--yes-i-agree", "-q"])
+        .await;
+    assert!(o.status.success(), "{}", text(&o));
+    let done = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim());
+    assert_eq!(done.file_name().unwrap(), "Fake video.mp4");
+    // the published file is the remuxed MP4, not the WebM under a new name
+    assert_eq!(
+        hex(&std::fs::read(&done).unwrap()),
+        hex(&fixture("clip.mp4"))
+    );
+    assert_eq!(entries(&e.out()), ["Fake video.mp4"], "staging left behind");
+    let calls = e.calls();
+    let argv = |c: &serde_json::Value| -> Vec<String> {
+        c["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(argv(calls.last().unwrap()).contains(&"--remux-video=mp4".to_string()));
+    // every video quality asks for the remux; audio (mp3) never does
+    for (q, want) in [("best", true), ("720p", true), ("audio", false)] {
+        let d = e.root.path().join(format!("q-{q}"));
+        std::fs::create_dir(&d).unwrap();
+        let o = e
+            .run(&[
+                "video",
+                "get",
+                &e.url("video/abc", ""),
+                "-d",
+                &d.display().to_string(),
+                "--quality",
+                q,
+                "--yes-i-agree",
+                "-q",
+            ])
+            .await;
+        assert!(o.status.success(), "{q}: {}", text(&o));
+        let last = argv(e.calls().last().unwrap());
+        assert_eq!(
+            last.iter().any(|a| a == "--remux-video=mp4"),
+            want,
+            "{q}: {last:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_remux_keeps_the_original_and_the_same_command_finishes_it_later() {
+    let e = Env::new().await;
+    let out = e.out().display().to_string();
+    let fail = e.root.path().join("remux-fails.flag");
+    std::fs::write(&fail, b"1").unwrap();
+    let url = e.url(
+        "video/abc",
+        &format!(
+            "&container=webm&remux_fail={}",
+            pct(&fail.display().to_string())
+        ),
+    );
+    let args = [
+        "video",
+        "get",
+        url.as_str(),
+        "-d",
+        out.as_str(),
+        "--yes-i-agree",
+        "-q",
+    ];
+    let o = e.run(&args).await;
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("Conversion failed"),
+        "{}",
+        text(&o)
+    );
+    // nothing published; the downloaded original is kept whole in the staging folder, next to
+    // the tool's partial conversion
+    let staging = the_staging(&e.out());
+    assert_eq!(
+        entries(&e.out()),
+        [staging.file_name().unwrap().to_string_lossy().into_owned()]
+    );
+    assert_eq!(entries(&staging), ["abc.temp.mp4", "abc.webm"]);
+    assert_eq!(
+        hex(&std::fs::read(staging.join("abc.webm")).unwrap()),
+        hex(&fake_webm())
+    );
+    // the partial conversion is never taken for the result: the same command, once the
+    // conversion works, remuxes the kept original (no new download) and publishes a whole MP4
+    std::fs::remove_file(&fail).unwrap();
+    let o = e.run(&args).await;
+    assert!(o.status.success(), "{}", text(&o));
+    let done = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim());
+    assert_eq!(
+        hex(&std::fs::read(&done).unwrap()),
+        hex(&fixture("clip.mp4"))
+    );
+    assert_eq!(
+        e.calls().last().unwrap()["cwd"],
+        staging.display().to_string()
+    );
+    assert_eq!(entries(&e.out()), ["Fake video.mp4"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cut_or_foreign_mp4_is_never_published() {
+    let e = Env::new().await;
+    let out = e.out().display().to_string();
+    // the tool reports success but leaves a cut MP4
+    let url = e.url("video/abc", "&container=webm&remux=broken");
+    let o = e
+        .run(&["video", "get", &url, "-d", &out, "--yes-i-agree", "-q"])
+        .await;
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("not a complete MP4"),
+        "{}",
+        text(&o)
+    );
+    let staging = the_staging(&e.out());
+    assert_eq!(entries(&e.out()).len(), 1, "something was published");
+    assert_eq!(entries(&staging), ["abc.mp4"], "kept for inspection");
+    // the tool reports success but its ".mp4" is really the WebM under a new name
+    let d = e.root.path().join("foreign");
+    std::fs::create_dir(&d).unwrap();
+    let url = e.url("video/abc", "&container=webm&remux=foreign");
+    let o = e
+        .run(&[
+            "video",
+            "get",
+            &url,
+            "-d",
+            &d.display().to_string(),
+            "--yes-i-agree",
+            "-q",
+        ])
+        .await;
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("not an MP4"),
+        "{}",
+        text(&o)
+    );
+    let staging = the_staging(&d);
+    assert_eq!(
+        entries(&d).len(),
+        1,
+        "something was published: {:?}",
+        entries(&d)
+    );
+    assert_eq!(
+        hex(&std::fs::read(staging.join("abc.mp4")).unwrap()),
+        hex(&fake_webm())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_during_the_remux_keeps_the_original_and_publishes_nothing() {
+    let e = Env::new().await;
+    let out = e.out().display().to_string();
+    let stall = e.root.path().join("remux-stall.flag");
+    std::fs::write(&stall, b"1").unwrap();
+    let url = e.url(
+        "video/abc",
+        &format!(
+            "&container=webm&remux_stall={}",
+            pct(&stall.display().to_string())
+        ),
+    );
+    let cancel_file = e.root.path().join("cancel.flag");
+    let mut c = e.cmd(&["video", "get", &url, "-d", &out, "--yes-i-agree", "-q"]);
+    c.env("EID_TEST_CANCEL_FILE", &cancel_file)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let eid = c.spawn().unwrap();
+    // the download is complete (the WebM is in place, no .part) and the tool hangs in the remux
+    let t = Instant::now();
+    let (pid, staging) = loop {
+        let calls = e.calls();
+        if calls.len() >= 2 {
+            let cwd = PathBuf::from(calls[1]["cwd"].as_str().unwrap());
+            if std::fs::read(cwd.join("abc.webm")).is_ok_and(|b| b == fake_webm())
+                && !cwd.join("abc.webm.part").exists()
+            {
+                break (calls[1]["pid"].as_u64().unwrap() as u32, cwd);
+            }
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(60),
+            "the remux never started"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(eid_platform::process::process_is_alive(pid));
+    ctrl_c(&eid, &cancel_file);
+    let o = exit_within(eid, Duration::from_secs(20)).await;
+    assert_eq!(o.status.code(), Some(130), "{}", text(&o));
+    let t = Instant::now();
+    while eid_platform::process::process_is_alive(pid) {
+        assert!(
+            t.elapsed() < Duration::from_secs(15),
+            "the tool outlived the cancel"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // the original is kept whole, nothing reached the output folder
+    assert_eq!(
+        entries(&e.out()),
+        [staging.file_name().unwrap().to_string_lossy().into_owned()]
+    );
+    assert_eq!(entries(&staging), ["abc.webm"]);
+    assert_eq!(
+        hex(&std::fs::read(staging.join("abc.webm")).unwrap()),
+        hex(&fake_webm())
+    );
+    // the same command continues from the kept original
+    std::fs::remove_file(&stall).unwrap();
+    let o = e
+        .run(&["video", "get", &url, "-d", &out, "--yes-i-agree", "-q"])
+        .await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(entries(&e.out()), ["Fake video.mp4"]);
+    assert_eq!(
+        hex(&std::fs::read(e.out().join("Fake video.mp4")).unwrap()),
+        hex(&fixture("clip.mp4"))
+    );
+}
