@@ -678,12 +678,14 @@ fn good_state() -> eid_media::playlist::State {
                 number: 1,
                 status: Status::Done,
                 file: Some("01 - Alpha.mp4".into()),
+                attempts: 0,
             },
             Item {
                 id: "b".into(),
                 number: 2,
                 status: Status::Pending,
                 file: None,
+                attempts: 0,
             },
         ],
     }
@@ -692,7 +694,10 @@ fn good_state() -> eid_media::playlist::State {
 /// The state file as eid writes it: schema, state and the SHA-256 of the state's JSON.
 fn state_file_bytes(s: &eid_media::playlist::State) -> Vec<u8> {
     let d = hex(&serde_json::to_vec(s).unwrap());
-    serde_json::to_vec_pretty(&json!({"schema": 1, "state": s, "sha256": d})).unwrap()
+    serde_json::to_vec_pretty(
+        &json!({"schema": eid_media::playlist::SCHEMA, "state": s, "sha256": d}),
+    )
+    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -760,6 +765,19 @@ async fn hostile_playlist_state_file_is_rejected_and_confined() {
     cases.push(("empty id".into(), with(&|s| s.items[1].id = String::new())));
     cases.push(("width 0".into(), with(&|s| s.width = 0)));
     cases.push(("width 99".into(), with(&|s| s.width = 99)));
+    // the attempt counter (schema 2) must agree with the status
+    cases.push((
+        "failed with too few attempts".into(),
+        with(&|s| s.items[1].status = Status::Failed),
+    ));
+    cases.push((
+        "pending past the attempt limit".into(),
+        with(&|s| s.items[1].attempts = eid_media::playlist::MAX_ATTEMPTS),
+    ));
+    cases.push((
+        "huge attempt count".into(),
+        with(&|s| s.items[1].attempts = u32::MAX),
+    ));
     cases.push((
         "file on a pending item".into(),
         with(&|s| s.items[1].file = Some("02 - Beta.mp4".into())),
@@ -782,7 +800,7 @@ async fn hostile_playlist_state_file_is_rejected_and_confined() {
     t["state"]["items"][0]["extra"] = json!(1);
     cases.push(("unknown field".into(), serde_json::to_vec(&t).unwrap()));
     let mut t: Value = serde_json::from_slice(&state_file_bytes(&good_state())).unwrap();
-    t["schema"] = json!(2);
+    t["schema"] = json!(9);
     cases.push(("unknown schema".into(), serde_json::to_vec(&t).unwrap()));
     cases.push(("garbage".into(), b"\x00\x01not json".to_vec()));
     cases.push(("empty".into(), vec![]));
@@ -919,11 +937,14 @@ async fn two_runs_on_one_playlist_folder_cannot_overlap() {
 async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
     let e = Env::new().await;
     let url = |e: &Env| purl(e, &e.root.path().join("list.json"), "pl11", "Mixed", "");
+    // explicit restrictions only (owner decision M2): removed by the uploader, private in the
+    // listing, DRM, private by the tool's own error
     let mut l = vec![
         item("a", "Alpha"),
-        item_with("b", "Removed", "error", "private"),
+        item_with("b", "Removed", "error", "removed"),
         item_with("c", "Private", "availability", "private"),
         item_with("d", "Protected", "error", "drm"),
+        item_with("p", "Hidden", "error", "private"),
         item("e", "Echo"),
     ];
     write_list(&e, &l);
@@ -934,8 +955,8 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
         text(&o)
     );
     let folder = folder_of(&o);
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "05 - Echo.mp4"]);
-    for (id, n) in [("b", 2), ("c", 3), ("d", 4)] {
+    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "06 - Echo.mp4"]);
+    for (id, n) in [("b", 2), ("c", 3), ("d", 4), ("p", 5)] {
         let s = item_state(&folder, id);
         assert_eq!(
             (s["number"].as_u64(), s["status"].as_str()),
@@ -946,11 +967,12 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
     }
     let err = String::from_utf8_lossy(&o.stderr).into_owned();
     assert!(err.contains("DRM"), "{err}");
+    assert!(err.contains("removed"), "{err}");
     assert!(
         err.contains("3 downloaded") || err.contains("2 downloaded"),
         "{err}"
     );
-    assert!(err.contains("3 unavailable"), "{err}");
+    assert!(err.contains("4 unavailable"), "{err}");
     // a later run: the unavailable ones are not asked again, a new item gets the next number
     l.push(item("f", "Foxtrot"));
     write_list(&e, &l);
@@ -960,20 +982,18 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
     assert_eq!(download_ids(&e.calls()[before..]), ["f"]);
     assert_eq!(
         visible(&folder),
-        ["01 - Alpha.mp4", "05 - Echo.mp4", "06 - Foxtrot.mp4"]
+        ["01 - Alpha.mp4", "06 - Echo.mp4", "07 - Foxtrot.mp4"]
     );
     let err = String::from_utf8_lossy(&o.stderr).into_owned();
-    assert!(
-        err.contains("2: unavailable")
-            && err.contains("3: unavailable")
-            && err.contains("4: unavailable"),
-        "{err}"
-    );
+    for n in 2..=5 {
+        assert!(err.contains(&format!("{n}: unavailable")), "{n}: {err}");
+        assert!(err.contains(&format!("--retry-failed {n}")), "{n}: {err}");
+    }
     // a temporary failure (rate limit) is a failure, not "unavailable": exit code 1, the
     // number is kept and the next run tries again
     l.push(item_with("g", "Golf", "error", "429"));
     write_list(&e, &l);
-    for _ in 0..2 {
+    for k in 1..=2 {
         let o = playlist(&e, &url(&e), &["-q"]).await;
         assert_eq!(o.status.code(), Some(1), "{}", text(&o));
         assert!(
@@ -983,11 +1003,250 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
         );
         let g = item_state(&folder, "g");
         assert_eq!(
-            (g["number"].as_u64(), g["status"].as_str()),
-            (Some(7), Some("pending"))
+            (
+                g["number"].as_u64(),
+                g["status"].as_str(),
+                g["attempts"].as_u64()
+            ),
+            (Some(8), Some("pending"), Some(k))
         );
     }
     assert_eq!(visible(&folder).len(), 3);
+    // conditions change: the removed video is back; the user asks again by hand for 2, 3, 4.
+    // Item 2 is downloaded; 3 is still private in the listing, so the tool is not even asked;
+    // 4 is still DRM-protected and refused again. Nothing is worked around; 5 was not named and
+    // is not asked.
+    l[1] = item("b", "Removed");
+    write_list(&e, &l);
+    let before = e.calls().len();
+    let o = playlist(&e, &url(&e), &["--retry-failed", "2,3,4"]).await;
+    // the fake logs only real downloads; "<n>: <title>" is printed each time the tool is asked
+    assert_eq!(download_ids(&e.calls()[before..]), ["b"], "{}", text(&o));
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(err.contains("4: Protected") && err.contains("DRM"), "{err}");
+    assert!(
+        !err.contains("3: Private") && !err.contains("5: Hidden"),
+        "the tool was asked for an item it must not be: {err}"
+    );
+    // g (pending, third attempt) also runs and fails: exit code 1
+    assert!(err.contains("8: Golf"), "{err}");
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert_eq!(
+        visible(&folder),
+        [
+            "01 - Alpha.mp4",
+            "02 - Removed.mp4",
+            "06 - Echo.mp4",
+            "07 - Foxtrot.mp4"
+        ]
+    );
+    for (id, n, status) in [
+        ("b", 2, "done"),
+        ("c", 3, "unavailable"),
+        ("d", 4, "unavailable"),
+        ("p", 5, "unavailable"),
+        ("g", 8, "failed"),
+    ] {
+        let s = item_state(&folder, id);
+        assert_eq!(
+            (s["number"].as_u64(), s["status"].as_str()),
+            (Some(n), Some(status)),
+            "{id}"
+        );
+    }
+}
+
+// ------------------------------------------------------------------ retries (P4 review M2)
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn temporary_failures_stop_after_three_runs_and_retry_failed_resets_only_the_named_items() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    let url = purl(&e, &list, "pl13", "Retry", "");
+    let mut l = vec![
+        item("a", "Alpha"),
+        // a warning about a private video, then a vague error: must stay retryable (M2)
+        item_with("v", "Vague", "error", "vague"),
+        item_with("r", "Rated", "error", "429"),
+    ];
+    write_list(&e, &l);
+    let folder = e.out().join("Retry");
+    for k in 1..=3u64 {
+        let before = e.calls().len();
+        let o = playlist(&e, &url, &[]).await;
+        assert_eq!(o.status.code(), Some(1), "run {k}: {}", text(&o));
+        let want: &[&str] = if k == 1 { &["a"] } else { &[] };
+        assert_eq!(download_ids(&e.calls()[before..]), want, "run {k}");
+        // the fake logs only real downloads; "<n>: <title>" is printed each time the tool is asked
+        let err = String::from_utf8_lossy(&o.stderr).into_owned();
+        assert!(
+            err.contains("2: Vague") && err.contains("3: Rated"),
+            "run {k}: {err}"
+        );
+        for (id, n) in [("v", 2), ("r", 3)] {
+            let s = item_state(&folder, id);
+            let status = if k < 3 { "pending" } else { "failed" };
+            assert_eq!(
+                (
+                    s["number"].as_u64(),
+                    s["status"].as_str(),
+                    s["attempts"].as_u64()
+                ),
+                (Some(n), Some(status), Some(k)),
+                "run {k}, {id}"
+            );
+        }
+        if k == 3 {
+            let err = String::from_utf8_lossy(&o.stderr).into_owned();
+            assert!(err.contains("--retry-failed 2"), "{err}");
+            assert!(err.contains("--retry-failed 3"), "{err}");
+        }
+    }
+    // run 4: neither is asked again automatically, and the failure is still shown (exit 1)
+    let before = e.calls().len();
+    let o = playlist(&e, &url, &[]).await;
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(download_ids(&e.calls()[before..]).is_empty());
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(
+        err.contains("not retried automatically any more: 2, 3")
+            && err.contains("--retry-failed 2,3"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("2: Vague") && !err.contains("3: Rated"),
+        "asked again automatically: {err}"
+    );
+    // conditions change for item 3; the user retries 3 only: 2 is left as it is
+    l[2] = item("r", "Rated");
+    write_list(&e, &l);
+    let before = e.calls().len();
+    let o = playlist(&e, &url, &["--retry-failed", "3", "-q"]).await;
+    assert_eq!(download_ids(&e.calls()[before..]), ["r"], "{}", text(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "item 2 still failed: {}",
+        text(&o)
+    );
+    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "03 - Rated.mp4"]);
+    let v = item_state(&folder, "v");
+    assert_eq!(
+        (v["status"].as_str(), v["attempts"].as_u64()),
+        (Some("failed"), Some(3))
+    );
+    // a number that is not failed or unavailable: nothing changes
+    let before = e.calls().len();
+    let o = playlist(&e, &url, &["--retry-failed", "1,9", "-q"]).await;
+    assert!(download_ids(&e.calls()[before..]).is_empty());
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(
+        err.contains("1: not a failed or unavailable item")
+            && err.contains("9: not a failed or unavailable item"),
+        "{err}"
+    );
+    assert_eq!(item_state(&folder, "a")["status"], "done");
+    // `all`: the remaining failed item starts over from attempt 1
+    let before = e.calls().len();
+    let o = playlist(&e, &url, &["--retry-failed", "all"]).await;
+    assert!(
+        download_ids(&e.calls()[before..]).is_empty(),
+        "{}",
+        text(&o)
+    );
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(
+        err.contains("2: Vague") && !err.contains("3: Rated"),
+        "{err}"
+    );
+    let v = item_state(&folder, "v");
+    assert_eq!(
+        (
+            v["number"].as_u64(),
+            v["status"].as_str(),
+            v["attempts"].as_u64()
+        ),
+        (Some(2), Some("pending"), Some(1))
+    );
+    // --retry-failed is for playlists only, and never with --list
+    for bad in [
+        vec!["video", "get", &url, "--retry-failed", "2"],
+        vec!["video", "playlist", &url, "--retry-failed", "2", "--list"],
+        vec!["video", "playlist", &url, "--retry-failed", "0"],
+        vec!["video", "playlist", &url, "--retry-failed"],
+    ] {
+        let o = e.run(&bad).await;
+        assert_eq!(o.status.code(), Some(2), "{bad:?}: {}", text(&o));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn playlist_state_schema_1_is_upgraded_in_place_without_losing_numbers_or_files() {
+    let e = Env::new().await;
+    let list = write_list(
+        &e,
+        &[
+            item("a", "Alpha"),
+            item("b", "Beta"),
+            item("c", "Gamma"),
+            item("d", "Delta"),
+        ],
+    );
+    let url = purl(&e, &list, "pl-v1", "Old", "");
+    // a folder left by the previous version: its state file (written by the pre-M2 code), a
+    // published file and the archive
+    let folder = e.out().join("Old");
+    std::fs::create_dir(&folder).unwrap();
+    let v1 = include_bytes!("../../eid-media/tests/fixtures/playlist-state-v1.json");
+    std::fs::write(folder.join(".eid-playlist.json"), v1).unwrap();
+    std::fs::write(folder.join("01 - Alpha.mp4"), b"published earlier").unwrap();
+    std::fs::write(folder.join(".eid-archive.txt"), "fake a\nfake d\n").unwrap();
+    // --list reads it without writing anything
+    let o = playlist(&e, &url, &["--list"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        std::fs::read(folder.join(".eid-playlist.json")).unwrap(),
+        v1
+    );
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    // a (done) and d (done, archive only) are not downloaded again; b (an old "unavailable",
+    // from the classifier that M2 replaced) and c (pending) are
+    assert_eq!(download_ids(&e.calls()), ["b", "c"]);
+    assert_eq!(
+        visible(&folder),
+        ["01 - Alpha.mp4", "02 - Beta.mp4", "03 - Gamma.mp4"]
+    );
+    assert_eq!(
+        std::fs::read(folder.join("01 - Alpha.mp4")).unwrap(),
+        b"published earlier"
+    );
+    // the state is schema 2 now, with every number, file and done item kept
+    let st: Value =
+        serde_json::from_slice(&std::fs::read(folder.join(".eid-playlist.json")).unwrap()).unwrap();
+    assert_eq!(st["schema"], 2);
+    let items: Vec<(String, u64, String, Value)> = st["state"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap().to_string(),
+                i["number"].as_u64().unwrap(),
+                i["status"].as_str().unwrap().to_string(),
+                i["file"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            ("a".into(), 1, "done".into(), json!("01 - Alpha.mp4")),
+            ("b".into(), 2, "done".into(), json!("02 - Beta.mp4")),
+            ("c".into(), 3, "done".into(), json!("03 - Gamma.mp4")),
+            ("d".into(), 7, "done".into(), Value::Null),
+        ]
+    );
 }
 
 // ------------------------------------------------------------------ secrets

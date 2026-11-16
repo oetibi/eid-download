@@ -29,14 +29,23 @@ pub const MAX_STATE_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_ITEMS: usize = 100_000;
 pub const MAX_NUMBER: u32 = 1_000_000;
 pub const MAX_ID: usize = 256;
+/// Schema written by this version. Schema 1 (before the P4 review, M2) is still read.
+pub const SCHEMA: u32 = 2;
+/// Failed runs of one item before automatic retries stop (owner decision M2, 2026-11-16).
+pub const MAX_ATTEMPTS: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
+    /// To download (also after a temporary failure, while `attempts < MAX_ATTEMPTS`).
     Pending,
     Done,
-    /// Private, removed, sign-in only or DRM: skipped, number kept.
+    /// An explicit access restriction (private, removed, sign-in, membership, country) or DRM:
+    /// not retried automatically, number kept; `--retry-failed` lets the user try again.
     Unavailable,
+    /// `MAX_ATTEMPTS` temporary failures in a row: not retried automatically, number kept,
+    /// shown at every run; `--retry-failed` starts over.
+    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +56,34 @@ pub struct Item {
     pub status: Status,
     /// Published file name (one component inside the playlist folder), once done.
     pub file: Option<String>,
+    /// Temporary failures in a row (`MAX_ATTEMPTS` exactly when `Failed`, less otherwise).
+    pub attempts: u32,
+}
+
+impl Item {
+    /// Record one temporary failure; returns true when automatic retries stop now.
+    pub fn record_failure(&mut self) -> bool {
+        self.attempts = self.attempts.saturating_add(1).min(MAX_ATTEMPTS);
+        if self.attempts >= MAX_ATTEMPTS {
+            self.status = Status::Failed;
+            true
+        } else {
+            self.status = Status::Pending;
+            false
+        }
+    }
+
+    /// `--retry-failed`: a failed or unavailable item is tried again from zero. Returns false
+    /// (and changes nothing) for any other item.
+    pub fn reset_for_retry(&mut self) -> bool {
+        if matches!(self.status, Status::Failed | Status::Unavailable) {
+            self.status = Status::Pending;
+            self.attempts = 0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,16 +102,83 @@ struct OnDisk {
     sha256: String,
 }
 
+/// Schema 1, exactly as written before the M2 change (field order matters for the checksum).
+mod v1 {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Copy, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Status {
+        Pending,
+        Done,
+        Unavailable,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Item {
+        pub id: String,
+        pub number: u32,
+        pub status: Status,
+        pub file: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct State {
+        pub playlist_id: String,
+        pub width: u8,
+        pub items: Vec<Item>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct OnDisk {
+        #[allow(dead_code)]
+        pub schema: u32,
+        pub state: State,
+        pub sha256: String,
+    }
+}
+
+/// Upgrade a verified schema-1 state. Numbers, ids, files, width and `done` are kept as they
+/// are. A schema-1 `unavailable` was set by the old classifier, which also matched warnings
+/// and vague messages (review M2), so it becomes `pending` again: an explicit restriction in
+/// the listing marks it again before any tool runs, an explicit tool error after one try.
+fn upgrade_v1(s: v1::State) -> State {
+    State {
+        playlist_id: s.playlist_id,
+        width: s.width,
+        items: s
+            .items
+            .into_iter()
+            .map(|i| Item {
+                id: i.id,
+                number: i.number,
+                status: match i.status {
+                    v1::Status::Done => Status::Done,
+                    v1::Status::Pending | v1::Status::Unavailable => Status::Pending,
+                },
+                file: i.file,
+                attempts: 0,
+            })
+            .collect(),
+    }
+}
+
 fn bad(m: impl Into<String>) -> MediaError {
     MediaError::Playlist(m.into())
 }
 
-fn digest(s: &State) -> String {
-    let b = serde_json::to_vec(s).expect("state serializes");
-    Sha256::digest(&b)
+fn sha_hex(b: &[u8]) -> String {
+    Sha256::digest(b)
         .iter()
         .map(|x| format!("{x:02x}"))
         .collect()
+}
+
+fn digest(s: &State) -> String {
+    sha_hex(&serde_json::to_vec(s).expect("state serializes"))
 }
 
 fn is_ok_id(id: &str) -> bool {
@@ -102,6 +206,17 @@ impl State {
             }
             if it.number == 0 || it.number > MAX_NUMBER || !numbers.insert(it.number) {
                 return Err(bad(format!("bad or duplicate number {}", it.number)));
+            }
+            let attempts_ok = if it.status == Status::Failed {
+                it.attempts == MAX_ATTEMPTS
+            } else {
+                it.attempts < MAX_ATTEMPTS
+            };
+            if !attempts_ok {
+                return Err(bad(format!(
+                    "bad attempt count {} for a {:?} item",
+                    it.attempts, it.status
+                )));
             }
             match (&it.status, &it.file) {
                 (Status::Done, Some(f)) => {
@@ -178,6 +293,7 @@ pub fn plan<'a>(
                 number: next,
                 status: Status::Pending,
                 file: None,
+                attempts: 0,
             });
         }
     }
@@ -221,25 +337,49 @@ pub fn load(dir: &Path) -> Result<Option<State>, MediaError> {
     if buf.len() as u64 > MAX_STATE_BYTES {
         return Err(bad(format!("{STATE_FILE} is larger than 8 MiB")));
     }
-    let d: OnDisk =
-        serde_json::from_slice(&buf).map_err(|e| bad(format!("{STATE_FILE} is invalid: {e}")))?;
-    if d.schema != 1 {
-        return Err(bad(format!("unknown {STATE_FILE} schema {}", d.schema)));
-    }
-    if digest(&d.state) != d.sha256 {
-        return Err(bad(format!(
+    let invalid = |e: serde_json::Error| bad(format!("{STATE_FILE} is invalid: {e}"));
+    let mismatch = || {
+        bad(format!(
             "{STATE_FILE} checksum mismatch (damaged or edited)"
-        )));
-    }
-    d.state.validate()?;
-    Ok(Some(d.state))
+        ))
+    };
+    // the schema decides the exact shape; each shape is strict (`deny_unknown_fields`)
+    let schema = serde_json::from_slice::<serde_json::Value>(&buf)
+        .map_err(invalid)?
+        .get("schema")
+        .and_then(serde_json::Value::as_u64);
+    let state = match schema {
+        Some(1) => {
+            let d: v1::OnDisk = serde_json::from_slice(&buf).map_err(invalid)?;
+            let raw = serde_json::to_vec(&d.state).expect("state serializes");
+            if sha_hex(&raw) != d.sha256 {
+                return Err(mismatch());
+            }
+            upgrade_v1(d.state)
+        }
+        Some(2) => {
+            let d: OnDisk = serde_json::from_slice(&buf).map_err(invalid)?;
+            if digest(&d.state) != d.sha256 {
+                return Err(mismatch());
+            }
+            d.state
+        }
+        other => {
+            return Err(bad(format!(
+                "unknown {STATE_FILE} schema {}",
+                other.map_or("(none)".to_string(), |s| s.to_string())
+            )))
+        }
+    };
+    state.validate()?;
+    Ok(Some(state))
 }
 
-/// Atomic, private write of the state.
+/// Atomic, private write of the state (always the current [`SCHEMA`]).
 pub fn save(dir: &Path, s: &State) -> Result<(), MediaError> {
     s.validate()?;
     let d = OnDisk {
-        schema: 1,
+        schema: SCHEMA,
         sha256: digest(s),
         state: s.clone(),
     };
@@ -313,6 +453,136 @@ mod tests {
         assert_eq!(item_name(2, 7, "x", "mp4"), "07 - x.mp4");
         assert_eq!(item_name(2, 100, "x", "mp4"), "100 - x.mp4");
         assert_eq!(item_name(3, 7, "", "mp3"), "007 - video.mp3");
+    }
+
+    /// Written by the pre-M2 code (`save` of schema 1), kept byte for byte.
+    const V1: &[u8] = include_bytes!("../tests/fixtures/playlist-state-v1.json");
+
+    #[test]
+    fn playlist_state_schema_1_is_read_and_upgraded_without_losing_data() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(STATE_FILE), V1).unwrap();
+        let st = load(d.path()).unwrap().unwrap();
+        assert_eq!(st.playlist_id, "pl-v1");
+        assert_eq!(st.width, 2);
+        let got: Vec<(&str, u32, Status, Option<&str>, u32)> = st
+            .items
+            .iter()
+            .map(|i| {
+                (
+                    i.id.as_str(),
+                    i.number,
+                    i.status,
+                    i.file.as_deref(),
+                    i.attempts,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a", 1, Status::Done, Some("01 - Alpha.mp4"), 0),
+                // the old classifier's "unavailable" is tried again
+                ("b", 2, Status::Pending, None, 0),
+                ("c", 3, Status::Pending, None, 0),
+                ("d", 7, Status::Done, None, 0),
+            ]
+        );
+        // loading never writes: the old file is untouched until a run saves
+        assert_eq!(std::fs::read(d.path().join(STATE_FILE)).unwrap(), V1);
+        // saving writes schema 2, which loads back to the same state
+        save(d.path(), &st).unwrap();
+        let t: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(d.path().join(STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(t["schema"], SCHEMA);
+        assert_eq!(load(d.path()).unwrap().unwrap(), st);
+        // a schema-1 file is still checked: an edit breaks its checksum, an unknown field or
+        // an `attempts` field (schema 2 only) is refused
+        // line endings depend on the checkout (Windows CI may convert them): edit an LF copy
+        let text = std::str::from_utf8(V1).unwrap().replace("\r\n", "\n");
+        for bad in [
+            text.replace("\"number\": 7", "\"number\": 8"),
+            text.replace(
+                "\"file\": null\n      },\n      {\n        \"id\": \"c\"",
+                "\"file\": null, \"x\": 1\n      },\n      {\n        \"id\": \"c\"",
+            ),
+            text.replace(
+                "\"status\": \"pending\",",
+                "\"status\": \"pending\", \"attempts\": 0,",
+            ),
+            text.replace("\"schema\": 1", "\"schema\": 3"),
+        ] {
+            assert_ne!(bad, text, "the edit did not apply");
+            std::fs::write(d.path().join(STATE_FILE), &bad).unwrap();
+            assert!(load(d.path()).is_err(), "accepted: {bad}");
+        }
+    }
+
+    #[test]
+    fn failed_attempts_stop_at_three_and_retry_resets_only_failed_or_unavailable() {
+        let mut i = Item {
+            id: "x".into(),
+            number: 4,
+            status: Status::Pending,
+            file: None,
+            attempts: 0,
+        };
+        assert!(!i.record_failure());
+        assert_eq!((i.status, i.attempts), (Status::Pending, 1));
+        assert!(!i.record_failure());
+        assert_eq!((i.status, i.attempts), (Status::Pending, 2));
+        assert!(
+            i.record_failure(),
+            "the third failure stops automatic retries"
+        );
+        assert_eq!((i.status, i.attempts), (Status::Failed, MAX_ATTEMPTS));
+        assert!(!i.record_failure() || i.status == Status::Failed);
+        assert_eq!(i.attempts, MAX_ATTEMPTS, "never counts past the limit");
+        assert!(i.reset_for_retry());
+        assert_eq!((i.status, i.attempts, i.number), (Status::Pending, 0, 4));
+        // only failed or unavailable items are reset
+        let mut done = Item {
+            status: Status::Done,
+            file: Some("04 - x.mp4".into()),
+            ..i.clone()
+        };
+        assert!(!done.reset_for_retry());
+        assert_eq!(done.status, Status::Done);
+        let mut gone = Item {
+            status: Status::Unavailable,
+            ..i.clone()
+        };
+        assert!(gone.reset_for_retry());
+        assert_eq!(gone.status, Status::Pending);
+        let mut pending = Item {
+            attempts: 2,
+            ..i.clone()
+        };
+        assert!(!pending.reset_for_retry());
+        assert_eq!(pending.attempts, 2);
+        // a state file must agree with the counter
+        for (status, attempts) in [
+            (Status::Failed, 2),
+            (Status::Pending, 3),
+            (Status::Done, 3),
+            (Status::Unavailable, 9),
+        ] {
+            let st = State {
+                playlist_id: "pl".into(),
+                width: 2,
+                items: vec![Item {
+                    id: "x".into(),
+                    number: 1,
+                    status,
+                    file: None,
+                    attempts,
+                }],
+            };
+            assert!(
+                st.validate().is_err(),
+                "{status:?} with {attempts} attempts"
+            );
+        }
     }
 
     #[test]
