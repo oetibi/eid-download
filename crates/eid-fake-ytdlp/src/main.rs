@@ -66,6 +66,14 @@ fn error_text(kind: &str) -> String {
         "private" => "ERROR: [fake] abc123: Private video. Sign in if you've been granted \
                       access to this video"
             .into(),
+        // P4 review M2: a warning that mentions an explicit restriction, then a vague error
+        // (YouTube also answers so while it limits requests): must stay retryable
+        "vague" => "WARNING: [fake] abc123: Private video in the related list\nERROR: [fake] \
+                    abc123: Video unavailable. This content isn't available."
+            .into(),
+        "removed" => "ERROR: [fake] abc123: Video unavailable. This video has been removed by \
+                      the uploader"
+            .into(),
         "js" => "WARNING: [youtube] No supported JavaScript runtime could be found.\nERROR: \
                  [youtube] abc123: Requested format is not available"
             .into(),

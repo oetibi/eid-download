@@ -21,8 +21,11 @@ use std::path::{Path, PathBuf};
 pub const HELP: &str = "eid video - video and audio through yt-dlp (after your consent)\n\n\
 USAGE:\n  eid video info <page-url> [--yes-i-agree] [--lang ar|en]\n\
   eid video get <page-url> [-d DIR] [--quality best|audio|720p] [--limit RATE] [--yes-i-agree] [--lang ar|en] [-q]\n\
-  eid video playlist <playlist-url> [-d DIR] [--quality Q] [--limit RATE] [--skip 2,5] [--list] [--yes-i-agree] [-q]
-\n                                     every item, numbered 01 - ... in a folder named after the playlist
+  eid video playlist <playlist-url> [-d DIR] [--quality Q] [--limit RATE] [--skip 2,5] [--retry-failed 3,7|all] [--list] [--yes-i-agree] [-q]
+\n                                     every item, numbered 01 - ... in a folder named after the playlist;
+\n                                     an item that failed 3 runs in a row, or that the site refused
+\n                                     explicitly (private, removed, sign-in, country, DRM), is not
+\n                                     tried again automatically: --retry-failed tries it again
 \n  eid video consent [--lang ar|en]   show the consent text and whether it was given\n\
   eid video revoke                   withdraw consent and delete the video tools\n\n\
 The first use asks for consent (or takes --yes-i-agree) and then downloads yt-dlp, FFmpeg and\n\
@@ -56,6 +59,37 @@ pub struct VideoArgs {
     pub skip: Vec<u32>,
     /// Playlist: print the numbered plan and stop.
     pub list_only: bool,
+    /// Playlist: try these failed or unavailable items again from zero (owner decision M2).
+    pub retry_failed: Option<RetrySel>,
+}
+
+/// Which items `--retry-failed` resets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RetrySel {
+    All,
+    Numbers(Vec<u32>),
+}
+
+impl RetrySel {
+    fn covers(&self, n: u32) -> bool {
+        match self {
+            RetrySel::All => true,
+            RetrySel::Numbers(v) => v.contains(&n),
+        }
+    }
+}
+
+/// `2,5` → item numbers (each > 0).
+fn parse_numbers(s: &str) -> Result<Vec<u32>, String> {
+    s.split(',')
+        .map(|n| {
+            n.trim()
+                .parse()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| format!("bad item number {n:?}"))
+        })
+        .collect()
 }
 
 fn parse_quality(s: &str) -> Result<Quality, String> {
@@ -99,6 +133,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         quiet: false,
         skip: vec![],
         list_only: false,
+        retry_failed: None,
     };
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -119,20 +154,18 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
             }
             "-q" => a.quiet = true,
             "--list" => a.list_only = true,
-            "--skip" => {
-                for n in it
+            "--skip" => a.skip.extend(parse_numbers(
+                it.next().ok_or("--skip needs item numbers, e.g. 2,5")?,
+            )?),
+            "--retry-failed" => {
+                let v = it
                     .next()
-                    .ok_or("--skip needs item numbers, e.g. 2,5")?
-                    .split(',')
-                {
-                    let n: u32 = n
-                        .trim()
-                        .parse()
-                        .ok()
-                        .filter(|n| *n > 0)
-                        .ok_or_else(|| format!("bad item number {n:?}"))?;
-                    a.skip.push(n);
-                }
+                    .ok_or("--retry-failed needs item numbers (e.g. 3,7) or all")?;
+                a.retry_failed = Some(if v == "all" {
+                    RetrySel::All
+                } else {
+                    RetrySel::Numbers(parse_numbers(v)?)
+                });
             }
             // `--` ends the options: everything after it is the page URL
             "--" => {
@@ -157,8 +190,11 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
             "this command takes no address".into()
         });
     }
-    if (a.sub != Sub::Playlist) && (!a.skip.is_empty() || a.list_only) {
-        return Err("--skip and --list only apply to `eid video playlist`".into());
+    if (a.sub != Sub::Playlist) && (!a.skip.is_empty() || a.list_only || a.retry_failed.is_some()) {
+        return Err("--skip, --list and --retry-failed only apply to `eid video playlist`".into());
+    }
+    if a.list_only && a.retry_failed.is_some() {
+        return Err("--list only shows the plan; it cannot be combined with --retry-failed".into());
     }
     if !matches!(a.sub, Sub::Get | Sub::Playlist) && (a.dir.is_some() || a.limit_bps.is_some()) {
         return Err("-d and --limit only apply to `eid video get`".into());
@@ -381,7 +417,9 @@ pub fn hint_text(h: Hint) -> &'static str {
         Hint::Drm => "this media is DRM-protected: refused. Eid Download does not get around any protection.",
         Hint::BotCheck => "the site asks to prove you are not a bot. Signing in is not supported; try later or from another network.",
         Hint::SignInRequired => "this media needs signing in (age, membership or private access); that is not supported.",
-        Hint::Unavailable => "the media is private, removed or otherwise unavailable.",
+        Hint::Private => "the media is private; signing in is not supported.",
+        Hint::Removed => "the media was removed (by the uploader, or its account was closed).",
+        Hint::Unavailable => "the site says the media is unavailable without giving a reason; this can be temporary (for example while the site limits requests).",
         Hint::RateLimited => "the site is limiting requests (HTTP 429); wait a while and try again.",
         Hint::Geo => "the media is not available in your country.",
         Hint::MissingJsRuntime => "yt-dlp could not use its JavaScript runtime (deno); reinstall the tools with `eid video revoke` and run again.",
@@ -765,7 +803,7 @@ pub fn playlist_folder(out_dir: &Path, title: &str) -> Result<PathBuf, String> {
 fn unavailable(availability: Option<&str>) -> bool {
     matches!(
         availability,
-        Some("private" | "needs_auth" | "subscriber_only" | "premium_only" | "unavailable")
+        Some("private" | "needs_auth" | "subscriber_only" | "premium_only")
     )
 }
 
@@ -793,13 +831,39 @@ async fn playlist(
     let old = pl::load(&folder).map_err(Fail::media)?;
     let (mut state, planned) = pl::plan(old, &info.id, &info.entries).map_err(Fail::media)?;
     let p = crate::remote::printable;
+    // `--retry-failed`: only the named items, and only if they failed or are unavailable
+    if let Some(sel) = &a.retry_failed {
+        let mut reset = vec![];
+        for (n, e) in &planned {
+            if sel.covers(*n) {
+                if let Some(i) = state.get_mut(&e.id) {
+                    if i.reset_for_retry() {
+                        reset.push(*n);
+                    }
+                }
+            }
+        }
+        if let RetrySel::Numbers(v) = sel {
+            for n in v.iter().filter(|n| !reset.contains(n)) {
+                eprintln!(
+                    "{n}: not a failed or unavailable item of this playlist; nothing to retry"
+                );
+            }
+        }
+        if !a.quiet && !reset.is_empty() {
+            eprintln!("trying again: {reset:?}");
+        }
+    }
     if a.list_only {
         for (n, e) in &planned {
-            let tag = match state.get(&e.id).map(|i| i.status) {
-                Some(Status::Done) => "done",
-                Some(Status::Unavailable) => "unavailable",
-                _ if a.skip.contains(n) => "deselected",
-                _ => "to download",
+            let item = state.get(&e.id);
+            let tag = match item.map(|i| (i.status, i.attempts)) {
+                Some((Status::Done, _)) => "done".to_string(),
+                Some((Status::Unavailable, _)) => "unavailable".to_string(),
+                Some((Status::Failed, _)) => "failed".to_string(),
+                _ if a.skip.contains(n) => "deselected".to_string(),
+                Some((_, k)) if k > 0 => format!("retry {}/{}", k + 1, pl::MAX_ATTEMPTS),
+                _ => "to download".to_string(),
             };
             println!(
                 "{n:0w$}  {tag:<12} {}",
@@ -817,21 +881,48 @@ async fn playlist(
         "mp4"
     };
     let (mut got, mut skipped, mut gone, mut failed) = (0u32, 0u32, 0u32, 0u32);
+    let mut gave_up: Vec<u32> = vec![];
     let empty = |s: &Path| std::fs::read_dir(s).is_ok_and(|mut d| d.next().is_none());
+    // a temporary failure of item `id`: counted, and after MAX_ATTEMPTS no automatic retry
+    let temporary = |state: &mut pl::State, id: &str, n: u32| {
+        if let Some(i) = state.get_mut(id) {
+            if i.record_failure() {
+                eprintln!(
+                    "{n}: failed {} runs in a row; not retried automatically any more. Try \
+                     again with --retry-failed {n}",
+                    pl::MAX_ATTEMPTS
+                );
+            } else {
+                eprintln!(
+                    "{n}: attempt {} of {} failed; it is tried again at the next run",
+                    i.attempts,
+                    pl::MAX_ATTEMPTS
+                );
+            }
+        }
+    };
     for (n, e) in &planned {
         let status = state.get(&e.id).map(|i| i.status);
         if status == Some(Status::Done) {
             continue;
         }
+        if status == Some(Status::Failed) {
+            gave_up.push(*n);
+            continue;
+        }
+        // an explicit restriction, in the listing or recorded earlier: never asked again
+        // automatically, never worked around
         if status == Some(Status::Unavailable) || unavailable(e.availability.as_deref()) {
             if let Some(i) = state.get_mut(&e.id) {
                 i.status = Status::Unavailable;
+                i.attempts = 0;
             }
             pl::save(&folder, &state).map_err(Fail::media)?;
             gone += 1;
             if !a.quiet {
                 eprintln!(
-                    "{n}: unavailable (private, removed or sign-in only); skipped, number kept"
+                    "{n}: unavailable (private, removed, sign-in only, other country or DRM); \
+                     skipped, number kept. If that changes: --retry-failed {n}"
                 );
             }
             continue;
@@ -878,6 +969,7 @@ async fn playlist(
                     let _ = std::fs::remove_dir_all(&staging);
                     if let Some(i) = state.get_mut(&e.id) {
                         i.status = Status::Done;
+                        i.attempts = 0;
                         i.file = dest.file_name().map(|f| f.to_string_lossy().into_owned());
                     }
                     got += 1;
@@ -887,45 +979,66 @@ async fn playlist(
                     let _ = std::fs::remove_dir(&staging);
                     if let Some(i) = state.get_mut(&e.id) {
                         i.status = Status::Done;
+                        i.attempts = 0;
                     }
                 }
                 Err(m) => {
                     failed += 1;
                     eprintln!("{n}: {m}");
+                    temporary(&mut state, &e.id, *n);
                 }
             },
             Err(err) => {
                 if empty(&staging) {
                     let _ = std::fs::remove_dir(&staging);
                 }
-                let permanent = matches!(
+                // only an explicit restriction from an ERROR line stops automatic retries
+                // (hints::classify; owner decision M2)
+                let explicit = matches!(
                     &err,
-                    MediaError::ToolFailed {
-                        hint: Some(
-                            Hint::Unavailable | Hint::SignInRequired | Hint::Drm | Hint::Geo
-                        ),
-                        ..
-                    }
+                    MediaError::ToolFailed { hint: Some(h), .. } if h.blocks_auto_retry()
                 );
                 eprintln!("{n}: {}", describe(&err));
-                if permanent {
+                if explicit {
                     if let Some(i) = state.get_mut(&e.id) {
                         i.status = Status::Unavailable;
+                        i.attempts = 0;
                     }
                     gone += 1;
                 } else {
                     failed += 1;
+                    temporary(&mut state, &e.id, *n);
                 }
             }
         }
         pl::save(&folder, &state).map_err(Fail::media)?;
     }
     drop(locked);
-    eprintln!("{got} downloaded, {skipped} deselected, {gone} unavailable, {failed} failed");
+    let now_given_up: Vec<u32> = planned
+        .iter()
+        .filter(|(_, e)| state.get(&e.id).map(|i| i.status) == Some(Status::Failed))
+        .map(|(n, _)| *n)
+        .filter(|n| !gave_up.contains(n))
+        .collect();
+    eprintln!(
+        "{got} downloaded, {skipped} deselected, {gone} unavailable, {failed} failed, {} not \
+         retried automatically (failed {} runs in a row)",
+        gave_up.len() + now_given_up.len(),
+        pl::MAX_ATTEMPTS
+    );
     println!("{}", folder.display());
-    if failed > 0 {
+    if !gave_up.is_empty() {
+        let list: Vec<String> = gave_up.iter().map(|n| n.to_string()).collect();
+        eprintln!(
+            "not retried automatically any more: {}. Try them again with --retry-failed {}",
+            list.join(", "),
+            list.join(",")
+        );
+    }
+    if failed > 0 || !gave_up.is_empty() {
         return Err(Fail::Other(format!(
-            "{failed} item(s) failed; run again to retry them"
+            "{} item(s) failed; see above",
+            failed as usize + gave_up.len()
         )));
     }
     Ok(())

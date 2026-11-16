@@ -524,7 +524,7 @@ async fn tool_errors_get_hints() {
         ("age", Some(Hint::SignInRequired)),
         ("429", Some(Hint::RateLimited)),
         ("geo", Some(Hint::Geo)),
-        ("private", Some(Hint::Unavailable)),
+        ("private", Some(Hint::Private)),
         ("js", Some(Hint::MissingJsRuntime)),
         ("nothing-known", None),
     ] {
