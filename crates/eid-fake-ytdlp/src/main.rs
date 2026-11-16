@@ -109,10 +109,69 @@ fn info_json(id: &str, title: &str) -> String {
     .to_string()
 }
 
+/// Remux behaviour of the fake (review M4), from the URL. `container=webm` makes the source a
+/// single-file WebM; with `--remux-video=mp4` it is then remuxed the way yt-dlp's remuxer does
+/// it: `<id>.temp.mp4`, renamed to `<id>.mp4`, the source removed. `remux_fail=<flag>`: while
+/// the file exists, a partial `<id>.temp.mp4` is left, "Conversion failed!", exit 1, the source
+/// kept. `remux=broken`: a cut `<id>.mp4`, exit 0; `remux=foreign`: the WebM renamed to `.mp4`, exit 0. `remux_stall=<flag>`: hang before the remux
+/// while the file exists (cancel tests). Without `--remux-video` the WebM stays as it is.
+#[derive(Default)]
+struct Remux {
+    container: Option<String>,
+    mode: Option<String>,
+    fail_flag: Option<String>,
+    stall: Option<String>,
+}
+
+/// A stand-in WebM: the EBML magic, then filler. Not an MP4 (the product's check refuses it).
+fn webm_bytes() -> Vec<u8> {
+    let mut v = vec![0x1a, 0x45, 0xdf, 0xa3];
+    v.extend((0..30_000u32).map(|i| (i % 251) as u8));
+    v
+}
+
+fn remux_to_mp4(flags: &[String], id: &str, source: &str, r: &Remux) {
+    if value(flags, "--remux-video") != Some("mp4") {
+        return; // no remux asked: the source container stays (as yt-dlp does)
+    }
+    if let Some(flag) = &r.stall {
+        out("[VideoRemuxer] Remuxing video");
+        let t = std::time::Instant::now();
+        while std::path::Path::new(flag).exists() && t.elapsed().as_secs() < 600 {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let temp = format!("{id}.temp.mp4");
+    if r.fail_flag
+        .as_deref()
+        .is_some_and(|f| std::path::Path::new(f).exists())
+    {
+        std::fs::write(&temp, &CLIP_MP4[..CLIP_MP4.len() / 3]).unwrap();
+        die(1, "ERROR: Postprocessing: Conversion failed!");
+    }
+    match r.mode.as_deref() {
+        // a "conversion" that only renamed the WebM
+        Some("foreign") => std::fs::rename(source, format!("{id}.mp4")).unwrap(),
+        Some("broken") => {
+            std::fs::write(format!("{id}.mp4"), &CLIP_MP4[..CLIP_MP4.len() / 2]).unwrap();
+            std::fs::remove_file(source).unwrap();
+        }
+        _ => {
+            out(&format!(
+                "[VideoRemuxer] Remuxing video from webm to mp4; Destination: {id}.mp4"
+            ));
+            std::fs::write(&temp, CLIP_MP4).unwrap();
+            std::fs::rename(&temp, format!("{id}.mp4")).unwrap();
+            std::fs::remove_file(source).unwrap();
+        }
+    }
+}
+
 /// "Download" like yt-dlp: write `<id>.<ext>.part` in the working directory, continue an
 /// existing `.part` from its length (resume), optionally stall half-way while `stall_flag`
-/// exists (cancellation tests), then rename to `<id>.<ext>`. Returns the resume offset.
-fn download(flags: &[String], id: &str, stall_flag: Option<&str>) -> u64 {
+/// exists (cancellation tests), then rename to `<id>.<ext>` (and remux, see [`Remux`]).
+/// Returns the resume offset.
+fn download(flags: &[String], id: &str, stall_flag: Option<&str>, remux: &Remux) -> u64 {
     match value(flags, "--output") {
         Some("%(id)s.%(ext)s") => {}
         other => die(
@@ -121,8 +180,11 @@ fn download(flags: &[String], id: &str, stall_flag: Option<&str>) -> u64 {
         ),
     }
     let audio = flags.iter().any(|f| f == "--extract-audio");
-    let (data, ext) = if audio {
+    let webm = webm_bytes();
+    let (data, ext): (&[u8], &str) = if audio {
         (CLIP_MP3, "mp3")
+    } else if remux.container.as_deref() == Some("webm") {
+        (&webm, "webm")
     } else {
         (CLIP_MP4, "mp4")
     };
@@ -130,6 +192,13 @@ fn download(flags: &[String], id: &str, stall_flag: Option<&str>) -> u64 {
     let total = data.len();
     let name = format!("{id}.{ext}");
     let part = format!("{name}.part");
+    if ext == "webm" && std::fs::symlink_metadata(&name).is_ok() {
+        // like yt-dlp: a finished source is not downloaded again, only post-processed
+        out(&format!("[download] {name} has already been downloaded"));
+        remux_to_mp4(flags, id, &name, remux);
+        append_archive(flags, id);
+        return 0;
+    }
     // --download-archive: an id already recorded is skipped (no file, exit 0), like yt-dlp
     let archive = value(flags, "--download-archive");
     let line = format!("fake {id}");
@@ -178,15 +247,23 @@ fn download(flags: &[String], id: &str, stall_flag: Option<&str>) -> u64 {
     f.sync_all().unwrap();
     drop(f);
     std::fs::rename(&part, &name).unwrap();
-    if let Some(a) = archive {
+    if ext == "webm" {
+        remux_to_mp4(flags, id, &name, remux);
+    }
+    // like yt-dlp, an item is recorded only after its post-processing succeeded
+    append_archive(flags, id);
+    resumed
+}
+
+fn append_archive(flags: &[String], id: &str) {
+    if let Some(a) = value(flags, "--download-archive") {
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(a)
             .unwrap_or_else(|e| die(1, &format!("ERROR: archive {a}: {e}")));
-        let _ = writeln!(f, "{line}");
+        let _ = writeln!(f, "fake {id}");
     }
-    resumed
 }
 
 /// `--flat-playlist -J` of a fake playlist whose entries come from the JSON file named by the
@@ -374,7 +451,13 @@ fn main() {
                 }
                 // `stall_id=X`: only item X stalls (playlist tests)
                 let stall = query("stall").filter(|_| query("stall_id").is_none_or(|s| s == id));
-                download(flags, &id, stall.as_deref());
+                let remux = Remux {
+                    container: query("container"),
+                    mode: query("remux"),
+                    fail_flag: query("remux_fail"),
+                    stall: query("remux_stall"),
+                };
+                download(flags, &id, stall.as_deref(), &remux);
             }
         }
         _ => die(9, &format!("fake-yt-dlp: unknown fake URL {}", url.path())),

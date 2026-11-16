@@ -20,6 +20,12 @@ pub const PROGRESS_TEMPLATE: &str = "download:[eid-progress] %(progress.download
      %(progress.eta)s";
 /// JS-runtime option for yt-dlp's YouTube EJS solver: deno without JIT (D15).
 pub const EJS_JITLESS: &str = "youtube-ejs:jitless=true";
+/// Container of every video we publish. `--merge-output-format` applies only when two streams
+/// are merged; a single-file format (the `/b` fallback, or a chosen format id) keeps its own
+/// container unless yt-dlp remuxes it (FFmpeg, no re-encoding): `--remux-video=mp4` (review
+/// M4). yt-dlp skips the remux when the file is already MP4, and fails (keeping the original)
+/// when MP4 cannot hold its codecs.
+pub const REMUX_VIDEO: &str = "mp4";
 /// Longest URL we accept.
 pub const MAX_URL: usize = 8192;
 /// Largest `--max-height` style quality we accept (8K is 4320; leave room).
@@ -44,6 +50,7 @@ pub const ALLOWED: &[(&str, bool)] = &[
     ("--yes-playlist", false),
     ("--format", true),
     ("--merge-output-format", true),
+    ("--remux-video", true),
     ("--output", true),
     ("--newline", false),
     ("--progress-template", true),
@@ -304,6 +311,7 @@ pub fn build(
                 Quality::Best => {
                     a.push(kv("--format", "bv*+ba/b"));
                     a.push(kv("--merge-output-format", "mp4"));
+                    a.push(kv("--remux-video", REMUX_VIDEO));
                 }
                 Quality::MaxHeight(h) => {
                     if *h == 0 || *h > MAX_HEIGHT {
@@ -316,6 +324,7 @@ pub fn build(
                         &format!("bv*[height<={h}]+ba/b[height<={h}]"),
                     ));
                     a.push(kv("--merge-output-format", "mp4"));
+                    a.push(kv("--remux-video", REMUX_VIDEO));
                 }
                 Quality::AudioMp3 => {
                     a.push(kv("--format", "ba/b"));
@@ -327,6 +336,7 @@ pub fn build(
                     check_format_id(id)?;
                     a.push(kv("--format", id));
                     a.push(kv("--merge-output-format", "mp4"));
+                    a.push(kv("--remux-video", REMUX_VIDEO));
                 }
             }
             if let Some(r) = limit_rate {

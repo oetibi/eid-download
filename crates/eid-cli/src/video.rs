@@ -505,19 +505,49 @@ async fn remove_empty_staging(s: &Path) {
     }
 }
 
-/// The finished file in the staging folder: exactly one plain file with the expected extension.
+/// The finished file in the staging folder: exactly one plain file with the expected extension
+/// (an `.mp4` must also be a whole MP4 container). When the tool produced something else (for
+/// example a WebM it could not remux), the error names it; the file stays in staging. A
+/// leftover partial conversion (`<id>.temp.mp4`) is never taken: next to the result it makes
+/// two candidates (refused), alone it fails the container check.
 fn finished_file(staging: &Path, ext: &str) -> Result<PathBuf, String> {
     let mut found = vec![];
+    let mut other = vec![];
     for e in std::fs::read_dir(staging).map_err(|e| e.to_string())? {
         let e = e.map_err(|e| e.to_string())?;
         let md = std::fs::symlink_metadata(e.path()).map_err(|e| e.to_string())?;
         let n = e.file_name().to_string_lossy().into_owned();
-        if md.is_file() && n.ends_with(&format!(".{ext}")) {
+        if !md.is_file() {
+            continue;
+        }
+        if n.ends_with(&format!(".{ext}")) {
             found.push(e.path());
+        } else {
+            other.push(n);
         }
     }
     match found.as_slice() {
+        [one] if ext == "mp4" => {
+            // checked here (a playlist then counts it as a failed item and retries it) and
+            // again through the handle that is published
+            let f = eid_platform::fs::open_regular_nofollow_read(one)
+                .map_err(|e| format!("refusing the staged file: {e}"))?;
+            let mut r = &f;
+            eid_media::container::check_mp4(&mut r).map_err(|e| {
+                format!(
+                    "the tool's {} is {e}; nothing was published, it is kept in {}",
+                    one.file_name().unwrap_or_default().to_string_lossy(),
+                    staging.display()
+                )
+            })?;
+            Ok(one.clone())
+        }
         [one] => Ok(one.clone()),
+        [] if !other.is_empty() => Err(format!(
+            "the tool finished but left no .{ext} file (it left {}); the file is kept in {}",
+            other.join(", "),
+            staging.display()
+        )),
         [] => Err(format!("the tool finished but left no .{ext} file")),
         _ => Err(format!(
             "the tool left {} .{ext} files; refusing to guess",
@@ -548,10 +578,21 @@ pub fn publish_name(title: &str, ext: &str, out_dir: &Path) -> Result<String, St
 }
 
 /// Publish `staged` (opened without following links and checked to be a plain file) into
-/// `out_dir` under `name`, or `name (n)` if taken; never overwrites anything.
+/// `out_dir` under `name`, or `name (n)` if taken; never overwrites anything. An `.mp4` must
+/// be a whole MP4 container, checked through the same handle that is published (review M4);
+/// otherwise nothing is published and the file stays in staging.
 fn publish(staged: &Path, out_dir: &Path, name: &str) -> Result<PathBuf, String> {
     let f = eid_platform::fs::open_regular_nofollow(staged)
         .map_err(|e| format!("refusing the staged file: {e}"))?;
+    if name.ends_with(".mp4") {
+        let mut r = &f;
+        eid_media::container::check_mp4(&mut r).map_err(|e| {
+            format!(
+                "refusing to publish {}: {e}; it is kept in the staging folder",
+                staged.display()
+            )
+        })?;
+    }
     for n in 0..1000u32 {
         let cand = if n == 0 {
             name.to_string()

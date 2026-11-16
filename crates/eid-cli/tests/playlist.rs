@@ -1348,3 +1348,49 @@ async fn guard_secrets_never_reach_outputs_logs_state_archive_or_staging() {
     assert!(folder.join(".eid-playlist.json").exists());
     assert!(folder.join(".eid-archive.txt").exists());
 }
+
+// ------------------------------------------------------------------ remux to MP4 (P4 review M4)
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn playlist_items_in_another_container_are_remuxed_and_a_bad_result_is_a_failed_item() {
+    let e = Env::new().await;
+    let list = write_list(&e, &[item("a", "Alpha"), item("b", "Beta")]);
+    // every item is a single WebM file: remuxed by the tool, checked, published as .mp4
+    let url = purl(&e, &list, "pl14", "Remuxed", "&container=webm");
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    let folder = folder_of(&o);
+    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "02 - Beta.mp4"]);
+    for f in visible(&folder) {
+        assert_eq!(
+            hex(&std::fs::read(folder.join(&f)).unwrap()),
+            hex(&fixture("clip.mp4")),
+            "{f}"
+        );
+    }
+    assert!(staging_dirs(&folder).is_empty());
+    // the tool "succeeds" with a cut MP4: nothing is published, every item is tried (the run
+    // is not stopped by the first one), each counts as a failed attempt and keeps its number
+    let url = purl(&e, &list, "pl15", "Broken", "&container=webm&remux=broken");
+    let o = playlist(&e, &url, &[]).await;
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    let folder = e.out().join("Broken");
+    assert!(visible(&folder).is_empty(), "{:?}", visible(&folder));
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(err.contains("1: Alpha") && err.contains("2: Beta"), "{err}");
+    assert!(err.contains("not a complete MP4"), "{err}");
+    for (id, n) in [("a", 1), ("b", 2)] {
+        let s = item_state(&folder, id);
+        assert_eq!(
+            (
+                s["number"].as_u64(),
+                s["status"].as_str(),
+                s["attempts"].as_u64()
+            ),
+            (Some(n), Some("pending"), Some(1)),
+            "{id}"
+        );
+    }
+    // the bad files stay in their staging folders (never published, never deleted by us)
+    assert_eq!(staging_dirs(&folder).len(), 2);
+}

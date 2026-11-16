@@ -15,6 +15,7 @@
 
 pub mod args;
 pub mod consent;
+pub mod container;
 pub mod env;
 pub mod error;
 pub mod fetch;
