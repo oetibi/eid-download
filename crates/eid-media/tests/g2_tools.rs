@@ -342,9 +342,120 @@ fn ipc_and_native_messaging_cannot_grant_consent() {
             }
         }
     }
+    // The IPC server (`eid serve`) and the remote commands live in eid-cli, which does depend
+    // on eid-media for `eid video` (review P4 M7). Every module they reach through `crate::`
+    // must stay free of the video and consent code.
+    let cli_src = crates.join("eid-cli").join("src");
+    let reachable = cli_modules_reachable_from(&cli_src, &["serve", "remote"]);
+    for m in ["serve", "remote", "args"] {
+        assert!(
+            reachable.iter().any(|r| r == m),
+            "the scan did not reach {m}: {reachable:?}"
+        );
+    }
+    assert!(
+        !reachable.iter().any(|r| r == "video"),
+        "`eid serve` or the remote commands reach the video module: {reachable:?}"
+    );
+    for m in &reachable {
+        let hits =
+            ipc_forbidden_words(&std::fs::read_to_string(cli_module_file(&cli_src, m)).unwrap());
+        assert!(
+            hits.is_empty(),
+            "eid-cli/src/{m}.rs (reachable from IPC) mentions {hits:?}"
+        );
+    }
+    // positive control: the same scan does see the consent code where it really is
+    let video = std::fs::read_to_string(cli_module_file(&cli_src, "video")).unwrap();
+    assert!(ipc_forbidden_words(&video).contains(&"consent"));
+    assert!(ipc_forbidden_words("use crate::video::run;").contains(&"crate::video"));
     // and the only way to build a ConsentText is to render the real text
     let t = consent::consent_text(Lang::En, &Manifest::embedded());
     assert_eq!(t.sha256, hex(t.text.as_bytes()));
+}
+
+/// Words that must not appear in code reachable from IPC / Native Messaging (lowercased match).
+fn ipc_forbidden_words(src: &str) -> Vec<&'static str> {
+    let s = src.to_lowercase();
+    [
+        "consent",
+        "eid_media",
+        "yes-i-agree",
+        "settings.json",
+        "crate::video",
+        "video::",
+    ]
+    .into_iter()
+    .filter(|w| s.contains(w))
+    .collect()
+}
+
+/// `src/<m>.rs` or `src/<m>/mod.rs` of eid-cli; panics if neither exists, so a module the
+/// scan cannot find fails the test instead of being skipped.
+fn cli_module_file(src: &Path, m: &str) -> PathBuf {
+    let a = src.join(format!("{m}.rs"));
+    let b = src.join(m).join("mod.rs");
+    if a.is_file() {
+        a
+    } else if b.is_file() {
+        b
+    } else {
+        panic!("eid-cli module {m} not found (src/{m}.rs or src/{m}/mod.rs)")
+    }
+}
+
+/// Top-level modules named after `crate::` in a source text: `crate::a::x`, `crate::a`,
+/// `use crate::{a, b::c}`.
+fn crate_refs(src: &str) -> Vec<String> {
+    let ident = |s: &str| -> String {
+        s.chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect()
+    };
+    let mut out = vec![];
+    for (i, _) in src.match_indices("crate::") {
+        let rest = &src[i + "crate::".len()..];
+        if let Some(group) = rest.strip_prefix('{') {
+            let end = group.find('}').unwrap_or(group.len());
+            for part in group[..end].split(',') {
+                let n = ident(part.trim());
+                if !n.is_empty() && n != "self" {
+                    out.push(n);
+                }
+            }
+        } else {
+            let n = ident(rest);
+            if !n.is_empty() && n != "self" {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+/// Every eid-cli module reachable from `roots` through `crate::` references (transitive).
+fn cli_modules_reachable_from(src: &Path, roots: &[&str]) -> Vec<String> {
+    let mut seen: Vec<String> = vec![];
+    let mut todo: Vec<String> = roots.iter().map(|r| r.to_string()).collect();
+    while let Some(m) = todo.pop() {
+        if seen.contains(&m) {
+            continue;
+        }
+        let text = std::fs::read_to_string(cli_module_file(src, &m)).unwrap();
+        seen.push(m);
+        todo.extend(crate_refs(&text));
+    }
+    seen
+}
+
+#[test]
+fn the_ipc_reachability_scan_follows_crate_paths() {
+    assert_eq!(
+        crate_refs("use crate::remote::{self, X};\nlet r = crate::args::parse_rate(s);"),
+        ["remote", "args"]
+    );
+    assert_eq!(crate_refs("use crate::{a, b::c, self};"), ["a", "b"]);
+    assert!(crate_refs("no paths here").is_empty());
 }
 
 // ------------------------------------------------------------------ manifest
