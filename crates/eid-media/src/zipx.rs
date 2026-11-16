@@ -24,8 +24,19 @@ pub fn extract_named(
     files: &[&ToolFile],
     out_dir: &Path,
 ) -> Result<Vec<PathBuf>, MediaError> {
+    extract_named_cancellable(archive, files, out_dir, &|| false)
+}
+
+/// [`extract_named`] that stops with [`MediaError::Cancelled`] as soon as `cancelled()`
+/// returns true (checked before every block read), removing what it created.
+pub fn extract_named_cancellable(
+    archive: &Path,
+    files: &[&ToolFile],
+    out_dir: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<PathBuf>, MediaError> {
     let mut created: Vec<PathBuf> = vec![];
-    let r = extract_inner(archive, files, out_dir, &mut created);
+    let r = extract_inner(archive, files, out_dir, &mut created, cancelled);
     if r.is_err() {
         for p in &created {
             let _ = std::fs::remove_file(p);
@@ -39,6 +50,7 @@ fn extract_inner(
     files: &[&ToolFile],
     out_dir: &Path,
     created: &mut Vec<PathBuf>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<(), MediaError> {
     let f = eid_platform::fs::open_regular_nofollow_read(archive)?;
     let mut za = zip::ZipArchive::new(f).map_err(|e| err(format!("not a valid zip: {e}")))?;
@@ -63,6 +75,9 @@ fn extract_inner(
         let mut buf = vec![0u8; 256 * 1024];
         let mut total: u64 = 0;
         loop {
+            if cancelled() {
+                return Err(MediaError::Cancelled);
+            }
             let n = e
                 .read(&mut buf)
                 .map_err(|x| err(format!("entry {entry}: {x}")))?;

@@ -200,6 +200,26 @@ mod test_hooks {
         pub base: String,
     }
 
+    /// `EID_TEST_CANCEL_FILE=<path>`: cancel the run (exactly what Ctrl-C does) once that file
+    /// exists. A real console Ctrl-C cannot be sent to a child on Windows CI (MANUAL-TESTS #14),
+    /// so the tests use this on Windows; on Unix they send a real SIGINT.
+    pub fn cancel_when_file_appears(cancel: &eid_engine::CancellationToken) {
+        let Some(p) = std::env::var_os("EID_TEST_CANCEL_FILE") else {
+            return;
+        };
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                if std::path::Path::new(&p).exists() {
+                    eprintln!("stopping the tool and everything it started...");
+                    c.cancel();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        });
+    }
+
     impl Fetcher for LocalFetcher {
         fn fetch<'a>(
             &'a self,
@@ -248,8 +268,14 @@ fn now_secs() -> u64 {
 }
 
 /// Consent, before anything is downloaded or started. Without a terminal and without
-/// `--yes-i-agree` this refuses immediately: it never waits for input that cannot come.
-async fn ensure_consent(a: &VideoArgs, settings: &SettingsStore, m: &Manifest) -> Result<(), Fail> {
+/// `--yes-i-agree` this refuses immediately: it never waits for input that cannot come. Ctrl-C
+/// while the question waits stops at once (the blocked read is left behind; the process exits).
+async fn ensure_consent(
+    a: &VideoArgs,
+    settings: &SettingsStore,
+    m: &Manifest,
+    cancel: &eid_engine::CancellationToken,
+) -> Result<(), Fail> {
     if consent::is_granted(settings, m).map_err(Fail::media)? {
         return Ok(());
     }
@@ -269,13 +295,20 @@ async fn ensure_consent(a: &VideoArgs, settings: &SettingsStore, m: &Manifest) -
     }
     eprintln!("{}\n", text.text);
     eprint!("Type yes to agree: ");
-    let answer = tokio::task::spawn_blocking(|| {
+    let read = tokio::task::spawn_blocking(|| {
         let mut s = String::new();
         std::io::stdin().read_line(&mut s).map(|_| s)
-    })
-    .await
-    .map_err(|e| Fail::Other(e.to_string()))?
-    .map_err(|e| Fail::Other(e.to_string()))?;
+    });
+    let answer = tokio::select! {
+        r = read => r
+            .map_err(|e| Fail::Other(e.to_string()))?
+            .map_err(|e| Fail::Other(e.to_string()))?,
+        _ = cancel.cancelled() => {
+            return Err(Fail::Cancelled(
+                "stopped; consent was not given and nothing was downloaded or started".into(),
+            ))
+        }
+    };
     if answer.trim().eq_ignore_ascii_case("yes") {
         consent::grant(settings, &text, now_secs()).map_err(Fail::media)?;
         Ok(())
@@ -286,25 +319,45 @@ async fn ensure_consent(a: &VideoArgs, settings: &SettingsStore, m: &Manifest) -
     }
 }
 
+/// Install (if needed) and lock the tools. Ctrl-C during the install cancels the download and
+/// waits until its staging folder is removed; during the hash check it stops at once (the
+/// blocking hash ends on its own and its handles close when the process exits).
 async fn ensure_tools(
     a: &VideoArgs,
     tools: &ToolStore,
     m: &Manifest,
+    cancel: &eid_engine::CancellationToken,
 ) -> Result<eid_media::tools::LockedTools, Fail> {
+    let stopped = || {
+        Fail::Cancelled(
+            "stopped; the video tools were not installed or changed. Run the same command \
+             again to start over."
+                .into(),
+        )
+    };
     match tools.current(m) {
         Ok(_) => {}
         Err(MediaError::NotInstalled) => {
             if !a.quiet {
                 eprintln!("installing the video tools (pinned versions, checked by SHA-256)...");
             }
-            tools
-                .install(m, fetcher().as_ref())
+            match tools
+                .install_cancellable(m, fetcher().as_ref(), cancel)
                 .await
-                .map_err(Fail::media)?;
+            {
+                Ok(_) => {}
+                Err(MediaError::Cancelled) => return Err(stopped()),
+                // a failure caused by the cancel itself is reported as a stop
+                Err(_) if cancel.is_cancelled() => return Err(stopped()),
+                Err(e) => return Err(Fail::media(e)),
+            }
         }
         Err(e) => return Err(Fail::media(e)),
     }
-    tools.lock_blocking(m).await.map_err(Fail::media)
+    tokio::select! {
+        r = tools.lock_blocking(m) => r.map_err(Fail::media),
+        _ = cancel.cancelled() => Err(stopped()),
+    }
 }
 
 /// How a run failed.
@@ -398,6 +451,22 @@ pub fn prepare_staging(out_dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
+/// Remove a staging folder that is still empty after a cancel. The killed tree dies
+/// asynchronously (Windows `TerminateJobObject`), and until it has, the tool's working
+/// directory cannot be removed, so the removal is retried for up to 2 s (AGENTS 6.9). A folder
+/// that is not empty (partial data, for resume) is never touched.
+async fn remove_empty_staging(s: &Path) {
+    for _ in 0..100 {
+        if !std::fs::read_dir(s).is_ok_and(|mut d| d.next().is_none()) {
+            return;
+        }
+        if std::fs::remove_dir(s).is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 /// The finished file in the staging folder: exactly one plain file with the expected extension.
 fn finished_file(staging: &Path, ext: &str) -> Result<PathBuf, String> {
     let mut found = vec![];
@@ -466,6 +535,8 @@ fn publish(staged: &Path, out_dir: &Path, name: &str) -> Result<PathBuf, String>
 /// Run a video command; returns the exit code. Messages go to stderr, the final path (get) or
 /// the information (info) to stdout.
 pub async fn run(a: VideoArgs, cancel: eid_engine::CancellationToken) -> i32 {
+    #[cfg(feature = "test-hooks")]
+    test_hooks::cancel_when_file_appears(&cancel);
     match run_inner(&a, cancel).await {
         Ok(()) => 0,
         Err(Fail::NoConsent(m)) => {
@@ -506,7 +577,7 @@ async fn run_inner(a: &VideoArgs, cancel: eid_engine::CancellationToken) -> Resu
         _ => {}
     }
     let url = MediaUrl::parse(a.url.as_deref().unwrap_or("")).map_err(Fail::media)?;
-    ensure_consent(a, &settings, &m).await?;
+    ensure_consent(a, &settings, &m, &cancel).await?;
     let out_dir = match (&a.sub, &a.dir) {
         (Sub::Get | Sub::Playlist, Some(d)) => d.clone(),
         (Sub::Get | Sub::Playlist, None) => eid_platform::dirs::default_download_dir()
@@ -519,7 +590,7 @@ async fn run_inner(a: &VideoArgs, cancel: eid_engine::CancellationToken) -> Resu
             return Err(Fail::Other(format!("not a folder: {}", out_dir.display())));
         }
     }
-    let locked = ensure_tools(a, &tools, &m).await?;
+    let locked = ensure_tools(a, &tools, &m, &cancel).await?;
     let runner = Runner::new(locked.paths.clone(), |k| std::env::var_os(k)).map_err(Fail::media)?;
     match a.sub {
         Sub::Info => {
@@ -586,7 +657,17 @@ async fn get(
             let _ = std::fs::remove_dir(s);
         }
     };
-    let info = match runner.info(url, &staging).await {
+    // dropping the `-J` future on Ctrl-C kills yt-dlp's whole tree (job / process group)
+    let r = tokio::select! {
+        r = runner.info(url, &staging) => r,
+        _ = cancel.cancelled() => {
+            remove_empty_staging(&staging).await;
+            return Err(Fail::Cancelled(
+                "stopped while reading the media information; nothing was downloaded".into(),
+            ));
+        }
+    };
+    let info = match r {
         Ok(i) => i,
         Err(e) => {
             drop_if_empty(&staging);

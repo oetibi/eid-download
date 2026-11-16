@@ -451,3 +451,179 @@ async fn video_info_prints_the_choices_and_consent_can_be_shown_and_revoked() {
         "{s}"
     );
 }
+
+// ------------------------------------------------------------------ Ctrl-C in every stage (P4 review M1)
+
+/// Ctrl-C for a running `eid`: a real SIGINT on Unix; on Windows the `test-hooks` cancel file,
+/// which fires the same cancellation token as the console handler (a real console Ctrl-C
+/// cannot be sent to a child on CI, MANUAL-TESTS #14).
+fn ctrl_c(eid: &std::process::Child, cancel_file: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        let _ = cancel_file;
+        assert!(command("kill", ["-INT", &eid.id().to_string()])
+            .status()
+            .unwrap()
+            .success());
+    }
+    #[cfg(windows)]
+    {
+        let _ = eid;
+        std::fs::write(cancel_file, b"1").unwrap();
+    }
+}
+
+/// Wait for `eid` to exit within `limit`; on timeout kill it (no orphan) and fail.
+async fn exit_within(mut eid: std::process::Child, limit: Duration) -> std::process::Output {
+    let t = Instant::now();
+    loop {
+        if eid.try_wait().unwrap().is_some() {
+            return tokio::task::spawn_blocking(move || eid.wait_with_output().unwrap())
+                .await
+                .unwrap();
+        }
+        if t.elapsed() > limit {
+            let _ = eid.kill();
+            let _ = eid.wait();
+            panic!("eid did not stop within {limit:?} after Ctrl-C");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn staging_sets(tools: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(tools)
+        .map(|d| {
+            d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(".staging-"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_during_tool_install_stops_at_once_and_leaves_nothing_behind() {
+    let e = Env::new().await;
+    // the yt-dlp asset stops half-way for ten minutes: without a working cancel, eid hangs
+    let half = fake_ytdlp_bytes().len() as u64 / 2;
+    e.srv.set_behavior(
+        "/yt-dlp.exe",
+        Behavior {
+            stall: Some(eid_testserver::Stall {
+                after_bytes: half,
+                duration: Duration::from_secs(600),
+                once: false,
+            }),
+            ..Behavior::default()
+        },
+    );
+    let cancel_file = e.root.path().join("cancel.flag");
+    let out = e.out().display().to_string();
+    let mut c = e.cmd(&[
+        "video",
+        "get",
+        &e.url("video/abc", ""),
+        "-d",
+        &out,
+        "--yes-i-agree",
+        "-q",
+    ]);
+    c.env("EID_TEST_CANCEL_FILE", &cancel_file)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let eid = c.spawn().unwrap();
+    // wait until the tool download is really under way: a staging folder with partial data
+    let tools = e.tools_dir();
+    let t = Instant::now();
+    loop {
+        let busy = !e.srv.stats("/yt-dlp.exe").requests.is_empty()
+            && staging_sets(&tools).iter().any(|s| {
+                std::fs::read_dir(tools.join(s).join("dl")).is_ok_and(|mut d| d.next().is_some())
+            });
+        if busy {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(60),
+            "the tool download never started"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    ctrl_c(&eid, &cancel_file);
+    let o = exit_within(eid, Duration::from_secs(20)).await;
+    assert_eq!(o.status.code(), Some(130), "{}", text(&o));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("stopped"),
+        "{}",
+        text(&o)
+    );
+    // nothing half-installed is left, nothing became current, the tool never ran
+    assert!(
+        staging_sets(&tools).is_empty(),
+        "left behind: {:?}",
+        entries(&tools)
+    );
+    assert!(!tools.join("current.json").exists());
+    assert!(e.calls().is_empty(), "the tool ran");
+    assert!(entries(&e.out()).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_during_media_info_kills_the_tool_and_exits() {
+    let e = Env::new().await;
+    let flag = e.root.path().join("stall-info.flag");
+    std::fs::write(&flag, b"1").unwrap();
+    let url = e.url(
+        "video/abc",
+        &format!("&stall_info={}", pct(&flag.display().to_string())),
+    );
+    let cancel_file = e.root.path().join("cancel.flag");
+    let out = e.out().display().to_string();
+    let mut c = e.cmd(&["video", "get", &url, "-d", &out, "--yes-i-agree", "-q"]);
+    c.env("EID_TEST_CANCEL_FILE", &cancel_file)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let eid = c.spawn().unwrap();
+    // the fake has logged its `-J` call and now hangs while the flag file exists
+    let t = Instant::now();
+    let pid = loop {
+        if let Some(c) = e.calls().first() {
+            assert!(c["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == "--dump-single-json"));
+            break c["pid"].as_u64().unwrap() as u32;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(60),
+            "the -J call never started"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(eid_platform::process::process_is_alive(pid));
+    ctrl_c(&eid, &cancel_file);
+    let o = exit_within(eid, Duration::from_secs(20)).await;
+    assert_eq!(o.status.code(), Some(130), "{}", text(&o));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("stopped"),
+        "{}",
+        text(&o)
+    );
+    // the tool was killed (its flag still says "hang"), and the empty staging folder is gone
+    let t = Instant::now();
+    while eid_platform::process::process_is_alive(pid) {
+        assert!(
+            t.elapsed() < Duration::from_secs(15),
+            "the tool outlived the cancel"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(flag.exists());
+    assert!(
+        entries(&e.out()).is_empty(),
+        "left behind: {:?}",
+        entries(&e.out())
+    );
+    assert_eq!(e.calls().len(), 1, "no download after the cancel");
+}

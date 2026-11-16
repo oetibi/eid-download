@@ -37,6 +37,8 @@ pub enum MediaError {
     Fetch(String),
     #[error("{file} is in use by another program (open for writing or deleting); refused")]
     ToolBusy { file: String },
+    #[error("stopped (cancelled)")]
+    Cancelled,
     #[error("could not run the tool: {0}")]
     Io(#[from] std::io::Error),
 }
