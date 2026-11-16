@@ -119,6 +119,9 @@ pub struct Supervised {
     tree: Tree,
     out: Option<JoinHandle<io::Result<Captured>>>,
     err: Option<JoinHandle<io::Result<Captured>>>,
+    /// The direct child has been reaped: from here on its id may belong to someone else, so
+    /// the tree must never be signalled again (P4 review M5).
+    reaped: bool,
 }
 
 fn invalid(msg: String) -> io::Error {
@@ -194,6 +197,7 @@ pub fn spawn(spec: ChildSpec) -> io::Result<Supervised> {
         tree,
         out,
         err,
+        reaped: false,
     })
 }
 
@@ -235,9 +239,13 @@ impl Supervised {
 
     /// Wait for the direct child to exit, kill whatever is left of its tree, and collect the
     /// output once both pipes reached end-of-file. Dropping this future kills the tree.
+    ///
+    /// The rest of the tree is killed while the direct child still holds its id (on Unix: it
+    /// has exited but is not reaped yet, so its process-group id cannot be reused); only then
+    /// is it reaped, and after that the tree is never signalled again.
     pub async fn wait(mut self) -> io::Result<Finished> {
-        let status = self.child.wait().await?;
-        self.tree.kill();
+        let status = self.tree.finish(&mut self.child).await?;
+        self.reaped = true;
         let stdout = join(self.out.take()).await?;
         let stderr = join(self.err.take()).await?;
         Ok(Finished {
@@ -250,8 +258,12 @@ impl Supervised {
 
 impl Drop for Supervised {
     fn drop(&mut self) {
-        self.tree.kill();
-        let _ = self.child.start_kill();
+        // after a reap the id is free (Unix: a new process group may already use it); the
+        // tree was killed before the reap in `wait`
+        if !self.reaped {
+            self.tree.kill();
+            let _ = self.child.start_kill();
+        }
     }
 }
 
@@ -410,6 +422,17 @@ mod imp {
             // SAFETY: valid job handle; terminating an empty or finished job is harmless.
             unsafe { TerminateJobObject(self.job.0, 1) };
         }
+
+        /// Wait for the direct child, then kill what is left of the job. The job handle is
+        /// ours alone, so killing after the child is reaped cannot reach anyone else.
+        pub async fn finish(
+            &self,
+            child: &mut tokio::process::Child,
+        ) -> io::Result<std::process::ExitStatus> {
+            let status = child.wait().await?;
+            self.kill();
+            Ok(status)
+        }
     }
 
     impl Pending {
@@ -484,16 +507,89 @@ mod imp {
     use std::io;
 
     /// The child's process group (the child is its leader).
+    ///
+    /// A process-group id is the leader's pid. While the leader exists, even as an exited but
+    /// unreaped zombie, that id cannot be reused, so `killpg` reaches only our group. Once the
+    /// leader is reaped and the group is empty, the id is free and a new, unrelated group may
+    /// take it: the group is therefore signalled only while the leader is still our unreaped
+    /// child (P4 review M5).
     pub struct Tree {
         pgid: i32,
+        #[cfg(test)]
+        pub(super) stats: std::sync::Arc<KillStats>,
+    }
+
+    /// How often the group was signalled, and how often a signal was withheld because the
+    /// leader was already reaped (unit tests only).
+    #[cfg(test)]
+    #[derive(Default, Debug)]
+    pub struct KillStats {
+        pub sent: std::sync::atomic::AtomicUsize,
+        pub withheld_after_reap: std::sync::atomic::AtomicUsize,
     }
 
     pub struct Pending;
+
+    /// `waitid(P_PID, pid, WEXITED | WNOHANG | WNOWAIT)`: never reaps. `Ok(Some(true))` = the
+    /// child has exited (zombie), `Ok(Some(false))` = still running, `Ok(None)` = not our
+    /// child any more (already reaped).
+    pub(super) fn peek_exit(pid: i32) -> io::Result<Option<bool>> {
+        let id = libc::id_t::try_from(pid).map_err(io::Error::other)?;
+        // SAFETY: zero is a valid bit pattern for siginfo_t; `info` is a valid out pointer.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: plain libc call with a valid out pointer.
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                id,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if r != 0 {
+            let e = io::Error::last_os_error();
+            return if e.raw_os_error() == Some(libc::ECHILD) {
+                Ok(None)
+            } else {
+                Err(e)
+            };
+        }
+        // SAFETY: waitid succeeded, so `info` was filled in; with WNOHANG and nothing to report
+        // si_pid stays 0.
+        Ok(Some(unsafe { info.si_pid() } != 0))
+    }
 
     impl Tree {
         pub fn start(c: &mut tokio::process::Command) -> io::Result<Pending> {
             c.process_group(0);
             Ok(Pending)
+        }
+
+        /// Wait until the leader has exited **without reaping it**, kill the rest of its group
+        /// while its id is still held, then reap it.
+        pub async fn finish(
+            &self,
+            child: &mut tokio::process::Child,
+        ) -> io::Result<std::process::ExitStatus> {
+            use tokio::signal::unix::{signal, SignalKind};
+            // registered before the first check, so a SIGCHLD in between is not lost; the
+            // timeout is only a safety net
+            let mut sigchld = signal(SignalKind::child())?;
+            loop {
+                match peek_exit(self.pgid)? {
+                    Some(true) => break,
+                    Some(false) => {
+                        tokio::select! {
+                            _ = sigchld.recv() => {}
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+                        }
+                    }
+                    // someone else reaped it: its id may already be reused, do not signal
+                    None => return child.wait().await,
+                }
+            }
+            self.kill();
+            child.wait().await
         }
 
         pub fn contains(&self, pid: u32) -> io::Result<bool> {
@@ -506,10 +602,23 @@ mod imp {
             Ok(g == self.pgid)
         }
 
+        /// Kill the group, but only while the leader is still our unreaped child (see the type
+        /// docs). Only this object reaps the leader, and never at the same time as this call,
+        /// so the check cannot go stale before `killpg`.
         pub fn kill(&self) {
-            // SAFETY: plain libc call; ESRCH (group already gone) is fine. A process group id
-            // is not reused while any member of the group exists.
+            if !matches!(peek_exit(self.pgid), Ok(Some(_))) {
+                #[cfg(test)]
+                self.stats
+                    .withheld_after_reap
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+            // SAFETY: plain libc call; ESRCH (group already gone) is fine.
             unsafe { libc::killpg(self.pgid, libc::SIGKILL) };
+            #[cfg(test)]
+            self.stats
+                .sent
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -520,6 +629,8 @@ mod imp {
                 .ok_or_else(|| io::Error::other("child has no pid"))?;
             Ok(Tree {
                 pgid: i32::try_from(pid).map_err(io::Error::other)?,
+                #[cfg(test)]
+                stats: Default::default(),
             })
         }
     }
@@ -557,6 +668,89 @@ mod tests {
             assert!(e.to_string().contains("batch"), "{e}");
         }
         assert!(validate_program(&abs.join("yt-dlp.exe")).is_ok());
+    }
+
+    /// `/bin/sh -c <script>` with a minimal environment, stdout lines forwarded.
+    #[cfg(unix)]
+    fn sh(script: &str, lines: mpsc::Sender<Vec<u8>>) -> ChildSpec {
+        let mut stdout = StreamSpec::capture(4096, Keep::Head);
+        stdout.lines = Some(lines);
+        ChildSpec {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), script.into()],
+            cwd: std::env::temp_dir(),
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            stdout,
+            stderr: StreamSpec::capture(4096, Keep::Tail),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn first_pid(rx: &mut mpsc::Receiver<Vec<u8>>) -> u32 {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the child never printed its grandchild's pid")
+            .unwrap();
+        String::from_utf8(line).unwrap().trim().parse().unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn wait_dead(pid: u32, what: &str) {
+        let t = std::time::Instant::now();
+        while process_is_alive(pid) {
+            assert!(
+                t.elapsed() < std::time::Duration::from_secs(15),
+                "{what} {pid} is still alive"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    // P4 review M5: the leader exits at once and leaves a grandchild in its group. The group
+    // must be killed while the leader is still an unreaped zombie (its id cannot be reused
+    // then), and after the reap nothing may signal that id again, not even Drop.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_process_group_is_killed_before_its_leader_is_reaped() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (tx, mut rx) = mpsc::channel(8);
+        let sup = spawn(sh("sleep 600 & echo $!; exit 0", tx)).unwrap();
+        let leader = sup.id().unwrap();
+        let stats = sup.tree.stats.clone();
+        let grandchild = first_pid(&mut rx).await;
+        // the grandchild holds the stdout pipe: `wait` only returns once the group was killed
+        let f = tokio::time::timeout(std::time::Duration::from_secs(30), sup.wait())
+            .await
+            .expect("wait never returned: the leftover grandchild was not killed")
+            .unwrap();
+        assert!(f.status.success(), "{:?}", f.status);
+        assert_eq!(stats.sent.load(SeqCst), 1, "the group was signalled once");
+        assert_eq!(
+            stats.withheld_after_reap.load(SeqCst),
+            0,
+            "something tried to signal the group after the leader was reaped"
+        );
+        assert!(
+            matches!(imp::peek_exit(leader as i32), Ok(None)),
+            "the leader was not reaped"
+        );
+        wait_dead(grandchild, "grandchild").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_a_running_child_signals_its_group_once_while_the_leader_exists() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (tx, mut rx) = mpsc::channel(8);
+        let sup = spawn(sh("sleep 600 & echo $!; sleep 600", tx)).unwrap();
+        let leader = sup.id().unwrap();
+        let stats = sup.tree.stats.clone();
+        let grandchild = first_pid(&mut rx).await;
+        drop(sup);
+        assert_eq!(stats.sent.load(SeqCst), 1);
+        assert_eq!(stats.withheld_after_reap.load(SeqCst), 0);
+        wait_dead(leader, "leader").await;
+        wait_dead(grandchild, "grandchild").await;
     }
 
     #[test]
