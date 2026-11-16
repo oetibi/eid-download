@@ -5,7 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-tokio = { version = "1", features = ["net", "io-util", "time", "process", "rt", "sync"] }
+tokio = { version = "1", features = ["net", "io-util", "time", "process", "rt", "sync", "signal"] }
 getrandom = "0.2"
 serde_json = "1"
 
