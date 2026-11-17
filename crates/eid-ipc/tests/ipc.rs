@@ -24,6 +24,7 @@ impl Handler for Counting {
             Command::Shutdown {} => Ok(json!({})),
             Command::Pause { .. } => Err("no such item".into()),
             Command::Resume { .. } => panic!("handler bug"),
+            Command::Show {} => Ok(json!({})),
         }
     }
 }

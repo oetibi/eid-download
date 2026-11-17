@@ -25,3 +25,12 @@ getrandom 0.2 (MIT/Apache-2.0، كانت في Cargo.lock أصلاً) لتوكن 
 
 ## فحص الرخص (`cargo deny`، D10)
 `deny.toml` في جذر المستودع؛ CI (`ci-linux`) يشغّل `cargo deny check` **إلزامياً** (لا `continue-on-error`). الرخص المسموحة فيه هي الموجودة فعلاً في شجرة التبعيات (فُحصت من `cargo metadata` لهدفي Windows في 2026-11-15): MIT، Apache-2.0، ISC، BSD-3-Clause، Unicode-3.0، Zlib، BSL-1.0، Unlicense، CDLA-Permissive-2.0 (بيانات `webpki-roots`). حزمنا `publish = false` وبلا رخصة بعد (ADR-0008) فتُتجاهل كحزم خاصة. أي رخصة جديدة = تعديل `deny.toml` + سطر هنا.
+
+## مكتبات Rust (P5 — الواجهة، 2026-11-17)
+حزمة `eid-gui` (الملف التنفيذي `EidDownload.exe`): **tauri 2** (MIT OR Apache-2.0) بميزة `custom-protocol` (الصفحة مضمَّنة في الملف التنفيذي، بلا خادم تطوير)، **tauri-build 2** (MIT OR Apache-2.0)، **tauri-plugin-dialog 2** (اختيار مجلد الحفظ ورسائل البدء؛ يستدعى من Rust فقط)، **tauri-plugin-opener 2** (لـ«إظهار في المجلد» فقط — لا يُفتح ولا يُشغَّل أي ملف منزَّل). كلها MIT OR Apache-2.0. الواجهة HTML/CSS/JS بلا npm ولا أي مكتبة JS.
+**رخصتان جديدتان في `deny.toml` (قُبلتا مع قرار MIT، ADR-0008):** **MPL-2.0** — `cssparser` و`cssparser-macros` و`selectors` و`dtoa-short` (يجلبها `tauri-utils` لمعالجة HTML) و`option-ext` (عبر `dirs`)؛ رخصة نسخ متروك على مستوى الملف فقط، نستعملها دون تعديل فلا تفرض شيئاً على كودنا. **Apache-2.0 WITH LLVM-exception** — `target-lexicon` (بناء Linux فقط؛ استثناء LLVM أوسع من Apache-2.0). البقية من الشجرة الجديدة MIT/Apache-2.0 (فُحصت من `cargo metadata` لهدفي Windows-msvc وLinux).
+مراجعة PR #32 (بلا مكتبة جديدة في Cargo.lock): ميزة windows-sys `Win32_UI_WindowsAndMessaging` (MIT/Apache-2.0) داخل eid-platform لرسالة فشل البدء (`MessageBoxW`).
+على Linux يحتاج بناء الحزمة مكتبات النظام `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libxdo-dev` (خطوة في `ci-linux`).
+
+## الرخصة وإشعارات الطرف الثالث (2026-11-17)
+المشروع **MIT** (ADR-0008). ملف الإصدار يحمل `LICENSE.txt` و`THIRD-PARTY-LICENSES.html`؛ الأخير يولّده **cargo-about** (MIT OR Apache-2.0؛ أداة بناء في CI عبر `taiki-e/install-action`، لا تُشحن ولا تدخل Cargo.lock) من `about.toml` (نفس رخص `deny.toml`، هدف `x86_64-pc-windows-msvc`، بلا تبعيات البناء والاختبار) والقالب `about.hbs`، ويفشل عند أي رخصة غير مقبولة.

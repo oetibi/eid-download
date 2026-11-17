@@ -241,7 +241,7 @@ HKCU\Software\Mozilla\NativeMessagingHosts\com.eid.download
 
 ## 6) المعماريّة الموصى بها لـ Eid Download
 
-الصورة المرجعية في `docs/architecture-ref.png` (نموذج «زاجل»: واجهة Tauri+Svelte، سطر أوامر، محرك Rust، Native Messaging، وyt-dlp/FFmpeg بموافقة المستخدم) مناسبة جداً. **التوصية: Tauri 2 + Svelte للواجهة**، لا Slint، للأسباب التالية:
+الرسم المرجعي الذي اطّلع عليه المالك (غير منشور في المستودع؛ نموذج «زاجل»: واجهة Tauri+Svelte، سطر أوامر، محرك Rust، Native Messaging، وyt-dlp/FFmpeg بموافقة المستخدم) مناسبة جداً. **التوصية: Tauri 2 + Svelte للواجهة**، لا Slint، للأسباب التالية:
 
 - مطابق لما طلبه المستخدم بصرياً (RTL عربي، ثيم فاتح/داكن، تصميم ويب أنيق أسهل في Svelte/CSS).
 - WebView2 موجود على ويندوز 10 الحديث وويندوز 11؛ المثبّت يعالج النقص.

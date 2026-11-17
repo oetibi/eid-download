@@ -12,6 +12,7 @@ pub mod native_host;
 pub mod net;
 pub mod process;
 pub mod time;
+pub mod ui;
 pub const IS_WINDOWS: bool = cfg!(windows);
 /// Longest full path (in UTF-16 code units, without the terminating NUL) that ordinary file APIs
 /// accept: Windows `MAX_PATH` = 260. Windows only works beyond it with `\\?\` paths plus a

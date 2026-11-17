@@ -402,8 +402,13 @@ async fn socket_watch_catches_a_brief_cap_plus_one_peak() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn socket_closes_mid_download_when_segments_finish_or_split() {
     let _serial = serial().await;
+    // The other connections are throttled too (4 MB/s each): unthrottled, a release build
+    // moves the 8 MiB over loopback faster than one sampler interval (~6 ms), the sampler then
+    // only ever sees the slow first connection and the timeline reads [0, 1, 0]
+    // (ci-linux, check_required --release, PR #1 of the public repository).
     let b = Behavior {
         slow_connections: Some((1, 400_000)),
+        throttle_bps: Some(4_000_000),
         ..Behavior::default()
     };
     let content = Content::Generated {

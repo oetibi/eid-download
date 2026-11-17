@@ -90,7 +90,7 @@ pub fn parse(args: &[String]) -> Result<ServeArgs, String> {
     Ok(a)
 }
 
-fn config_for(a: &ServeArgs) -> Config {
+pub fn config_for(a: &ServeArgs) -> Config {
     let mut cfg = Config::default();
     cfg.connections = a.connections.unwrap_or(cfg.connections);
     cfg.job_limit_bps = a.limit_bps;
@@ -113,6 +113,17 @@ fn config_for(a: &ServeArgs) -> Config {
     cfg
 }
 
+/// What `ping` answers in its `app` field: the headless server or the desktop app.
+pub const APP_SERVE: &str = "serve";
+pub const APP_GUI: &str = "gui";
+
+/// The per-user queue file shared by `eid serve` and the desktop app (one owner at a time).
+pub fn default_queue_file() -> Result<PathBuf, String> {
+    Ok(eid_platform::ipc::config_dir()
+        .ok_or("no per-user config directory; pass --queues FILE")?
+        .join("queues.json"))
+}
+
 /// Items returned by `list` (the response must stay below the 1 MiB frame limit).
 const MAX_LIST: usize = 1500;
 
@@ -128,14 +139,17 @@ fn status_name(s: Status) -> &'static str {
 
 /// The IPC command handler over the scheduler. It never lets the caller choose a directory and
 /// never returns a URL with credentials or a query string.
-fn handler(
+pub fn handler(
     sched: Scheduler,
     queue: String,
     cancel: CancellationToken,
     stopped: Arc<std::sync::atomic::AtomicBool>,
+    app: &'static str,
 ) -> impl Fn(Command) -> Result<serde_json::Value, String> + Send + Sync + 'static {
     move |cmd| match cmd {
-        Command::Ping {} => Ok(json!({"pong": true, "version": env!("CARGO_PKG_VERSION")})),
+        Command::Ping {} => {
+            Ok(json!({"pong": true, "version": env!("CARGO_PKG_VERSION"), "app": app}))
+        }
         Command::Add {
             url,
             subdir,
@@ -183,6 +197,9 @@ fn handler(
             .resume_item(item)
             .map(|_| json!({}))
             .map_err(|e| e.to_string()),
+        // the desktop app answers this itself (eid-gui wraps this handler); the headless
+        // server has no window to show
+        Command::Show {} => Err("no window: this is the background server".into()),
     }
 }
 
@@ -227,9 +244,7 @@ pub async fn run(a: ServeArgs, cancel: CancellationToken) -> Result<i32, String>
     let dir = std::path::absolute(&dir).map_err(|e| e.to_string())?;
     let qfile = match &a.queues {
         Some(p) => p.clone(),
-        None => eid_platform::ipc::config_dir()
-            .ok_or("no per-user config directory; pass --queues FILE")?
-            .join("queues.json"),
+        None => default_queue_file()?,
     };
     if let Some(parent) = qfile.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -259,9 +274,7 @@ pub async fn run(a: ServeArgs, cancel: CancellationToken) -> Result<i32, String>
     });
     let sched = Scheduler::open(
         SchedulerConfig::new(&qfile),
-        Arc::new(EngineRunner {
-            cfg: config_for(&a),
-        }),
+        Arc::new(EngineRunner::new(config_for(&a))),
         Arc::new(SystemClock),
         Arc::new(NoPower),
         sink,
@@ -287,6 +300,7 @@ pub async fn run(a: ServeArgs, cancel: CancellationToken) -> Result<i32, String>
         a.queue.clone(),
         cancel.clone(),
         stopped.clone(),
+        APP_SERVE,
     ));
     let running = match eid_ipc::start(&ep, h, ServeOptions::default()) {
         Ok(r) => r,
@@ -302,7 +316,12 @@ pub async fn run(a: ServeArgs, cancel: CancellationToken) -> Result<i32, String>
     }
     eprintln!("eid serve: ready (endpoint '{}')", ep.name);
     let r = sched.run(cancel.clone(), false).await;
+    // The queue file is final before the endpoint goes away: the desktop app takes over the
+    // queue as soon as it sees the endpoint vanish. The second flush keeps an `add` that arrived
+    // while the first one was being written.
+    let first = sched.flush().await;
     running.stop().await;
+    first.map_err(|e| e.to_string())?;
     sched.flush().await.map_err(|e| e.to_string())?;
     r.map_err(|e| e.to_string())?;
     // Ctrl-C = 130; a requested `eid stop` is a normal exit

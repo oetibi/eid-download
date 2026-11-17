@@ -28,9 +28,12 @@ allow = [
     "BSL-1.0",
     "Unlicense",
     "CDLA-Permissive-2.0", # webpki-roots (Mozilla root store data)
+    # P5 desktop app (Tauri 2), 2026-11-17 — accepted with the MIT decision (ADR-0008):
+    "MPL-2.0",                       # cssparser, selectors, dtoa-short (tauri-utils HTML), option-ext (dirs); file-level copyleft, used unmodified
+    "Apache-2.0 WITH LLVM-exception", # target-lexicon (Linux build of the Tauri crate)
 ]
 confidence-threshold = 0.9
-# Our own crates are `publish = false` and carry no license yet (ADR-0008).
+# Our own crates are MIT (ADR-0008) and `publish = false`.
 private = { ignore = true }
 
 [bans]

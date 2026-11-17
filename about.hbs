@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Eid Download - third-party licenses</title>
+<style>body{font-family:sans-serif;max-width:60em;margin:2em auto;padding:0 1em}pre{white-space:pre-wrap;background:#f4f4f4;padding:1em}</style></head>
+<body>
+<h1>Third-party licenses</h1>
+<p>Eid Download is MIT licensed (see LICENSE.txt). It includes the following Rust crates, each under
+its own license. The source code of every crate listed here, including those under MPL-2.0, is
+available unmodified from crates.io at the linked address.</p>
+<h2>Overview</h2>
+<ul>
+{{#each overview}}<li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/each}}</ul>
+{{#each licenses}}
+<h2 id="{{id}}">{{name}}</h2>
+<p>Used by:</p>
+<ul>
+{{#each used_by}}<li><a href="https://crates.io/crates/{{crate.name}}/{{crate.version}}">{{crate.name}} {{crate.version}}</a></li>
+{{/each}}</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>
