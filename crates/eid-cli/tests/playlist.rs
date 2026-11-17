@@ -123,11 +123,11 @@ fn has_bidi(s: &str) -> bool {
 }
 
 /// Start `eid video playlist` in the background (for the stall tests).
-fn spawn_eid(e: &Env, args: &[&str]) -> std::process::Child {
+fn spawn_eid(e: &Env, args: &[&str]) -> Running {
     let mut c = e.cmd(args);
     c.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    c.spawn().unwrap()
+    Running::spawn(&mut c)
 }
 
 /// Wait until the download of `id` has stalled half-way; returns (pid of the tool, `.part`).
@@ -155,7 +155,7 @@ async fn wait_for_stall(e: &Env, id: &str) -> (u32, PathBuf) {
 
 /// Stop eid like Ctrl-C (Unix) or a hard kill (Windows: the job object must take the tool
 /// down), wait for it and for the tool to be gone.
-async fn stop_eid(mut eid: std::process::Child, tool_pid: u32) {
+async fn stop_eid(mut eid: Running, tool_pid: u32) {
     #[cfg(unix)]
     assert!(command("kill", ["-INT", &eid.id().to_string()])
         .status()
@@ -1205,7 +1205,7 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
     assert!(err.contains("DRM"), "{err}");
     assert!(err.contains("removed"), "{err}");
     assert!(
-        err.contains("3 downloaded") || err.contains("2 downloaded"),
+        err.contains("2 downloaded, 0 deselected, 4 unavailable, 0 failed"),
         "{err}"
     );
     assert!(err.contains("4 unavailable"), "{err}");
@@ -1293,6 +1293,165 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
 }
 
 // ------------------------------------------------------------------ retries (P4 review M2)
+
+/// P4 review m3: one item that cannot be published does not end the run. The items after it
+/// are still downloaded and the summary is printed; the item counts as a temporary failure
+/// (M2) and keeps its download in staging, so the next run publishes it. The publish error is
+/// injected with the `test-hooks` hook `EID_TEST_PUBLISH_FAIL` (an I/O error at that name: a
+/// real one, such as a full disk or a refused path, cannot be caused per item portably).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_item_that_cannot_be_published_does_not_end_the_playlist_run() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    let url = purl(&e, &list, "pl20", "Pub", "");
+    write_list(
+        &e,
+        &[item("a", "Alpha"), item("b", "Bravo"), item("c", "Charlie")],
+    );
+    let out = e.out().display().to_string();
+    let mut c = e.cmd(&["video", "playlist", &url, "-d", &out, "--yes-i-agree"]);
+    c.env("EID_TEST_PUBLISH_FAIL", "02 - Bravo.mp4");
+    let o = tokio::task::spawn_blocking(move || c.output().unwrap())
+        .await
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    let folder = folder_of(&o);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert_eq!(download_ids(&e.calls()), ["a", "b", "c"], "{err}");
+    assert!(err.contains("2: cannot publish"), "{err}");
+    assert!(
+        err.contains("2 downloaded, 0 deselected, 0 unavailable, 1 failed"),
+        "no summary: {err}"
+    );
+    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "03 - Charlie.mp4"]);
+    let b = item_state(&folder, "b");
+    assert_eq!(
+        (
+            b["status"].as_str(),
+            b["attempts"].as_u64(),
+            b["number"].as_u64()
+        ),
+        (Some("pending"), Some(1), Some(2)),
+        "{err}"
+    );
+    assert_eq!(item_state(&folder, "c")["status"], "done");
+    assert_eq!(staging_dirs(&folder).len(), 1, "{:?}", entries(&folder));
+    // the next run (no fault) publishes the kept download itself under its number: the file
+    // in staging gets a marked modification time, which the published file must carry (the
+    // archive lists the item, so the tool writes nothing new)
+    let st = folder.join(&staging_dirs(&folder)[0]);
+    let kept: Vec<_> = entries(&st);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let mark = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(st.join(&kept[0]))
+        .unwrap()
+        .set_modified(mark)
+        .unwrap();
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        std::fs::metadata(folder.join("02 - Bravo.mp4"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        mark,
+        "the kept file was not the one published"
+    );
+    assert_eq!(
+        visible(&folder),
+        ["01 - Alpha.mp4", "02 - Bravo.mp4", "03 - Charlie.mp4"]
+    );
+    assert_eq!(
+        std::fs::read(folder.join("02 - Bravo.mp4")).unwrap(),
+        fixture("clip.mp4")
+    );
+    assert_eq!(item_state(&folder, "b")["status"], "done");
+    assert!(staging_dirs(&folder).is_empty(), "{:?}", entries(&folder));
+}
+
+/// Review n1: a swap detected while publishing one item stops the playlist run (fail closed):
+/// the items after it are not downloaded, no summary is printed, nothing is published under
+/// that name, and the download stays in staging. The swap is injected with the test-hooks
+/// fault `EID_TEST_PUBLISH_FAIL=swap:<name>`, which goes through the real classifier.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_swap_while_publishing_one_item_stops_the_playlist_run() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    let url = purl(&e, &list, "pl23", "Swap", "");
+    write_list(
+        &e,
+        &[item("a", "Alpha"), item("b", "Bravo"), item("c", "Charlie")],
+    );
+    let out = e.out().display().to_string();
+    let mut c = e.cmd(&["video", "playlist", &url, "-d", &out, "--yes-i-agree"]);
+    c.env("EID_TEST_PUBLISH_FAIL", "swap:02 - Bravo.mp4");
+    let o = tokio::task::spawn_blocking(move || c.output().unwrap())
+        .await
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("changed while it was being published"),
+        "{err}"
+    );
+    assert_eq!(
+        download_ids(&e.calls()),
+        ["a", "b"],
+        "c must not be tried: {err}"
+    );
+    assert!(
+        !err.contains(" downloaded, "),
+        "a summary after a refusal: {err}"
+    );
+    let folder = e.out().join("Swap");
+    assert_eq!(visible(&folder), ["01 - Alpha.mp4"]);
+    assert_eq!(staging_dirs(&folder).len(), 1, "{:?}", entries(&folder));
+    assert_ne!(item_state(&folder, "b")["status"], "done");
+    assert_ne!(item_state(&folder, "c")["status"], "done");
+}
+
+/// P4 review m4: a listing entry without a usable address (some extractors give only an id)
+/// is a temporary failure like any other (owner decision M2): counted per run, `failed` after
+/// MAX_ATTEMPTS runs and then not asked again, keeping its number; the other items are fine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_item_without_an_address_stops_being_retried_after_three_runs() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    let url = purl(&e, &list, "pl21", "NoUrl", "");
+    let mut bare = item("x", "Bare");
+    bare["nourl"] = json!(true);
+    write_list(&e, &[item("a", "Alpha"), bare, item("c", "Charlie")]);
+    let folder = e.out().join("NoUrl");
+    for k in 1..=4u64 {
+        let o = playlist(&e, &url, &["-q"]).await;
+        let err = String::from_utf8_lossy(&o.stderr).into_owned();
+        assert_eq!(o.status.code(), Some(1), "run {k}: {err}");
+        let x = item_state(&folder, "x");
+        let want = match k {
+            1 | 2 => (Some("pending"), Some(k)),
+            _ => (Some("failed"), Some(3)),
+        };
+        assert_eq!(
+            (x["status"].as_str(), x["attempts"].as_u64()),
+            want,
+            "run {k}"
+        );
+        assert_eq!(x["number"], 2, "run {k}");
+        if k <= 3 {
+            assert!(
+                err.contains("2: the playlist gave no usable address"),
+                "run {k}: {err}"
+            );
+        } else {
+            assert!(!err.contains("no usable address"), "run {k}: {err}");
+            assert!(err.contains("--retry-failed 2"), "run {k}: {err}");
+        }
+    }
+    assert_eq!(download_ids(&e.calls()), ["a", "c"]);
+    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "03 - Charlie.mp4"]);
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn temporary_failures_stop_after_three_runs_and_retry_failed_resets_only_the_named_items() {
@@ -1629,4 +1788,24 @@ async fn playlist_items_in_another_container_are_remuxed_and_a_bad_result_is_a_f
     }
     // the bad files stay in their staging folders (never published, never deleted by us)
     assert_eq!(staging_dirs(&folder).len(), 2);
+}
+
+/// P4 review m9: a `--skip` number that no item has is reported (not silently ignored), and
+/// the run goes on with the numbers that exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn skip_numbers_that_no_item_has_are_reported_and_the_rest_apply() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    let url = purl(&e, &list, "pl22", "Skip", "");
+    write_list(&e, &items(3, |i| format!("T{i}")));
+    let o = playlist(&e, &url, &["-q", "--skip", "2,9"]).await;
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        err.contains("--skip 9: no item of this playlist has that number"),
+        "{err}"
+    );
+    assert!(!err.contains("--skip 2:"), "{err}");
+    assert_eq!(download_ids(&e.calls()), ["i1", "i3"]);
+    assert!(err.contains("2 downloaded, 1 deselected"), "{err}");
 }

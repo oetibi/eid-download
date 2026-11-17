@@ -13,25 +13,44 @@ async fn midstream_disconnects_still_complete() {
         len: 12 * 1024 * 1024,
     }
     .sha256_hex();
-    let cuts = [
-        Cut::EveryBytes(700_000),
-        Cut::EveryBytes(65_537),
-        Cut::Random {
-            seed: 1,
-            min: 10_000,
-            max: 900_000,
-        },
-        Cut::Random {
-            seed: 99,
-            min: 1,
-            max: 50_000,
-        },
-        Cut::AfterBytes {
-            conn_index: 1,
-            n: 1_000_000,
-        },
+    // A single cut on connection 1 (the probe's, which owns segment 0) only happens if that
+    // connection really carries `ONE_CUT` bytes. Work stealing may shorten segment 0 (that is
+    // the point of `slow_segment_is_split`), but a split always leaves the split segment at
+    // least `min_split` bytes past its cursor (`Table::split_largest`). So with
+    // `min_split >= ONE_CUT` connection 1 carries at least `ONE_CUT` bytes on any schedule.
+    // With the default 64 KiB of `fast_cfg`, a slow probe connection lost its segment to the
+    // other connections before 1 MB, and the cut never happened (ci-windows, PR #27, run 54:
+    // "cut #4: disconnects must have been exercised"). Case #5 pins that schedule: the probe
+    // connection is throttled, so the others always steal from it.
+    const ONE_CUT: u64 = 1_000_000;
+    let one_cut = Cut::AfterBytes {
+        conn_index: 1,
+        n: ONE_CUT,
+    };
+    let cases = [
+        (Cut::EveryBytes(700_000), None),
+        (Cut::EveryBytes(65_537), None),
+        (
+            Cut::Random {
+                seed: 1,
+                min: 10_000,
+                max: 900_000,
+            },
+            None,
+        ),
+        (
+            Cut::Random {
+                seed: 99,
+                min: 1,
+                max: 50_000,
+            },
+            None,
+        ),
+        (one_cut.clone(), None),
+        (one_cut, Some((1, 3_000_000))),
     ];
-    for (i, cut) in cuts.into_iter().enumerate() {
+    for (i, (cut, slow_connections)) in cases.into_iter().enumerate() {
+        let single = matches!(cut, Cut::AfterBytes { .. });
         let (srv, url) = serve(
             "/d.bin",
             Content::Generated {
@@ -40,6 +59,7 @@ async fn midstream_disconnects_still_complete() {
             },
             Behavior {
                 cut,
+                slow_connections,
                 ..Behavior::default()
             },
         )
@@ -47,6 +67,10 @@ async fn midstream_disconnects_still_complete() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = fast_cfg(8);
         cfg.max_attempts = 200; // progress resets the counter; this only bounds pathological loops
+        if single {
+            cfg.min_split = 1024 * 1024;
+            assert!(cfg.min_split >= ONE_CUT);
+        }
         let (o, log) = get(&url, dir.path(), cfg)
             .await
             .unwrap_or_else(|e| panic!("cut #{i}: {e}"));
@@ -55,7 +79,18 @@ async fn midstream_disconnects_still_complete() {
             log.count(|e| matches!(e, Event::Retry { .. })) >= 1,
             "cut #{i}: disconnects must have been exercised"
         );
-        assert!(srv.stats("/d.bin").requests.len() > 2);
+        let stats = srv.stats("/d.bin");
+        assert!(stats.requests.len() > 2, "cut #{i}");
+        if single {
+            // the cut hit connection 1 itself, after exactly ONE_CUT body bytes
+            let on_first: u64 = stats
+                .requests
+                .iter()
+                .filter(|r| r.conn_id == 1)
+                .map(|r| r.bytes_sent)
+                .sum();
+            assert_eq!(on_first, ONE_CUT, "cut #{i}: connection 1 was not cut");
+        }
     }
 }
 

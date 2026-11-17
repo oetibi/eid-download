@@ -428,6 +428,8 @@ pub fn rename_noreplace_hooked(
     }
 }
 
+/// Every refusal because a name no longer refers to the verified file (a swap) has kind
+/// `InvalidData`: callers rely on it to stop (fail closed) instead of retrying.
 fn mismatch(msg: &str, part: &Path, dest: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -895,6 +897,8 @@ mod tests {
         let dest = d.join("dest");
         let e = publish_impl(&f, &part, &dest, true, &mut || {}, &mut || {}).unwrap_err();
         assert!(e.to_string().contains("no longer refers"), "{e}");
+        // the kind is a contract: callers (eid video) stop the run on it, fail closed
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
         assert!(!dest.exists(), "nothing may be published");
         assert_eq!(std::fs::read(&part).unwrap(), b"EVIL", "substitute touched");
         assert_eq!(std::fs::read(&aside).unwrap(), b"ORIG");

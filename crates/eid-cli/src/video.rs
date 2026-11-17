@@ -118,7 +118,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         Some("playlist") => Sub::Playlist,
         other => {
             return Err(format!(
-                "expected info, get, consent or revoke, got {other:?}"
+                "expected info, get, playlist, consent or revoke, got {other:?}"
             ))
         }
     };
@@ -197,7 +197,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         return Err("--list only shows the plan; it cannot be combined with --retry-failed".into());
     }
     if !matches!(a.sub, Sub::Get | Sub::Playlist) && (a.dir.is_some() || a.limit_bps.is_some()) {
-        return Err("-d and --limit only apply to `eid video get`".into());
+        return Err("-d and --limit only apply to `eid video get` and `eid video playlist`".into());
     }
     Ok(a)
 }
@@ -239,6 +239,19 @@ mod test_hooks {
     /// `EID_TEST_CANCEL_FILE=<path>`: cancel the run (exactly what Ctrl-C does) once that file
     /// exists. A real console Ctrl-C cannot be sent to a child on Windows CI (MANUAL-TESTS #14),
     /// so the tests use this on Windows; on Unix they send a real SIGINT.
+    /// `EID_TEST_PUBLISH_FAIL=<file name>`: publishing under exactly that name fails like an
+    /// I/O error (review m3: one item's publish error must not end a playlist run);
+    /// `EID_TEST_PUBLISH_FAIL=swap:<file name>`: it fails like a detected swap (review n1:
+    /// that must stop the run).
+    pub fn publish_fault(name: &str) -> Option<std::io::ErrorKind> {
+        let v = std::env::var("EID_TEST_PUBLISH_FAIL").ok()?;
+        match v.strip_prefix("swap:") {
+            Some(n) if n == name => Some(std::io::ErrorKind::InvalidData),
+            None if v == name => Some(std::io::ErrorKind::Other),
+            _ => None,
+        }
+    }
+
     pub fn cancel_when_file_appears(cancel: &eid_engine::CancellationToken) {
         let Some(p) = std::env::var_os("EID_TEST_CANCEL_FILE") else {
             return;
@@ -474,19 +487,68 @@ pub fn prepare_staging(out_dir: &Path, name: &str) -> Result<PathBuf, String> {
         }
         Ok(_) => {}
     }
-    // a reused folder (resume) must contain nothing but plain files and folders
-    for e in std::fs::read_dir(&p).map_err(|e| e.to_string())? {
-        let e = e.map_err(|e| e.to_string())?;
-        let md = std::fs::symlink_metadata(e.path()).map_err(|e| e.to_string())?;
+    // a reused folder (resume) must contain nothing but plain files and folders, at any depth
+    // (review m7); the walk is bounded and never enters a link
+    let mut budget = STAGING_MAX_ENTRIES;
+    check_staging_tree(&p, &p, 0, &mut budget)?;
+    Ok(p)
+}
+
+/// Bounds for walking a reused staging folder. yt-dlp with our template writes only files at
+/// its top level, so anything near these bounds is not ours.
+const STAGING_MAX_DEPTH: usize = 8;
+const STAGING_MAX_ENTRIES: usize = 10_000;
+
+fn check_staging_tree(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<(), String> {
+    let refuse = |why: String| format!("refusing to use {}: {why}", root.display());
+    let unreadable = |e: std::io::Error| {
+        refuse(format!(
+            "cannot read {}: {e}",
+            crate::remote::printable(&dir.to_string_lossy())
+        ))
+    };
+    for e in std::fs::read_dir(dir).map_err(unreadable)? {
+        let e = e.map_err(unreadable)?;
+        *budget = budget.checked_sub(1).ok_or_else(|| {
+            refuse(format!(
+                "it holds more than {STAGING_MAX_ENTRIES} entries; delete that folder to \
+                 download this item again from the start"
+            ))
+        })?;
+        let path = e.path();
+        let rel = || {
+            crate::remote::printable(&path.strip_prefix(root).unwrap_or(&path).to_string_lossy())
+        };
+        let md = std::fs::symlink_metadata(&path).map_err(unreadable)?;
         if is_link_or_odd(&md) {
-            return Err(format!(
-                "refusing to use {}: it contains a link ({})",
-                p.display(),
-                e.file_name().to_string_lossy()
-            ));
+            return Err(refuse(format!("it contains a link ({})", rel())));
+        }
+        // a hard link to a file elsewhere would let the tool append to it when it resumes
+        // (review n3): every file is opened without following links and must have one name
+        if md.is_file() {
+            if let Err(e) = eid_platform::fs::open_regular_nofollow_read(&path) {
+                return Err(refuse(if e.kind() == std::io::ErrorKind::InvalidInput {
+                    format!("it contains a hard link or reparse point ({}): {e}", rel())
+                } else {
+                    format!("cannot check {}: {e}", rel())
+                }));
+            }
+        }
+        if md.is_dir() {
+            if depth + 1 >= STAGING_MAX_DEPTH {
+                return Err(refuse(format!(
+                    "its folders are nested more than {STAGING_MAX_DEPTH} deep"
+                )));
+            }
+            check_staging_tree(root, &path, depth + 1, budget)?;
         }
     }
-    Ok(p)
+    Ok(())
 }
 
 /// Remove a staging folder that is still empty after a cancel. The killed tree dies
@@ -577,20 +639,92 @@ pub fn publish_name(title: &str, ext: &str, out_dir: &Path) -> Result<String, St
     }
 }
 
+/// Why [`publish`] published nothing.
+#[derive(Debug)]
+enum PublishError {
+    /// The staged file is not a plain file we can open without following links, or it or the
+    /// destination was swapped while publishing (something was planted in our folders): the
+    /// run stops, fail closed. The next run is not told about it (known limit, Round 17).
+    Refused(String),
+    /// The staged file is locked by another program (for example an antivirus): retried by
+    /// [`publish_retrying`] (AGENTS §6.9), then an [`PublishError::Item`] failure.
+    Locked(String),
+    /// This file could not be published (bad container, I/O error, no free name). In a
+    /// playlist this is a failed item, tried again at the next run (review m3).
+    Item(String),
+}
+
+impl std::fmt::Display for PublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PublishError::Refused(m) | PublishError::Locked(m) | PublishError::Item(m) => {
+                f.write_str(m)
+            }
+        }
+    }
+}
+
+/// How often and how long a locked staged file is retried before the item fails.
+const PUBLISH_LOCK_TRIES: u32 = 10;
+const PUBLISH_LOCK_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// [`publish`], retried while the staged file is locked (review n4, AGENTS §6.9). The pause is
+/// an async sleep, never a blocking one (§6.7).
+async fn publish_retrying(
+    staged: &Path,
+    out_dir: &Path,
+    name: &str,
+) -> Result<PathBuf, PublishError> {
+    retry_locked(PUBLISH_LOCK_TRIES, PUBLISH_LOCK_PAUSE, || {
+        publish(staged, out_dir, name)
+    })
+    .await
+}
+
+async fn retry_locked<T>(
+    tries: u32,
+    pause: std::time::Duration,
+    mut attempt: impl FnMut() -> Result<T, PublishError>,
+) -> Result<T, PublishError> {
+    let mut left = tries.max(1);
+    loop {
+        match attempt() {
+            Err(PublishError::Locked(m)) => {
+                left -= 1;
+                if left == 0 {
+                    return Err(PublishError::Item(format!(
+                        "{m}; still locked after {tries} tries, it is tried again at the next run"
+                    )));
+                }
+                tokio::time::sleep(pause).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Publish `staged` (opened without following links and checked to be a plain file) into
 /// `out_dir` under `name`, or `name (n)` if taken; never overwrites anything. An `.mp4` must
 /// be a whole MP4 container, checked through the same handle that is published (review M4);
 /// otherwise nothing is published and the file stays in staging.
-fn publish(staged: &Path, out_dir: &Path, name: &str) -> Result<PathBuf, String> {
-    let f = eid_platform::fs::open_regular_nofollow(staged)
-        .map_err(|e| format!("refusing the staged file: {e}"))?;
+fn publish(staged: &Path, out_dir: &Path, name: &str) -> Result<PathBuf, PublishError> {
+    let f = eid_platform::fs::open_regular_nofollow(staged).map_err(|e| {
+        if eid_platform::fs::is_lock_contention(&e) {
+            PublishError::Locked(format!(
+                "the staged file {} is locked by another program: {e}",
+                staged.display()
+            ))
+        } else {
+            PublishError::Refused(format!("refusing the staged file: {e}"))
+        }
+    })?;
     if name.ends_with(".mp4") {
         let mut r = &f;
         eid_media::container::check_mp4(&mut r).map_err(|e| {
-            format!(
+            PublishError::Item(format!(
                 "refusing to publish {}: {e}; it is kept in the staging folder",
                 staged.display()
-            )
+            ))
         })?;
     }
     for n in 0..1000u32 {
@@ -600,13 +734,46 @@ fn publish(staged: &Path, out_dir: &Path, name: &str) -> Result<PathBuf, String>
             eid_engine::sanitize::numbered_name(name, n)
         };
         let dest = out_dir.join(&cand);
+        // test-hooks only: an I/O error (`<name>`) or a detected swap (`swap:<name>`) at this
+        // name, through the same classifier as a real error
+        #[cfg(feature = "test-hooks")]
+        if let Some(kind) = test_hooks::publish_fault(&cand) {
+            return Err(publish_failure(
+                &dest,
+                std::io::Error::new(kind, "injected test fault"),
+            ));
+        }
         match eid_platform::fs::publish_verified(&f, staged, &dest) {
             Ok(()) => return Ok(dest),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("cannot publish {}: {e}", dest.display())),
+            Err(e) => return Err(publish_failure(&dest, e)),
         }
     }
-    Err("no free file name (1000 taken)".into())
+    Err(PublishError::Item(
+        "no free file name (1000 taken); it is kept in the staging folder".into(),
+    ))
+}
+
+/// A failed `publish_verified`. A swap of the staged file or of the destination (kind
+/// `InvalidData`, eid-platform's contract) stops this run, so nothing more is published while
+/// something is changing our files (review of m3). The next run is NOT protected: it finds
+/// whatever is then in staging and is not told about the swap (known limit, Round 17).
+/// Anything else fails only this item. The file may or may not still be in staging at that
+/// point (a post-check can fail after the move), so the message does not say where it is.
+fn publish_failure(dest: &Path, e: std::io::Error) -> PublishError {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        PublishError::Refused(format!(
+            "stopped: the file to publish as {} changed while it was being published ({e}); \
+             nothing more is published in this run. Check the staging folder and that file \
+             before running again",
+            dest.display()
+        ))
+    } else {
+        PublishError::Item(format!(
+            "cannot publish {}: {e}; the item is tried again at the next run",
+            dest.display()
+        ))
+    }
 }
 
 // ------------------------------------------------------------------ commands
@@ -797,7 +964,9 @@ async fn get(
     }
     let staged = finished_file(&staging, ext).map_err(Fail::Other)?;
     let name = publish_name(&info.title, ext, out_dir).map_err(Fail::Other)?;
-    let dest = publish(&staged, out_dir, &name).map_err(Fail::Other)?;
+    let dest = publish_retrying(&staged, out_dir, &name)
+        .await
+        .map_err(|e| Fail::Other(e.to_string()))?;
     let _ = std::fs::remove_dir_all(&staging);
     println!("{}", dest.display());
     Ok(())
@@ -925,11 +1094,18 @@ async fn playlist(
     let work = tools.root().join(format!(".list-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir(&work).map_err(|e| Fail::Other(e.to_string()))?;
+    // Ctrl-C while listing is a cancel like in every other stage (exit 130, review m2); the
+    // listing tool is killed when its future is dropped here
     let listed = tokio::select! {
-        r = runner.playlist(url, &work) => r,
-        _ = cancel.cancelled() => Err(MediaError::Playlist("stopped".into())),
+        r = runner.playlist(url, &work) => Some(r),
+        _ = cancel.cancelled() => None,
     };
     let _ = std::fs::remove_dir_all(&work);
+    let Some(listed) = listed else {
+        return Err(Fail::Cancelled(
+            "stopped while listing the playlist; nothing was downloaded".into(),
+        ));
+    };
     let info = listed.map_err(Fail::media)?;
     let folder = playlist_folder(out_dir, &info.title).map_err(Fail::Other)?;
     let _lock = pl::lock_folder(&folder).map_err(Fail::media)?;
@@ -954,6 +1130,15 @@ async fn playlist(
     }
     let (mut state, planned) = pl::plan(old, &info.id, &info.entries).map_err(Fail::media)?;
     // `--retry-failed`: only the named items, and only if they failed or are unavailable
+    // a --skip number that no item of this listing has would otherwise be ignored silently
+    // (review m9); the run is not stopped for it
+    for n in a
+        .skip
+        .iter()
+        .filter(|n| !planned.iter().any(|(k, _)| k == *n))
+    {
+        eprintln!("--skip {n}: no item of this playlist has that number; ignored");
+    }
     if let Some(sel) = &a.retry_failed {
         let mut reset = vec![];
         for (n, e) in &planned {
@@ -1055,9 +1240,14 @@ async fn playlist(
         }
         let item_url = match e.url.as_deref().map(MediaUrl::parse) {
             Some(Ok(u)) => u,
+            // a temporary failure like any other (owner decision M2): counted, and after
+            // MAX_ATTEMPTS runs no longer asked automatically (review m4; it used to fail on
+            // every run without ever being recorded)
             _ => {
                 failed += 1;
                 eprintln!("{n}: the playlist gave no usable address for this item");
+                temporary(&mut state, &e.id, *n);
+                pl::save(&folder, &state).map_err(Fail::media)?;
                 continue;
             }
         };
@@ -1087,14 +1277,25 @@ async fn playlist(
                         }
                         None => name,
                     };
-                    let dest = publish(&staged, &folder, &name).map_err(Fail::Other)?;
-                    let _ = std::fs::remove_dir_all(&staging);
-                    if let Some(i) = state.get_mut(&e.id) {
-                        i.status = Status::Done;
-                        i.attempts = 0;
-                        i.file = dest.file_name().map(|f| f.to_string_lossy().into_owned());
+                    match publish_retrying(&staged, &folder, &name).await {
+                        Ok(dest) => {
+                            let _ = std::fs::remove_dir_all(&staging);
+                            if let Some(i) = state.get_mut(&e.id) {
+                                i.status = Status::Done;
+                                i.attempts = 0;
+                                i.file = dest.file_name().map(|f| f.to_string_lossy().into_owned());
+                            }
+                            got += 1;
+                        }
+                        // something planted in our staging folder: stop, fail closed
+                        Err(PublishError::Refused(m)) => return Err(Fail::Other(m)),
+                        // this item only: counted, kept in staging, the run goes on (m3)
+                        Err(PublishError::Item(m) | PublishError::Locked(m)) => {
+                            failed += 1;
+                            eprintln!("{n}: {}", p(&m));
+                            temporary(&mut state, &e.id, *n);
+                        }
                     }
-                    got += 1;
                 }
                 // nothing new: yt-dlp skipped it because the archive already lists it
                 Err(_) if empty(&staging) => {
@@ -1233,5 +1434,102 @@ mod tests {
             assert!(n.ends_with(".mp4") || !n.is_empty(), "{t:?} -> {n:?}");
             assert_eq!(d.join(&n).parent().unwrap(), d, "{t:?} escapes: {n:?}");
         }
+    }
+
+    /// Review of m3: a swap detected while publishing (eid-platform reports it as
+    /// `InvalidData`, pinned in its own tests) stops the run; other I/O errors fail one item.
+    #[test]
+    fn a_swap_while_publishing_stops_the_run_other_errors_fail_one_item() {
+        use std::io::{Error, ErrorKind};
+        let d = Path::new("out").join("01 - a.mp4");
+        let swap = Error::new(ErrorKind::InvalidData, "source was swapped");
+        assert!(matches!(
+            publish_failure(&d, swap),
+            PublishError::Refused(_)
+        ));
+        for k in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::NotFound,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                matches!(
+                    publish_failure(&d, Error::new(k, "x")),
+                    PublishError::Item(_)
+                ),
+                "{k:?}"
+            );
+        }
+    }
+
+    /// Review n4 (AGENTS §6.9): a locked staged file is retried with an async pause, then fails
+    /// only this item; a refusal is never retried.
+    #[test]
+    fn a_locked_staged_file_is_retried_then_fails_only_the_item() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let z = std::time::Duration::ZERO;
+        let locked = || PublishError::Locked("locked".into());
+        // locked twice, then free: published at the third attempt
+        let mut n = 0;
+        let r = rt.block_on(retry_locked(5, z, || {
+            n += 1;
+            if n < 3 {
+                Err(locked())
+            } else {
+                Ok(n)
+            }
+        }));
+        assert_eq!(r.unwrap(), 3);
+        // always locked: exactly `tries` attempts, then an item failure
+        let mut n = 0;
+        let r = rt.block_on(retry_locked(4, z, || -> Result<(), _> {
+            n += 1;
+            Err(locked())
+        }));
+        assert_eq!(n, 4);
+        assert!(
+            matches!(&r, Err(PublishError::Item(m)) if m.contains("still locked after 4 tries")),
+            "{r:?}"
+        );
+        // a refusal (planted link, swap) stops at once
+        let mut n = 0;
+        let r = rt.block_on(retry_locked(4, z, || -> Result<(), _> {
+            n += 1;
+            Err(PublishError::Refused("planted".into()))
+        }));
+        assert_eq!(n, 1);
+        assert!(matches!(r, Err(PublishError::Refused(_))));
+    }
+
+    /// P4 review m9: the messages name `playlist` where it applies.
+    #[test]
+    fn video_arg_errors_name_the_playlist_command() {
+        let e = v(&["nope"]).unwrap_err();
+        assert!(e.contains("playlist"), "{e}");
+        let e = v(&["info", "https://x.test/v", "-d", "out"]).unwrap_err();
+        assert!(e.contains("`eid video playlist`"), "{e}");
+        assert!(v(&["playlist", "https://x.test/p", "-d", "out", "--limit", "1M"]).is_ok());
+    }
+
+    /// P4 review m7: a reused staging folder is walked to a bounded depth; plain nested
+    /// folders within the bound are accepted, deeper nesting is refused, nothing is changed.
+    #[test]
+    fn reused_staging_folder_is_walked_with_a_depth_bound() {
+        let d = tempfile::tempdir().unwrap();
+        let s = d.path().join("st");
+        let mut deep = s.clone();
+        for i in 0..STAGING_MAX_DEPTH - 1 {
+            deep = deep.join(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("f.part"), b"x").unwrap();
+        assert_eq!(prepare_staging(d.path(), "st").unwrap(), s);
+        std::fs::create_dir(deep.join("one-more")).unwrap();
+        let e = prepare_staging(d.path(), "st").unwrap_err();
+        assert!(e.contains("nested more than"), "{e}");
+        assert!(deep.join("f.part").is_file(), "nothing is removed");
     }
 }

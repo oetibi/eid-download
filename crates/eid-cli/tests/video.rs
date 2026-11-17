@@ -155,7 +155,7 @@ async fn video_is_published_by_us_from_a_fresh_staging_dir() {
 }
 
 /// A link or junction (made by the test; the test fails if it cannot make one) planted where
-/// the staging folder goes, or inside a staging folder that is reused.
+/// the staging folder goes, or anywhere inside a staging folder that is reused (m7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn planted_symlink_or_junction_is_never_followed() {
     let e = Env::new().await;
@@ -172,10 +172,29 @@ async fn planted_symlink_or_junction_is_never_followed() {
         kinds.push("junction");
     }
     kinds.push("file-symlink-inside");
+    // P4 review m7: also deeper inside a reused staging folder, not only at its top level
+    kinds.push("file-symlink-in-a-subfolder");
+    kinds.push("dir-link-in-a-subfolder");
     for kind in kinds {
         match kind {
             "dir-symlink" => make_dir_link(&elsewhere, &staging),
             "junction" => make_junction(&elsewhere, &staging),
+            "file-symlink-in-a-subfolder" => {
+                std::fs::create_dir_all(staging.join("a").join("b")).unwrap();
+                eid_platform::fs::symlink_file(
+                    &elsewhere.join("victim.mp4"),
+                    &staging.join("a").join("b").join("abc.mp4"),
+                )
+                .expect("cannot create a symlink: this test must not pass without one");
+            }
+            "dir-link-in-a-subfolder" => {
+                std::fs::create_dir_all(staging.join("a")).unwrap();
+                if eid_platform::IS_WINDOWS {
+                    make_junction(&elsewhere, &staging.join("a").join("j"));
+                } else {
+                    make_dir_link(&elsewhere, &staging.join("a").join("j"));
+                }
+            }
             _ => {
                 std::fs::create_dir(&staging).unwrap();
                 eid_platform::fs::symlink_file(
@@ -203,6 +222,41 @@ async fn planted_symlink_or_junction_is_never_followed() {
     }
 }
 
+/// Review n3 (AGENTS §6.1): a hard link anywhere in a reused staging folder (here a `.part`
+/// that is a second name of a file outside) refuses the folder before the tool runs, so a
+/// resume can never append to the outside file. Fails loudly if the link cannot be made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hard_link_in_a_reused_staging_folder_is_refused_before_the_tool_runs() {
+    let e = Env::new().await;
+    let url = e.url("video/abc", "");
+    let out = e.out().display().to_string();
+    let outside = e.root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let victim = outside.join("victim.bin");
+    std::fs::write(&victim, b"precious").unwrap();
+    let staging = e.out().join(eid_cli::video::staging_name(
+        &eid_media::args::MediaUrl::parse(&url).unwrap(),
+        &eid_media::args::Quality::Best,
+    ));
+    for (k, part) in [
+        ("top level", staging.join("abc.mp4.part")),
+        ("in a subfolder", staging.join("sub").join("abc.mp4.part")),
+    ] {
+        std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+        std::fs::hard_link(&victim, &part)
+            .expect("cannot create a hard link: this test must not pass without one");
+        let o = e
+            .run(&["video", "get", &url, "-d", &out, "--yes-i-agree", "-q"])
+            .await;
+        assert_eq!(o.status.code(), Some(1), "{k}: {}", text(&o));
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("hard link"), "{k}: {}", text(&o));
+        assert!(e.calls().is_empty(), "{k}: the tool ran");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious", "{k}");
+        std::fs::remove_dir_all(&staging).unwrap();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_leaves_nothing_outside_staging_and_resume_reuses_it() {
     let e = Env::new().await;
@@ -216,7 +270,7 @@ async fn cancel_leaves_nothing_outside_staging_and_resume_reuses_it() {
     let mut c = e.cmd(&["video", "get", &url, "-d", &out, "--yes-i-agree", "-q"]);
     c.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let mut eid = c.spawn().unwrap();
+    let mut eid = Running::spawn(&mut c);
     // wait for the stalled download: the fake has logged its download call and written half
     let t = Instant::now();
     let (pid, part) = loop {
@@ -474,7 +528,8 @@ fn ctrl_c(eid: &std::process::Child, cancel_file: &std::path::Path) {
 }
 
 /// Wait for `eid` to exit within `limit`; on timeout kill it (no orphan) and fail.
-async fn exit_within(mut eid: std::process::Child, limit: Duration) -> std::process::Output {
+async fn exit_within(eid: Running, limit: Duration) -> std::process::Output {
+    let mut eid = eid.into_child();
     let t = Instant::now();
     loop {
         if eid.try_wait().unwrap().is_some() {
@@ -531,7 +586,7 @@ async fn cancel_during_tool_install_stops_at_once_and_leaves_nothing_behind() {
     c.env("EID_TEST_CANCEL_FILE", &cancel_file)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    let eid = c.spawn().unwrap();
+    let eid = Running::spawn(&mut c);
     // wait until the tool download is really under way: a staging folder with partial data
     let tools = e.tools_dir();
     let t = Instant::now();
@@ -583,7 +638,7 @@ async fn cancel_during_media_info_kills_the_tool_and_exits() {
     c.env("EID_TEST_CANCEL_FILE", &cancel_file)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    let eid = c.spawn().unwrap();
+    let eid = Running::spawn(&mut c);
     // the fake has logged its `-J` call and now hangs while the flag file exists
     let t = Instant::now();
     let pid = loop {
@@ -626,6 +681,76 @@ async fn cancel_during_media_info_kills_the_tool_and_exits() {
         entries(&e.out())
     );
     assert_eq!(e.calls().len(), 1, "no download after the cancel");
+}
+
+/// P4 review m2: Ctrl-C while the playlist is being listed is a cancel (exit 130, "stopped"),
+/// not "error: playlist: stopped" with exit 1; the listing tool is killed and nothing is
+/// written: no playlist folder, no state, no download.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_during_playlist_listing_exits_130_and_writes_nothing() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    std::fs::write(
+        &list,
+        br#"[{"id":"a1","title":"One"},{"id":"a2","title":"Two"}]"#,
+    )
+    .unwrap();
+    let flag = e.root.path().join("stall-list.flag");
+    std::fs::write(&flag, b"1").unwrap();
+    let url = e.url(
+        "playlist/pl1",
+        &format!(
+            "&list={}&ptitle=Mix&stall_info={}",
+            pct(&list.display().to_string()),
+            pct(&flag.display().to_string())
+        ),
+    );
+    let cancel_file = e.root.path().join("cancel.flag");
+    let out = e.out().display().to_string();
+    let mut c = e.cmd(&["video", "playlist", &url, "-d", &out, "--yes-i-agree", "-q"]);
+    c.env("EID_TEST_CANCEL_FILE", &cancel_file)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let eid = Running::spawn(&mut c);
+    let t = Instant::now();
+    let pid = loop {
+        if let Some(c) = e.calls().first() {
+            assert!(c["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == "--flat-playlist"));
+            break c["pid"].as_u64().unwrap() as u32;
+        }
+        if t.elapsed() > Duration::from_secs(60) {
+            ctrl_c(&eid, &cancel_file);
+            let _ = exit_within(eid, Duration::from_secs(20)).await;
+            panic!("the listing call never started");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(eid_platform::process::process_is_alive(pid));
+    ctrl_c(&eid, &cancel_file);
+    let o = exit_within(eid, Duration::from_secs(20)).await;
+    assert_eq!(o.status.code(), Some(130), "{}", text(&o));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("stopped while listing"), "{}", text(&o));
+    assert!(!err.contains("error: playlist"), "{}", text(&o));
+    let t = Instant::now();
+    while eid_platform::process::process_is_alive(pid) {
+        assert!(
+            t.elapsed() < Duration::from_secs(15),
+            "the listing tool outlived the cancel"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(flag.exists(), "the tool was killed, not released");
+    assert!(
+        entries(&e.out()).is_empty(),
+        "left behind: {:?}",
+        entries(&e.out())
+    );
+    assert_eq!(e.calls().len(), 1, "nothing ran after the cancel");
 }
 
 // ------------------------------------------------------------------ remux to MP4 (P4 review M4)
@@ -830,7 +955,7 @@ async fn cancel_during_the_remux_keeps_the_original_and_publishes_nothing() {
     c.env("EID_TEST_CANCEL_FILE", &cancel_file)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    let eid = c.spawn().unwrap();
+    let eid = Running::spawn(&mut c);
     // the download is complete (the WebM is in place, no .part) and the tool hangs in the remux
     let t = Instant::now();
     let (pid, staging) = loop {

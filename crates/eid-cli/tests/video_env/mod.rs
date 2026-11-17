@@ -248,3 +248,40 @@ pub fn remove_link(p: &Path) {
         p.display()
     );
 }
+
+/// A running `eid` that is killed and reaped if the test panics before it is stopped, so a
+/// failing assertion leaves no orphan `eid` behind (P4 review m12). On Windows its job object
+/// then takes the tool down too; on Unix the tool, in its own process group, may outlive it
+/// until its own stall limit.
+pub struct Running(Option<std::process::Child>);
+
+impl Running {
+    pub fn spawn(c: &mut std::process::Command) -> Running {
+        Running(Some(c.spawn().unwrap()))
+    }
+    pub fn into_child(mut self) -> std::process::Child {
+        self.0.take().unwrap()
+    }
+}
+
+impl std::ops::Deref for Running {
+    type Target = std::process::Child;
+    fn deref(&self) -> &std::process::Child {
+        self.0.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for Running {
+    fn deref_mut(&mut self) -> &mut std::process::Child {
+        self.0.as_mut().unwrap()
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some(c) = self.0.as_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
