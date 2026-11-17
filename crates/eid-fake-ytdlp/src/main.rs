@@ -299,6 +299,10 @@ fn playlist_json(name: &str, url: &url::Url) -> String {
                 }
                 _ => format!("video/{id}"),
             };
+            // `"nourl": true`: a flat entry that carries only its id (some extractors do this)
+            if it["nourl"].as_bool() == Some(true) {
+                return serde_json::json!({"_type": "url", "id": id, "title": it["title"]});
+            }
             serde_json::json!({
                 "_type": "url", "id": id, "title": it["title"],
                 "url": format!("https://fake.test/{path}?{rest}"),
@@ -408,6 +412,14 @@ fn main() {
             }
             if let Some(l) = query("log") {
                 log_call(&l, &argv, None);
+            }
+            // `stall_info=<flag file>`: hang in the listing while the file exists (cancel
+            // tests; logged first, so a test sees this process while it hangs)
+            if let Some(flag) = query("stall_info") {
+                let t = std::time::Instant::now();
+                while std::path::Path::new(&flag).exists() && t.elapsed().as_secs() < 600 {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
             }
             out(&playlist_json(&name, &url));
         }

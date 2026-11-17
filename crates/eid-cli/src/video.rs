@@ -925,11 +925,18 @@ async fn playlist(
     let work = tools.root().join(format!(".list-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir(&work).map_err(|e| Fail::Other(e.to_string()))?;
+    // Ctrl-C while listing is a cancel like in every other stage (exit 130, review m2); the
+    // listing tool is killed when its future is dropped here
     let listed = tokio::select! {
-        r = runner.playlist(url, &work) => r,
-        _ = cancel.cancelled() => Err(MediaError::Playlist("stopped".into())),
+        r = runner.playlist(url, &work) => Some(r),
+        _ = cancel.cancelled() => None,
     };
     let _ = std::fs::remove_dir_all(&work);
+    let Some(listed) = listed else {
+        return Err(Fail::Cancelled(
+            "stopped while listing the playlist; nothing was downloaded or written".into(),
+        ));
+    };
     let info = listed.map_err(Fail::media)?;
     let folder = playlist_folder(out_dir, &info.title).map_err(Fail::Other)?;
     let _lock = pl::lock_folder(&folder).map_err(Fail::media)?;

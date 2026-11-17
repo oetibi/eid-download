@@ -628,6 +628,76 @@ async fn cancel_during_media_info_kills_the_tool_and_exits() {
     assert_eq!(e.calls().len(), 1, "no download after the cancel");
 }
 
+/// P4 review m2: Ctrl-C while the playlist is being listed is a cancel (exit 130, "stopped"),
+/// not "error: playlist: stopped" with exit 1; the listing tool is killed and nothing is
+/// written: no playlist folder, no state, no download.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_during_playlist_listing_exits_130_and_writes_nothing() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    std::fs::write(
+        &list,
+        br#"[{"id":"a1","title":"One"},{"id":"a2","title":"Two"}]"#,
+    )
+    .unwrap();
+    let flag = e.root.path().join("stall-list.flag");
+    std::fs::write(&flag, b"1").unwrap();
+    let url = e.url(
+        "playlist/pl1",
+        &format!(
+            "&list={}&ptitle=Mix&stall_info={}",
+            pct(&list.display().to_string()),
+            pct(&flag.display().to_string())
+        ),
+    );
+    let cancel_file = e.root.path().join("cancel.flag");
+    let out = e.out().display().to_string();
+    let mut c = e.cmd(&["video", "playlist", &url, "-d", &out, "--yes-i-agree", "-q"]);
+    c.env("EID_TEST_CANCEL_FILE", &cancel_file)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let eid = c.spawn().unwrap();
+    let t = Instant::now();
+    let pid = loop {
+        if let Some(c) = e.calls().first() {
+            assert!(c["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == "--flat-playlist"));
+            break c["pid"].as_u64().unwrap() as u32;
+        }
+        if t.elapsed() > Duration::from_secs(60) {
+            ctrl_c(&eid, &cancel_file);
+            let _ = exit_within(eid, Duration::from_secs(20)).await;
+            panic!("the listing call never started");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(eid_platform::process::process_is_alive(pid));
+    ctrl_c(&eid, &cancel_file);
+    let o = exit_within(eid, Duration::from_secs(20)).await;
+    assert_eq!(o.status.code(), Some(130), "{}", text(&o));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("stopped while listing"), "{}", text(&o));
+    assert!(!err.contains("error: playlist"), "{}", text(&o));
+    let t = Instant::now();
+    while eid_platform::process::process_is_alive(pid) {
+        assert!(
+            t.elapsed() < Duration::from_secs(15),
+            "the listing tool outlived the cancel"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(flag.exists(), "the tool was killed, not released");
+    assert!(
+        entries(&e.out()).is_empty(),
+        "left behind: {:?}",
+        entries(&e.out())
+    );
+    assert_eq!(e.calls().len(), 1, "nothing ran after the cancel");
+}
+
 // ------------------------------------------------------------------ remux to MP4 (P4 review M4)
 
 /// The fake's stand-in WebM (same bytes as `webm_bytes` in eid-fake-ytdlp).
