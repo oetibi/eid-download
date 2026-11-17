@@ -331,6 +331,15 @@ pub fn open_tool_locked(path: &Path) -> io::Result<File> {
     Ok(f)
 }
 
+/// Whether opening a file failed only because another program has it open in a way that
+/// excludes us (Windows `ERROR_SHARING_VIOLATION` 32 or `ERROR_LOCK_VIOLATION` 33), i.e. a
+/// lock worth waiting for. Unlike [`is_lock_contention`] this is NOT true for access denied
+/// (5), which also means "a folder or junction is there" or "the file is being deleted"
+/// (review r2). Always `false` on Unix, where opening does not take such locks.
+pub fn is_file_in_use(e: &io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
+}
+
 /// Whether an error from [`open_tool_locked`] means "someone else has the file open in a way
 /// our lock does not allow" (Windows `ERROR_SHARING_VIOLATION`).
 pub fn is_sharing_violation(e: &io::Error) -> bool {

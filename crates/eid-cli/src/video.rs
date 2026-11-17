@@ -646,12 +646,14 @@ enum PublishError {
     /// destination was swapped while publishing (something was planted in our folders): the
     /// run stops, fail closed. The next run is not told about it (known limit, Round 17).
     Refused(String),
-    /// The staged file is locked by another program (for example an antivirus): retried by
+    /// The staged file is in use by another program (for example an antivirus): retried by
     /// [`publish_retrying`] (AGENTS §6.9), then an [`PublishError::Item`] failure.
     Locked(String),
     /// This file could not be published (bad container, I/O error, no free name). In a
     /// playlist this is a failed item, tried again at the next run (review m3).
     Item(String),
+    /// Ctrl-C while waiting for a locked file (review r3): nothing was published.
+    Cancelled,
 }
 
 impl std::fmt::Display for PublishError {
@@ -660,6 +662,7 @@ impl std::fmt::Display for PublishError {
             PublishError::Refused(m) | PublishError::Locked(m) | PublishError::Item(m) => {
                 f.write_str(m)
             }
+            PublishError::Cancelled => f.write_str("stopped while waiting for a locked file"),
         }
     }
 }
@@ -669,13 +672,14 @@ const PUBLISH_LOCK_TRIES: u32 = 10;
 const PUBLISH_LOCK_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// [`publish`], retried while the staged file is locked (review n4, AGENTS §6.9). The pause is
-/// an async sleep, never a blocking one (§6.7).
+/// an async sleep, never a blocking one (§6.7), and Ctrl-C ends it at once (review r3).
 async fn publish_retrying(
     staged: &Path,
     out_dir: &Path,
     name: &str,
+    cancel: &eid_engine::CancellationToken,
 ) -> Result<PathBuf, PublishError> {
-    retry_locked(PUBLISH_LOCK_TRIES, PUBLISH_LOCK_PAUSE, || {
+    retry_locked(PUBLISH_LOCK_TRIES, PUBLISH_LOCK_PAUSE, cancel, || {
         publish(staged, out_dir, name)
     })
     .await
@@ -684,6 +688,7 @@ async fn publish_retrying(
 async fn retry_locked<T>(
     tries: u32,
     pause: std::time::Duration,
+    cancel: &eid_engine::CancellationToken,
     mut attempt: impl FnMut() -> Result<T, PublishError>,
 ) -> Result<T, PublishError> {
     let mut left = tries.max(1);
@@ -696,7 +701,10 @@ async fn retry_locked<T>(
                         "{m}; still locked after {tries} tries, it is tried again at the next run"
                     )));
                 }
-                tokio::time::sleep(pause).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(pause) => {}
+                    _ = cancel.cancelled() => return Err(PublishError::Cancelled),
+                }
             }
             other => return other,
         }
@@ -709,9 +717,11 @@ async fn retry_locked<T>(
 /// otherwise nothing is published and the file stays in staging.
 fn publish(staged: &Path, out_dir: &Path, name: &str) -> Result<PathBuf, PublishError> {
     let f = eid_platform::fs::open_regular_nofollow(staged).map_err(|e| {
-        if eid_platform::fs::is_lock_contention(&e) {
+        // only "in use by another program" is retried; access denied (a folder or junction
+        // swapped in, a delete-pending file) is a refusal like any other (review r2)
+        if eid_platform::fs::is_file_in_use(&e) {
             PublishError::Locked(format!(
-                "the staged file {} is locked by another program: {e}",
+                "the staged file {} is in use by another program: {e}",
                 staged.display()
             ))
         } else {
@@ -964,9 +974,15 @@ async fn get(
     }
     let staged = finished_file(&staging, ext).map_err(Fail::Other)?;
     let name = publish_name(&info.title, ext, out_dir).map_err(Fail::Other)?;
-    let dest = publish_retrying(&staged, out_dir, &name)
-        .await
-        .map_err(|e| Fail::Other(e.to_string()))?;
+    let dest = match publish_retrying(&staged, out_dir, &name, &cancel).await {
+        Ok(d) => d,
+        Err(PublishError::Cancelled) => {
+            return Err(Fail::Cancelled(
+                "stopped before publishing; the download is kept in the staging folder".into(),
+            ))
+        }
+        Err(e) => return Err(Fail::Other(e.to_string())),
+    };
     let _ = std::fs::remove_dir_all(&staging);
     println!("{}", dest.display());
     Ok(())
@@ -1277,7 +1293,7 @@ async fn playlist(
                         }
                         None => name,
                     };
-                    match publish_retrying(&staged, &folder, &name).await {
+                    match publish_retrying(&staged, &folder, &name, &cancel).await {
                         Ok(dest) => {
                             let _ = std::fs::remove_dir_all(&staging);
                             if let Some(i) = state.get_mut(&e.id) {
@@ -1289,6 +1305,15 @@ async fn playlist(
                         }
                         // something planted in our staging folder: stop, fail closed
                         Err(PublishError::Refused(m)) => return Err(Fail::Other(m)),
+                        // Ctrl-C while waiting for a locked file: a cancel like any other, not
+                        // a failure of this item (review r3)
+                        Err(PublishError::Cancelled) => {
+                            drop(locked);
+                            return Err(Fail::Cancelled(format!(
+                                "stopped at item {n}; finished items are kept. Run the same \
+                                 command again to continue."
+                            )));
+                        }
                         // this item only: counted, kept in staging, the run goes on (m3)
                         Err(PublishError::Item(m) | PublishError::Locked(m)) => {
                             failed += 1;
@@ -1472,9 +1497,10 @@ mod tests {
             .unwrap();
         let z = std::time::Duration::ZERO;
         let locked = || PublishError::Locked("locked".into());
+        let live = eid_engine::CancellationToken::new();
         // locked twice, then free: published at the third attempt
         let mut n = 0;
-        let r = rt.block_on(retry_locked(5, z, || {
+        let r = rt.block_on(retry_locked(5, z, &live, || {
             n += 1;
             if n < 3 {
                 Err(locked())
@@ -1485,7 +1511,7 @@ mod tests {
         assert_eq!(r.unwrap(), 3);
         // always locked: exactly `tries` attempts, then an item failure
         let mut n = 0;
-        let r = rt.block_on(retry_locked(4, z, || -> Result<(), _> {
+        let r = rt.block_on(retry_locked(4, z, &live, || -> Result<(), _> {
             n += 1;
             Err(locked())
         }));
@@ -1496,12 +1522,55 @@ mod tests {
         );
         // a refusal (planted link, swap) stops at once
         let mut n = 0;
-        let r = rt.block_on(retry_locked(4, z, || -> Result<(), _> {
+        let r = rt.block_on(retry_locked(4, z, &live, || -> Result<(), _> {
             n += 1;
             Err(PublishError::Refused("planted".into()))
         }));
         assert_eq!(n, 1);
         assert!(matches!(r, Err(PublishError::Refused(_))));
+    }
+
+    /// Review r3: Ctrl-C ends the wait for a locked file at once (a cancel, not a failed
+    /// item), however long the pause.
+    #[test]
+    fn ctrl_c_ends_the_wait_for_a_locked_file() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let cancel = eid_engine::CancellationToken::new();
+        let c2 = cancel.clone();
+        let mut n = 0;
+        let t = std::time::Instant::now();
+        let r = rt.block_on(retry_locked(
+            10,
+            std::time::Duration::from_secs(3600),
+            &cancel,
+            || -> Result<(), _> {
+                n += 1;
+                c2.cancel(); // Ctrl-C arrives while the file is locked
+                Err(PublishError::Locked("locked".into()))
+            },
+        ));
+        assert!(matches!(r, Err(PublishError::Cancelled)), "{r:?}");
+        assert_eq!(n, 1, "no attempt after the cancel");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(60),
+            "waited the pause"
+        );
+    }
+
+    /// Review r2: sharing (32) and lock (33) violations are waited for on Windows; access
+    /// denied (5: a folder or junction swapped in, a delete-pending file) is a refusal, and
+    /// nothing is waited for on Unix, where an open takes no such lock.
+    #[test]
+    fn only_in_use_errors_count_as_a_locked_staged_file() {
+        let in_use =
+            |code| eid_platform::fs::is_file_in_use(&std::io::Error::from_raw_os_error(code));
+        assert_eq!(
+            (in_use(32), in_use(33), in_use(5)),
+            (eid_platform::IS_WINDOWS, eid_platform::IS_WINDOWS, false)
+        );
     }
 
     /// P4 review m9: the messages name `playlist` where it applies.
