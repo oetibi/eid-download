@@ -378,3 +378,7 @@ a_swap_while_publishing_stops_the_run_other_errors_fail_one_item
 a_swap_while_publishing_one_item_stops_the_playlist_run
 hard_link_in_a_reused_staging_folder_is_refused_before_the_tool_runs
 a_locked_staged_file_is_retried_then_fails_only_the_item
+# ---- separate review of the minors branch, notes r1-r3 (docs/reviews/P4-minors.md)
+unix:opening_a_fifo_is_refused_without_blocking
+ctrl_c_ends_the_wait_for_a_locked_file
+only_in_use_errors_count_as_a_locked_staged_file
