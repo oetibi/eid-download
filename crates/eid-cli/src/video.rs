@@ -118,7 +118,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         Some("playlist") => Sub::Playlist,
         other => {
             return Err(format!(
-                "expected info, get, consent or revoke, got {other:?}"
+                "expected info, get, playlist, consent or revoke, got {other:?}"
             ))
         }
     };
@@ -197,7 +197,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         return Err("--list only shows the plan; it cannot be combined with --retry-failed".into());
     }
     if !matches!(a.sub, Sub::Get | Sub::Playlist) && (a.dir.is_some() || a.limit_bps.is_some()) {
-        return Err("-d and --limit only apply to `eid video get`".into());
+        return Err("-d and --limit only apply to `eid video get` and `eid video playlist`".into());
     }
     Ok(a)
 }
@@ -1030,6 +1030,15 @@ async fn playlist(
     }
     let (mut state, planned) = pl::plan(old, &info.id, &info.entries).map_err(Fail::media)?;
     // `--retry-failed`: only the named items, and only if they failed or are unavailable
+    // a --skip number that no item of this listing has would otherwise be ignored silently
+    // (review m9); the run is not stopped for it
+    for n in a
+        .skip
+        .iter()
+        .filter(|n| !planned.iter().any(|(k, _)| k == *n))
+    {
+        eprintln!("--skip {n}: no item of this playlist has that number; ignored");
+    }
     if let Some(sel) = &a.retry_failed {
         let mut reset = vec![];
         for (n, e) in &planned {
@@ -1325,6 +1334,16 @@ mod tests {
             assert!(n.ends_with(".mp4") || !n.is_empty(), "{t:?} -> {n:?}");
             assert_eq!(d.join(&n).parent().unwrap(), d, "{t:?} escapes: {n:?}");
         }
+    }
+
+    /// P4 review m9: the messages name `playlist` where it applies.
+    #[test]
+    fn video_arg_errors_name_the_playlist_command() {
+        let e = v(&["nope"]).unwrap_err();
+        assert!(e.contains("playlist"), "{e}");
+        let e = v(&["info", "https://x.test/v", "-d", "out"]).unwrap_err();
+        assert!(e.contains("`eid video playlist`"), "{e}");
+        assert!(v(&["playlist", "https://x.test/p", "-d", "out", "--limit", "1M"]).is_ok());
     }
 
     /// P4 review m7: a reused staging folder is walked to a bounded depth; plain nested

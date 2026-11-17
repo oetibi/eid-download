@@ -1728,3 +1728,23 @@ async fn playlist_items_in_another_container_are_remuxed_and_a_bad_result_is_a_f
     // the bad files stay in their staging folders (never published, never deleted by us)
     assert_eq!(staging_dirs(&folder).len(), 2);
 }
+
+/// P4 review m9: a `--skip` number that no item has is reported (not silently ignored), and
+/// the run goes on with the numbers that exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn skip_numbers_that_no_item_has_are_reported_and_the_rest_apply() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    let url = purl(&e, &list, "pl22", "Skip", "");
+    write_list(&e, &items(3, |i| format!("T{i}")));
+    let o = playlist(&e, &url, &["-q", "--skip", "2,9"]).await;
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        err.contains("--skip 9: no item of this playlist has that number"),
+        "{err}"
+    );
+    assert!(!err.contains("--skip 2:"), "{err}");
+    assert_eq!(download_ids(&e.calls()), ["i1", "i3"]);
+    assert!(err.contains("2 downloaded, 1 deselected"), "{err}");
+}
