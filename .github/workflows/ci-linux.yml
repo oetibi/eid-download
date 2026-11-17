@@ -27,8 +27,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # the desktop app crate (eid-gui, Tauri 2) links against WebKitGTK on Linux; it is built
       # and unit tested here, its window only runs on Windows (ci-windows GUI smoke)
+      # (binutils-mingw-w64: x86_64-w64-mingw32-windres, which tauri-build needs to embed the
+      # icon and manifest when the Windows-gnu compile check below builds eid-gui)
       - name: System libraries for the Tauri crate
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libxdo-dev binutils-mingw-w64-x86-64
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: CPU count of this runner (context for the timing-sensitive socket tests)
