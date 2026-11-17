@@ -136,3 +136,23 @@ A second test can stage a hard-linked file, which `reject_if_not_plain` refuses 
 - Real yt-dlp: fragment leftovers (n6), and how flat entries without an address really look (m4 uses the fake's `nourl` shape).
 - A real antivirus lock on a staged file (n4).
 - M6, m5, m6 and M3 limit 5: open for the owner, outside this review.
+
+## Addendum (2026-11-17): review of `ed7d06b`, the commit that handles n1–n9
+Read in full: the `video.rs` changes (the hard-link check in `check_staging_tree`, `PublishError::Locked`, `publish_retrying`/`retry_locked`, `publish_fault`, and the new messages); the tests `hard_link_in_a_reused_staging_folder_is_refused_before_the_tool_runs`, `a_swap_while_publishing_one_item_stops_the_playlist_run` and `a_locked_staged_file_is_retried_then_fails_only_the_item`; and Round 17 rows n1–n9.
+
+Verdict: **n1–n6 and n9 are handled as described, with tests.** n7 is recorded for P5, and n8 is accepted. **Nothing blocking.** Four new notes, none blocking the merge:
+
+- **r1 (minor, Unix) — a FIFO swapped in after the type check can hang the walk or the publish.**
+  - **Where:** `check_staging_tree` (`video.rs`, the `md.is_file()` branch) and `publish`. Both open with `open_regular_nofollow[_read]` (`eid-platform/src/fs.rs:260-277`), which uses only `O_NOFOLLOW` (`fs.rs:47-49`).
+  - **What happens:** `symlink_metadata` reports a regular file. If someone replaces it with a FIFO in that instant, `open` blocks until a writer appears. Ctrl-C cannot interrupt a blocking `open` inside the async task, so `eid` hangs.
+  - **Precedent:** `eid-platform` already opens with `O_NONBLOCK` for exactly this reason in crash recovery.
+  - **Risk:** needs a same-user race; no data is written. The `publish` side existed before this branch.
+  - **Fix:** add `O_NONBLOCK` to these opens in `eid-platform`, with a FIFO test. It has no effect on regular files.
+- **r2 (nit, Windows) — error 5 counts as "locked".** `is_lock_contention` includes `ERROR_ACCESS_DENIED`. A folder or junction swapped in at the staged name after `finished_file` makes the open fail with 5. It is then retried for about 2 s and becomes an `Item` failure instead of `Refused`, so the run goes on. Nothing is published, and the next run's walk refuses the junction. Fail closed still holds; only "stop the run" is lost in that race.
+- **r3 (nit) — the lock retry does not watch Ctrl-C.** `retry_locked` sleeps up to 9 × 200 ms without racing the cancel token. Ctrl-C is then honoured at the next `await` that watches it, so the delay is bounded to about 1.8 s.
+- **r4 (nit) — only the open is retried.** A sharing violation at the rename (`rename_noreplace` has no retry) becomes an `Item` failure, and the next run retries it. That is acceptable; it is noted so the claim "locked files are retried" is read as "a locked open is retried".
+
+Not checked: the new tests on Linux (CI only); a real antivirus lock.
+
+## Addendum: CI failure on PR #27 (not caused by this branch)
+ci-windows run 54 on `ccf1300` failed in `midstream_disconnects_still_complete` (`eid-engine`, P1 code, which this branch does not touch). It was a timing assumption in the test; the root cause is fixed in `38edfc6` (see STATUS). Run 55 on `7222645` passed both jobs before that fix.

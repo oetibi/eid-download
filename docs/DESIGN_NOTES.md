@@ -223,3 +223,7 @@ Majors were fixed on their own branches (PRs #20–#26); the minors on `fix/p4-r
 | n7 | The m10 scan covers only `eid.exe` | **For P5:** the desktop app binary and the NSIS installers get the same scan and positive control when they exist. |
 | n8 | Commit hygiene | **Accepted, no history rewrite.** The PR description lists each commit, the prompt and the test output (AGENTS §3.9). |
 | n9 | m12 wording stronger than the test | **Fixed** in the m12 row above. |
+| r1 | Unix: a FIFO swapped in after the type check can hang the staging walk or the publish (`O_NOFOLLOW` without `O_NONBLOCK`) | **Open, not blocking.** Needs a same-user race and writes nothing; the publish side predates this branch. Fix belongs in `eid-platform` (add `O_NONBLOCK`, with a FIFO test) as its own change. |
+| r2 | Windows: error 5 counts as "locked", so a junction swapped in at the staged name is retried and then becomes a failed item, not a stop | **Open, not blocking.** Nothing is published; the next run's walk refuses the junction. |
+| r3 | The lock retry does not watch Ctrl-C | **Open, not blocking.** The delay is bounded to about 1.8 s; Ctrl-C is honoured at the next await. |
+| r4 | Only the open is retried, not a locked rename | **Accepted for now.** The rename failure is a failed item and is retried at the next run. |
