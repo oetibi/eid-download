@@ -235,7 +235,7 @@ async fn cancel_leaves_nothing_outside_staging_and_resume_reuses_it() {
     let mut c = e.cmd(&["video", "get", &url, "-d", &out, "--yes-i-agree", "-q"]);
     c.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let mut eid = c.spawn().unwrap();
+    let mut eid = Running::spawn(&mut c);
     // wait for the stalled download: the fake has logged its download call and written half
     let t = Instant::now();
     let (pid, part) = loop {
@@ -493,7 +493,8 @@ fn ctrl_c(eid: &std::process::Child, cancel_file: &std::path::Path) {
 }
 
 /// Wait for `eid` to exit within `limit`; on timeout kill it (no orphan) and fail.
-async fn exit_within(mut eid: std::process::Child, limit: Duration) -> std::process::Output {
+async fn exit_within(eid: Running, limit: Duration) -> std::process::Output {
+    let mut eid = eid.into_child();
     let t = Instant::now();
     loop {
         if eid.try_wait().unwrap().is_some() {
@@ -550,7 +551,7 @@ async fn cancel_during_tool_install_stops_at_once_and_leaves_nothing_behind() {
     c.env("EID_TEST_CANCEL_FILE", &cancel_file)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    let eid = c.spawn().unwrap();
+    let eid = Running::spawn(&mut c);
     // wait until the tool download is really under way: a staging folder with partial data
     let tools = e.tools_dir();
     let t = Instant::now();
@@ -602,7 +603,7 @@ async fn cancel_during_media_info_kills_the_tool_and_exits() {
     c.env("EID_TEST_CANCEL_FILE", &cancel_file)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    let eid = c.spawn().unwrap();
+    let eid = Running::spawn(&mut c);
     // the fake has logged its `-J` call and now hangs while the flag file exists
     let t = Instant::now();
     let pid = loop {
@@ -675,7 +676,7 @@ async fn cancel_during_playlist_listing_exits_130_and_writes_nothing() {
     c.env("EID_TEST_CANCEL_FILE", &cancel_file)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let eid = c.spawn().unwrap();
+    let eid = Running::spawn(&mut c);
     let t = Instant::now();
     let pid = loop {
         if let Some(c) = e.calls().first() {
@@ -919,7 +920,7 @@ async fn cancel_during_the_remux_keeps_the_original_and_publishes_nothing() {
     c.env("EID_TEST_CANCEL_FILE", &cancel_file)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    let eid = c.spawn().unwrap();
+    let eid = Running::spawn(&mut c);
     // the download is complete (the WebM is in place, no .part) and the tool hangs in the remux
     let t = Instant::now();
     let (pid, staging) = loop {

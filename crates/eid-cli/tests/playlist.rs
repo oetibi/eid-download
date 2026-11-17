@@ -123,11 +123,11 @@ fn has_bidi(s: &str) -> bool {
 }
 
 /// Start `eid video playlist` in the background (for the stall tests).
-fn spawn_eid(e: &Env, args: &[&str]) -> std::process::Child {
+fn spawn_eid(e: &Env, args: &[&str]) -> Running {
     let mut c = e.cmd(args);
     c.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    c.spawn().unwrap()
+    Running::spawn(&mut c)
 }
 
 /// Wait until the download of `id` has stalled half-way; returns (pid of the tool, `.part`).
@@ -155,7 +155,7 @@ async fn wait_for_stall(e: &Env, id: &str) -> (u32, PathBuf) {
 
 /// Stop eid like Ctrl-C (Unix) or a hard kill (Windows: the job object must take the tool
 /// down), wait for it and for the tool to be gone.
-async fn stop_eid(mut eid: std::process::Child, tool_pid: u32) {
+async fn stop_eid(mut eid: Running, tool_pid: u32) {
     #[cfg(unix)]
     assert!(command("kill", ["-INT", &eid.id().to_string()])
         .status()
@@ -1205,7 +1205,7 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
     assert!(err.contains("DRM"), "{err}");
     assert!(err.contains("removed"), "{err}");
     assert!(
-        err.contains("3 downloaded") || err.contains("2 downloaded"),
+        err.contains("2 downloaded, 0 deselected, 4 unavailable, 0 failed"),
         "{err}"
     );
     assert!(err.contains("4 unavailable"), "{err}");
