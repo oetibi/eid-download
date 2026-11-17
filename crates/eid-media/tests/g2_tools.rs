@@ -964,7 +964,6 @@ async fn tool_hash_is_read_through_the_locked_handle() {
     }
 }
 
-#[cfg(windows)]
 /// Deno, run by yt-dlp, gives itself a second name: `<DENO_DIR>/node_compat_bin/node.exe`, a
 /// hard link to `deno.exe` (found by the real-tool tests, STATUS 2026-11-17). Our `DENO_DIR`
 /// is `<root>/deno-cache`, so that link is removed before every lock and the next run is not
@@ -1023,6 +1022,7 @@ async fn deno_link_in_our_cache_is_removed_before_the_lock_and_others_still_refu
     );
 }
 
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tools_are_locked_against_write_delete_rename_while_a_job_runs() {
     let fx = Fx::new().await;
