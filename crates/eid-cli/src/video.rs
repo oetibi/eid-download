@@ -480,19 +480,49 @@ pub fn prepare_staging(out_dir: &Path, name: &str) -> Result<PathBuf, String> {
         }
         Ok(_) => {}
     }
-    // a reused folder (resume) must contain nothing but plain files and folders
-    for e in std::fs::read_dir(&p).map_err(|e| e.to_string())? {
+    // a reused folder (resume) must contain nothing but plain files and folders, at any depth
+    // (review m7); the walk is bounded and never enters a link
+    let mut budget = STAGING_MAX_ENTRIES;
+    check_staging_tree(&p, &p, 0, &mut budget)?;
+    Ok(p)
+}
+
+/// Bounds for walking a reused staging folder. yt-dlp with our template writes only files at
+/// its top level, so anything near these bounds is not ours.
+const STAGING_MAX_DEPTH: usize = 8;
+const STAGING_MAX_ENTRIES: usize = 10_000;
+
+fn check_staging_tree(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<(), String> {
+    let refuse = |why: String| format!("refusing to use {}: {why}", root.display());
+    for e in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let e = e.map_err(|e| e.to_string())?;
-        let md = std::fs::symlink_metadata(e.path()).map_err(|e| e.to_string())?;
+        *budget = budget
+            .checked_sub(1)
+            .ok_or_else(|| refuse(format!("it holds more than {STAGING_MAX_ENTRIES} entries")))?;
+        let path = e.path();
+        let md = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
         if is_link_or_odd(&md) {
-            return Err(format!(
-                "refusing to use {}: it contains a link ({})",
-                p.display(),
-                e.file_name().to_string_lossy()
-            ));
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            return Err(refuse(format!(
+                "it contains a link ({})",
+                crate::remote::printable(&rel.to_string_lossy())
+            )));
+        }
+        if md.is_dir() {
+            if depth + 1 >= STAGING_MAX_DEPTH {
+                return Err(refuse(format!(
+                    "its folders are nested more than {STAGING_MAX_DEPTH} deep"
+                )));
+            }
+            check_staging_tree(root, &path, depth + 1, budget)?;
         }
     }
-    Ok(p)
+    Ok(())
 }
 
 /// Remove a staging folder that is still empty after a cancel. The killed tree dies
@@ -1295,5 +1325,24 @@ mod tests {
             assert!(n.ends_with(".mp4") || !n.is_empty(), "{t:?} -> {n:?}");
             assert_eq!(d.join(&n).parent().unwrap(), d, "{t:?} escapes: {n:?}");
         }
+    }
+
+    /// P4 review m7: a reused staging folder is walked to a bounded depth; plain nested
+    /// folders within the bound are accepted, deeper nesting is refused, nothing is changed.
+    #[test]
+    fn reused_staging_folder_is_walked_with_a_depth_bound() {
+        let d = tempfile::tempdir().unwrap();
+        let s = d.path().join("st");
+        let mut deep = s.clone();
+        for i in 0..STAGING_MAX_DEPTH - 1 {
+            deep = deep.join(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("f.part"), b"x").unwrap();
+        assert_eq!(prepare_staging(d.path(), "st").unwrap(), s);
+        std::fs::create_dir(deep.join("one-more")).unwrap();
+        let e = prepare_staging(d.path(), "st").unwrap_err();
+        assert!(e.contains("nested more than"), "{e}");
+        assert!(deep.join("f.part").is_file(), "nothing is removed");
     }
 }

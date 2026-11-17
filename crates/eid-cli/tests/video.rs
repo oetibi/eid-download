@@ -155,7 +155,7 @@ async fn video_is_published_by_us_from_a_fresh_staging_dir() {
 }
 
 /// A link or junction (made by the test; the test fails if it cannot make one) planted where
-/// the staging folder goes, or inside a staging folder that is reused.
+/// the staging folder goes, or anywhere inside a staging folder that is reused (m7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn planted_symlink_or_junction_is_never_followed() {
     let e = Env::new().await;
@@ -172,10 +172,29 @@ async fn planted_symlink_or_junction_is_never_followed() {
         kinds.push("junction");
     }
     kinds.push("file-symlink-inside");
+    // P4 review m7: also deeper inside a reused staging folder, not only at its top level
+    kinds.push("file-symlink-in-a-subfolder");
+    kinds.push("dir-link-in-a-subfolder");
     for kind in kinds {
         match kind {
             "dir-symlink" => make_dir_link(&elsewhere, &staging),
             "junction" => make_junction(&elsewhere, &staging),
+            "file-symlink-in-a-subfolder" => {
+                std::fs::create_dir_all(staging.join("a").join("b")).unwrap();
+                eid_platform::fs::symlink_file(
+                    &elsewhere.join("victim.mp4"),
+                    &staging.join("a").join("b").join("abc.mp4"),
+                )
+                .expect("cannot create a symlink: this test must not pass without one");
+            }
+            "dir-link-in-a-subfolder" => {
+                std::fs::create_dir_all(staging.join("a")).unwrap();
+                if eid_platform::IS_WINDOWS {
+                    make_junction(&elsewhere, &staging.join("a").join("j"));
+                } else {
+                    make_dir_link(&elsewhere, &staging.join("a").join("j"));
+                }
+            }
             _ => {
                 std::fs::create_dir(&staging).unwrap();
                 eid_platform::fs::symlink_file(
