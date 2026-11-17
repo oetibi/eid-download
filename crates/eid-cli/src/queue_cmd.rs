@@ -398,7 +398,7 @@ pub async fn run_queue(a: &QueueArgs, cancel: CancellationToken) -> Result<i32, 
     });
     let sched = Scheduler::open(
         SchedulerConfig::new(&a.file),
-        Arc::new(EngineRunner { cfg: config_for(a) }),
+        Arc::new(EngineRunner::new(config_for(a))),
         Arc::new(SystemClock),
         Arc::new(NoPower),
         sink,

@@ -11,8 +11,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// Byte progress of one queue item: `(item, done, total)`. Called often (per received chunk), so it
+/// must be cheap and must not block.
+pub type ProgressSink = Arc<dyn Fn(u64, u64, Option<u64>) + Send + Sync>;
+
 pub struct EngineRunner {
     pub cfg: Config,
+    /// Where byte progress goes (the desktop app's progress bars); `None` drops it.
+    pub progress: Option<ProgressSink>,
+}
+
+impl EngineRunner {
+    pub fn new(cfg: Config) -> EngineRunner {
+        EngineRunner {
+            cfg,
+            progress: None,
+        }
+    }
 }
 
 /// `base/subdir`, created if needed. `subdir` is one validated plain component; an existing entry
@@ -69,6 +84,7 @@ impl JobRunner for EngineRunner {
         cancel: CancellationToken,
     ) -> BoxFuture<'static, RunResult> {
         let cfg = self.cfg.clone();
+        let progress = self.progress.clone();
         Box::pin(async move {
             let dir = match ensure_job_dir(&job.base_dir, job.subdir.as_deref()) {
                 Ok(d) => d,
@@ -81,10 +97,25 @@ impl JobRunner for EngineRunner {
             };
             let sink: download::EventSink = {
                 let started = started.clone();
-                Arc::new(move |e: Event| {
-                    if let Event::Started { name, .. } = e {
+                let item = job.item;
+                Arc::new(move |e: Event| match e {
+                    Event::Started { name, total, .. } => {
+                        if let Some(p) = &progress {
+                            p(item, 0, total);
+                        }
                         started(name);
                     }
+                    Event::Progress { done, total } => {
+                        if let Some(p) = &progress {
+                            p(item, done, total);
+                        }
+                    }
+                    Event::Finished { size } => {
+                        if let Some(p) = &progress {
+                            p(item, size, Some(size));
+                        }
+                    }
+                    _ => {}
                 })
             };
             // resume from a sidecar when there is one (by recorded name, else by URL)

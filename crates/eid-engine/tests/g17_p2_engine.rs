@@ -244,7 +244,7 @@ async fn a_queue_of_real_downloads_respects_its_parallel_limit_and_finishes_ever
     let ev = events.clone();
     let s = Scheduler::open(
         SchedulerConfig::new(&qpath),
-        Arc::new(EngineRunner { cfg: real_cfg() }),
+        Arc::new(EngineRunner::new(real_cfg())),
         Arc::new(SystemClock),
         Arc::new(NoPower),
         Arc::new(move |e| ev.lock().unwrap().push(e)),
@@ -321,7 +321,7 @@ async fn stopping_the_queue_mid_download_and_reopening_resumes_from_the_frontier
     let open = |q: &std::path::Path| {
         Scheduler::open(
             SchedulerConfig::new(q),
-            Arc::new(EngineRunner { cfg: real_cfg() }),
+            Arc::new(EngineRunner::new(real_cfg())),
             Arc::new(SystemClock),
             Arc::new(NoPower),
             Arc::new(|_| {}),

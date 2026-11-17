@@ -49,6 +49,8 @@ impl PowerControl for NoPower {
 
 #[derive(Clone)]
 pub struct RunJob {
+    /// The queue item this job runs (lets a progress sink tell items apart).
+    pub item: u64,
     /// Credential-free URL.
     pub url: String,
     /// In memory only; never written anywhere by the scheduler.
@@ -444,6 +446,7 @@ impl Inner {
             it.status = Status::Running;
             (
                 RunJob {
+                    item: item_id,
                     url: it.url.clone(),
                     auth: self.auth.lock().unwrap().get(&item_id).cloned(),
                     base_dir,
