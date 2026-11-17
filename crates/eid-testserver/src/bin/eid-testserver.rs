@@ -8,6 +8,8 @@ async fn main() -> std::io::Result<()> {
         ("/demo.bin", Behavior::well_behaved()),
         ("/no-range.bin", Behavior::no_range()),
         ("/cuts.bin", Behavior::cuts_every(32 * 1024)),
+        // throttled per connection: slow enough to watch progress, pause and resume (GUI smoke)
+        ("/slow.bin", Behavior::slow(48 * 1024)),
     ] {
         server.add(
             path,
