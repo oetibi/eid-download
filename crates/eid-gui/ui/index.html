@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eid Download</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="brand"><span class="logo" aria-hidden="true">⭳</span><h1 data-t="app_title"></h1></div>
+    <div class="actions">
+      <button id="btn-add" class="primary" data-t="add"></button>
+      <button id="btn-clear" data-t="clear_finished"></button>
+      <button id="btn-lang" class="ghost" data-t="lang_switch"></button>
+    </div>
+  </header>
+
+  <nav class="filters" role="tablist">
+    <button role="tab" data-filter="all" class="on"><span data-t="f_all"></span> <b data-count="all">0</b></button>
+    <button role="tab" data-filter="active"><span data-t="f_active"></span> <b data-count="active">0</b></button>
+    <button role="tab" data-filter="done"><span data-t="f_done"></span> <b data-count="done">0</b></button>
+    <button role="tab" data-filter="failed"><span data-t="f_failed"></span> <b data-count="failed">0</b></button>
+  </nav>
+
+  <main>
+    <ul id="list" class="list" aria-live="polite"></ul>
+    <p id="empty" class="empty" hidden></p>
+  </main>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <dialog id="dlg-add">
+    <form id="form-add" method="dialog">
+      <h2 data-t="add_title"></h2>
+      <label for="in-links" data-t="links_label"></label>
+      <div class="row">
+        <textarea id="in-links" rows="4" dir="ltr" spellcheck="false" autocomplete="off"></textarea>
+      </div>
+      <label data-t="folder_label"></label>
+      <div class="row folder">
+        <bdi id="folder-show" class="path" dir="ltr"></bdi>
+        <button type="button" id="btn-pick" data-t="choose"></button>
+        <button type="button" id="btn-reset" class="ghost" data-t="reset_folder"></button>
+      </div>
+      <label for="in-name" data-t="name_label"></label>
+      <input id="in-name" type="text" dir="auto" maxlength="200" autocomplete="off">
+      <p id="add-error" class="error" hidden></p>
+      <div class="buttons">
+        <button type="button" id="btn-cancel" class="ghost" data-t="cancel"></button>
+        <button type="submit" id="btn-start" class="primary" data-t="start"></button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

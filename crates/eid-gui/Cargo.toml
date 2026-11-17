@@ -1,0 +1,38 @@
+[package]
+name = "eid-gui"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Eid Download desktop app (Tauri 2)"
+
+[lib]
+name = "eid_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "EidDownload"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+eid-engine = { path = "../eid-engine" }
+eid-platform = { path = "../eid-platform" }
+eid-ipc = { path = "../eid-ipc" }
+eid-cli = { path = "../eid-cli" }
+# custom-protocol: serve the window from the files embedded in the exe (no dev server)
+tauri = { version = "2", features = ["custom-protocol"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "sync", "macros"] }
+url = "2"
+percent-encoding = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
