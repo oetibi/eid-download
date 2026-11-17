@@ -1371,6 +1371,47 @@ async fn one_item_that_cannot_be_published_does_not_end_the_playlist_run() {
     assert!(staging_dirs(&folder).is_empty(), "{:?}", entries(&folder));
 }
 
+/// Review n1: a swap detected while publishing one item stops the playlist run (fail closed):
+/// the items after it are not downloaded, no summary is printed, nothing is published under
+/// that name, and the download stays in staging. The swap is injected with the test-hooks
+/// fault `EID_TEST_PUBLISH_FAIL=swap:<name>`, which goes through the real classifier.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_swap_while_publishing_one_item_stops_the_playlist_run() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    let url = purl(&e, &list, "pl23", "Swap", "");
+    write_list(
+        &e,
+        &[item("a", "Alpha"), item("b", "Bravo"), item("c", "Charlie")],
+    );
+    let out = e.out().display().to_string();
+    let mut c = e.cmd(&["video", "playlist", &url, "-d", &out, "--yes-i-agree"]);
+    c.env("EID_TEST_PUBLISH_FAIL", "swap:02 - Bravo.mp4");
+    let o = tokio::task::spawn_blocking(move || c.output().unwrap())
+        .await
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("changed while it was being published"),
+        "{err}"
+    );
+    assert_eq!(
+        download_ids(&e.calls()),
+        ["a", "b"],
+        "c must not be tried: {err}"
+    );
+    assert!(
+        !err.contains(" downloaded, "),
+        "a summary after a refusal: {err}"
+    );
+    let folder = e.out().join("Swap");
+    assert_eq!(visible(&folder), ["01 - Alpha.mp4"]);
+    assert_eq!(staging_dirs(&folder).len(), 1, "{:?}", entries(&folder));
+    assert_ne!(item_state(&folder, "b")["status"], "done");
+    assert_ne!(item_state(&folder, "c")["status"], "done");
+}
+
 /// P4 review m4: a listing entry without a usable address (some extractors give only an id)
 /// is a temporary failure like any other (owner decision M2): counted per run, `failed` after
 /// MAX_ATTEMPTS runs and then not asked again, keeping its number; the other items are fine.

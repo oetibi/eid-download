@@ -222,6 +222,41 @@ async fn planted_symlink_or_junction_is_never_followed() {
     }
 }
 
+/// Review n3 (AGENTS §6.1): a hard link anywhere in a reused staging folder (here a `.part`
+/// that is a second name of a file outside) refuses the folder before the tool runs, so a
+/// resume can never append to the outside file. Fails loudly if the link cannot be made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hard_link_in_a_reused_staging_folder_is_refused_before_the_tool_runs() {
+    let e = Env::new().await;
+    let url = e.url("video/abc", "");
+    let out = e.out().display().to_string();
+    let outside = e.root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let victim = outside.join("victim.bin");
+    std::fs::write(&victim, b"precious").unwrap();
+    let staging = e.out().join(eid_cli::video::staging_name(
+        &eid_media::args::MediaUrl::parse(&url).unwrap(),
+        &eid_media::args::Quality::Best,
+    ));
+    for (k, part) in [
+        ("top level", staging.join("abc.mp4.part")),
+        ("in a subfolder", staging.join("sub").join("abc.mp4.part")),
+    ] {
+        std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+        std::fs::hard_link(&victim, &part)
+            .expect("cannot create a hard link: this test must not pass without one");
+        let o = e
+            .run(&["video", "get", &url, "-d", &out, "--yes-i-agree", "-q"])
+            .await;
+        assert_eq!(o.status.code(), Some(1), "{k}: {}", text(&o));
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("hard link"), "{k}: {}", text(&o));
+        assert!(e.calls().is_empty(), "{k}: the tool ran");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious", "{k}");
+        std::fs::remove_dir_all(&staging).unwrap();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_leaves_nothing_outside_staging_and_resume_reuses_it() {
     let e = Env::new().await;
