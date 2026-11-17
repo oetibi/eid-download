@@ -5,7 +5,7 @@ members = ["crates/eid-engine", "crates/eid-platform", "crates/eid-testserver", 
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-# license undecided (docs/adr/0008-license.md): no LICENSE file and publish = false in every crate until the owner decides
+license = "MIT"   # docs/adr/0008-license.md (owner decision 2026-11-17)
 
 
 [workspace.lints.rust]

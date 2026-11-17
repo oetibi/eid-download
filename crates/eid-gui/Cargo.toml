@@ -2,6 +2,7 @@
 name = "eid-gui"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 description = "Eid Download desktop app (Tauri 2)"
 

@@ -1,0 +1,20 @@
+# cargo-about: THIRD-PARTY-LICENSES.html shipped inside EidDownload-windows-x64.zip (CI).
+# Same license list as deny.toml; only what is compiled into the Windows x64 release.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "BSL-1.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+no-clearly-defined = true

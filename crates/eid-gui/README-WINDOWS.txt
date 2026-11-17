@@ -19,6 +19,7 @@ Eid Download - عيد للتحميل (Windows 10/11, 64-bit)
 - إزالة تحميل من القائمة لا تحذف الملف من القرص.
 - eid.exe هو سطر الأوامر لنفس البرنامج (eid add / list / pause / resume / stop يتحكم بالنافذة المفتوحة).
 - eid-native-host.exe لإضافة المتصفح (لم تُنشر الإضافة بعد).
+- الرخصة: MIT (LICENSE.txt). رخص المكتبات المضمَّنة: THIRD-PARTY-LICENSES.html.
 
 Running
 -------
@@ -28,3 +29,4 @@ Running
    Ctrl+V in the window with a copied link also opens it.
 4. Per download: Pause / Resume / Retry / Remove from list / Show in folder.
 Closing the window stops the downloads; they resume on the next start. Needs Microsoft Edge WebView2.
+License: MIT (LICENSE.txt). Third-party licenses: THIRD-PARTY-LICENSES.html.
