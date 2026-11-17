@@ -1412,6 +1412,48 @@ async fn a_swap_while_publishing_one_item_stops_the_playlist_run() {
     assert_ne!(item_state(&folder, "c")["status"], "done");
 }
 
+/// P4 review m5, owner decision m5(a): the tool records an item in the archive when its
+/// download succeeds, before we publish. If the kept download then disappears (here the
+/// staging folder is emptied, as an antivirus might), the next run is skipped by the archive
+/// and the item becomes done without a file. That is now reported, even with -q, naming the
+/// expected file, the id and the archive to edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_archived_item_without_a_published_file_is_reported() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    let url = purl(&e, &list, "pl24", "Lost", "");
+    write_list(&e, &[item("a", "Alpha"), item("b", "Bravo")]);
+    let out = e.out().display().to_string();
+    let mut c = e.cmd(&["video", "playlist", &url, "-d", &out, "--yes-i-agree", "-q"]);
+    c.env("EID_TEST_PUBLISH_FAIL", "02 - Bravo.mp4");
+    let o = tokio::task::spawn_blocking(move || c.output().unwrap())
+        .await
+        .unwrap();
+    let folder = folder_of(&o);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert_eq!(item_state(&folder, "b")["status"], "pending");
+    let st = staging_dirs(&folder);
+    assert_eq!(st.len(), 1, "{:?}", entries(&folder));
+    for f in entries(&folder.join(&st[0])) {
+        std::fs::remove_file(folder.join(&st[0]).join(f)).unwrap();
+    }
+    let o = playlist(&e, &url, &["-q"]).await;
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        err.contains("2: warning: the download archive already lists this item"),
+        "{err}"
+    );
+    assert!(err.contains("02 - Bravo.mp4"), "{err}");
+    assert!(err.contains(".eid-archive.txt"), "{err}");
+    assert!(
+        !err.contains("1: warning"),
+        "a published item was reported: {err}"
+    );
+    assert_eq!(visible(&folder), ["01 - Alpha.mp4"]);
+    assert_eq!(download_ids(&e.calls()), ["a", "b", "b"], "{err}");
+}
+
 /// P4 review m4: a listing entry without a usable address (some extractors give only an id)
 /// is a temporary failure like any other (owner decision M2): counted per run, `failed` after
 /// MAX_ATTEMPTS runs and then not asked again, keeping its number; the other items are fine.

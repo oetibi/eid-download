@@ -1329,6 +1329,17 @@ async fn playlist(
                         i.status = Status::Done;
                         i.attempts = 0;
                     }
+                    // the item was not done in our state, so the tool recorded it in the
+                    // archive but we never published its file (for example the staging folder
+                    // was emptied in between): say so, even with -q (owner decision m5(a))
+                    eprintln!(
+                        "{n}: warning: the download archive already lists this item, but no file \
+                         was published for it. If {} is missing, remove the line ending in {} \
+                         from {} and run again.",
+                        p(&pl::item_name(state.width, *n, &e.title, ext)),
+                        p(&e.id),
+                        pl::ARCHIVE_NAME
+                    );
                 }
                 Err(m) => {
                     failed += 1;
