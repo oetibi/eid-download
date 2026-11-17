@@ -28,6 +28,9 @@ allow = [
     "BSL-1.0",
     "Unlicense",
     "CDLA-Permissive-2.0", # webpki-roots (Mozilla root store data)
+    # P5 desktop app (Tauri 2), 2026-11-17 — owner to confirm (docs/DEPENDENCIES.md):
+    "MPL-2.0",                       # cssparser, selectors, dtoa-short (tauri-utils HTML), option-ext (dirs); file-level copyleft, used unmodified
+    "Apache-2.0 WITH LLVM-exception", # target-lexicon (Linux build of the Tauri crate)
 ]
 confidence-threshold = 0.9
 # Our own crates are `publish = false` and carry no license yet (ADR-0008).
