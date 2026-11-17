@@ -128,7 +128,7 @@ jobs:
       # MIT and Apache-2.0 require the license texts of the crates we ship next to the binaries;
       # MPL-2.0 requires telling the recipient where the source is. cargo-about writes both.
       - uses: taiki-e/install-action@v2
-        with: { tool: cargo-about }
+        with: { tool: cargo-about@0.9.3 }   # pinned; installed from its GitHub release, checksum verified
       - name: Third-party license notices (fails on any license not in about.toml)
         run: cargo about generate --locked --fail -o THIRD-PARTY-LICENSES.html about.hbs
       - name: Package EidDownload-windows-x64.zip
