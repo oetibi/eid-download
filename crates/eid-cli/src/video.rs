@@ -239,6 +239,12 @@ mod test_hooks {
     /// `EID_TEST_CANCEL_FILE=<path>`: cancel the run (exactly what Ctrl-C does) once that file
     /// exists. A real console Ctrl-C cannot be sent to a child on Windows CI (MANUAL-TESTS #14),
     /// so the tests use this on Windows; on Unix they send a real SIGINT.
+    /// `EID_TEST_PUBLISH_FAIL=<file name>`: publishing under exactly that name fails like an
+    /// I/O error (review m3: one item's publish error must not end a playlist run).
+    pub fn publish_fails(name: &str) -> bool {
+        std::env::var_os("EID_TEST_PUBLISH_FAIL").is_some_and(|v| v == name)
+    }
+
     pub fn cancel_when_file_appears(cancel: &eid_engine::CancellationToken) {
         let Some(p) = std::env::var_os("EID_TEST_CANCEL_FILE") else {
             return;
@@ -577,20 +583,39 @@ pub fn publish_name(title: &str, ext: &str, out_dir: &Path) -> Result<String, St
     }
 }
 
+/// Why [`publish`] published nothing.
+#[derive(Debug)]
+enum PublishError {
+    /// The staged file is not a plain file we can open without following links (something
+    /// was planted in our staging folder): the run stops, fail closed.
+    Refused(String),
+    /// This file could not be published (bad container, I/O error, no free name); the file
+    /// stays in staging. In a playlist this is a failed item and the run goes on (review m3).
+    Item(String),
+}
+
+impl std::fmt::Display for PublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PublishError::Refused(m) | PublishError::Item(m) => f.write_str(m),
+        }
+    }
+}
+
 /// Publish `staged` (opened without following links and checked to be a plain file) into
 /// `out_dir` under `name`, or `name (n)` if taken; never overwrites anything. An `.mp4` must
 /// be a whole MP4 container, checked through the same handle that is published (review M4);
 /// otherwise nothing is published and the file stays in staging.
-fn publish(staged: &Path, out_dir: &Path, name: &str) -> Result<PathBuf, String> {
+fn publish(staged: &Path, out_dir: &Path, name: &str) -> Result<PathBuf, PublishError> {
     let f = eid_platform::fs::open_regular_nofollow(staged)
-        .map_err(|e| format!("refusing the staged file: {e}"))?;
+        .map_err(|e| PublishError::Refused(format!("refusing the staged file: {e}")))?;
     if name.ends_with(".mp4") {
         let mut r = &f;
         eid_media::container::check_mp4(&mut r).map_err(|e| {
-            format!(
+            PublishError::Item(format!(
                 "refusing to publish {}: {e}; it is kept in the staging folder",
                 staged.display()
-            )
+            ))
         })?;
     }
     for n in 0..1000u32 {
@@ -600,13 +625,27 @@ fn publish(staged: &Path, out_dir: &Path, name: &str) -> Result<PathBuf, String>
             eid_engine::sanitize::numbered_name(name, n)
         };
         let dest = out_dir.join(&cand);
+        #[cfg(feature = "test-hooks")]
+        if test_hooks::publish_fails(&cand) {
+            return Err(PublishError::Item(format!(
+                "cannot publish {}: injected test fault; it is kept in the staging folder",
+                dest.display()
+            )));
+        }
         match eid_platform::fs::publish_verified(&f, staged, &dest) {
             Ok(()) => return Ok(dest),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("cannot publish {}: {e}", dest.display())),
+            Err(e) => {
+                return Err(PublishError::Item(format!(
+                    "cannot publish {}: {e}; it is kept in the staging folder",
+                    dest.display()
+                )))
+            }
         }
     }
-    Err("no free file name (1000 taken)".into())
+    Err(PublishError::Item(
+        "no free file name (1000 taken); it is kept in the staging folder".into(),
+    ))
 }
 
 // ------------------------------------------------------------------ commands
@@ -797,7 +836,7 @@ async fn get(
     }
     let staged = finished_file(&staging, ext).map_err(Fail::Other)?;
     let name = publish_name(&info.title, ext, out_dir).map_err(Fail::Other)?;
-    let dest = publish(&staged, out_dir, &name).map_err(Fail::Other)?;
+    let dest = publish(&staged, out_dir, &name).map_err(|e| Fail::Other(e.to_string()))?;
     let _ = std::fs::remove_dir_all(&staging);
     println!("{}", dest.display());
     Ok(())
@@ -1062,9 +1101,14 @@ async fn playlist(
         }
         let item_url = match e.url.as_deref().map(MediaUrl::parse) {
             Some(Ok(u)) => u,
+            // a temporary failure like any other (owner decision M2): counted, and after
+            // MAX_ATTEMPTS runs no longer asked automatically (review m4; it used to fail on
+            // every run without ever being recorded)
             _ => {
                 failed += 1;
                 eprintln!("{n}: the playlist gave no usable address for this item");
+                temporary(&mut state, &e.id, *n);
+                pl::save(&folder, &state).map_err(Fail::media)?;
                 continue;
             }
         };
@@ -1094,14 +1138,25 @@ async fn playlist(
                         }
                         None => name,
                     };
-                    let dest = publish(&staged, &folder, &name).map_err(Fail::Other)?;
-                    let _ = std::fs::remove_dir_all(&staging);
-                    if let Some(i) = state.get_mut(&e.id) {
-                        i.status = Status::Done;
-                        i.attempts = 0;
-                        i.file = dest.file_name().map(|f| f.to_string_lossy().into_owned());
+                    match publish(&staged, &folder, &name) {
+                        Ok(dest) => {
+                            let _ = std::fs::remove_dir_all(&staging);
+                            if let Some(i) = state.get_mut(&e.id) {
+                                i.status = Status::Done;
+                                i.attempts = 0;
+                                i.file = dest.file_name().map(|f| f.to_string_lossy().into_owned());
+                            }
+                            got += 1;
+                        }
+                        // something planted in our staging folder: stop, fail closed
+                        Err(PublishError::Refused(m)) => return Err(Fail::Other(m)),
+                        // this item only: counted, kept in staging, the run goes on (m3)
+                        Err(PublishError::Item(m)) => {
+                            failed += 1;
+                            eprintln!("{n}: {}", p(&m));
+                            temporary(&mut state, &e.id, *n);
+                        }
                     }
-                    got += 1;
                 }
                 // nothing new: yt-dlp skipped it because the archive already lists it
                 Err(_) if empty(&staging) => {

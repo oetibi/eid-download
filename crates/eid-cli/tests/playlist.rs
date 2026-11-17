@@ -1294,6 +1294,104 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
 
 // ------------------------------------------------------------------ retries (P4 review M2)
 
+/// P4 review m3: one item that cannot be published does not end the run. The items after it
+/// are still downloaded and the summary is printed; the item counts as a temporary failure
+/// (M2) and keeps its download in staging, so the next run publishes it. The publish error is
+/// injected with the `test-hooks` hook `EID_TEST_PUBLISH_FAIL` (an I/O error at that name: a
+/// real one, such as a full disk or a refused path, cannot be caused per item portably).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_item_that_cannot_be_published_does_not_end_the_playlist_run() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    let url = purl(&e, &list, "pl20", "Pub", "");
+    write_list(
+        &e,
+        &[item("a", "Alpha"), item("b", "Bravo"), item("c", "Charlie")],
+    );
+    let out = e.out().display().to_string();
+    let mut c = e.cmd(&["video", "playlist", &url, "-d", &out, "--yes-i-agree"]);
+    c.env("EID_TEST_PUBLISH_FAIL", "02 - Bravo.mp4");
+    let o = tokio::task::spawn_blocking(move || c.output().unwrap())
+        .await
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    let folder = folder_of(&o);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert_eq!(download_ids(&e.calls()), ["a", "b", "c"], "{err}");
+    assert!(err.contains("2: cannot publish"), "{err}");
+    assert!(
+        err.contains("2 downloaded, 0 deselected, 0 unavailable, 1 failed"),
+        "no summary: {err}"
+    );
+    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "03 - Charlie.mp4"]);
+    let b = item_state(&folder, "b");
+    assert_eq!(
+        (
+            b["status"].as_str(),
+            b["attempts"].as_u64(),
+            b["number"].as_u64()
+        ),
+        (Some("pending"), Some(1), Some(2)),
+        "{err}"
+    );
+    assert_eq!(item_state(&folder, "c")["status"], "done");
+    assert_eq!(staging_dirs(&folder).len(), 1, "{:?}", entries(&folder));
+    // the next run (no fault) publishes the kept download under its number
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        visible(&folder),
+        ["01 - Alpha.mp4", "02 - Bravo.mp4", "03 - Charlie.mp4"]
+    );
+    assert_eq!(
+        std::fs::read(folder.join("02 - Bravo.mp4")).unwrap(),
+        fixture("clip.mp4")
+    );
+    assert_eq!(item_state(&folder, "b")["status"], "done");
+    assert!(staging_dirs(&folder).is_empty(), "{:?}", entries(&folder));
+}
+
+/// P4 review m4: a listing entry without a usable address (some extractors give only an id)
+/// is a temporary failure like any other (owner decision M2): counted per run, `failed` after
+/// MAX_ATTEMPTS runs and then not asked again, keeping its number; the other items are fine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_item_without_an_address_stops_being_retried_after_three_runs() {
+    let e = Env::new().await;
+    let list = e.root.path().join("list.json");
+    let url = purl(&e, &list, "pl21", "NoUrl", "");
+    let mut bare = item("x", "Bare");
+    bare["nourl"] = json!(true);
+    write_list(&e, &[item("a", "Alpha"), bare, item("c", "Charlie")]);
+    let folder = e.out().join("NoUrl");
+    for k in 1..=4u64 {
+        let o = playlist(&e, &url, &["-q"]).await;
+        let err = String::from_utf8_lossy(&o.stderr).into_owned();
+        assert_eq!(o.status.code(), Some(1), "run {k}: {err}");
+        let x = item_state(&folder, "x");
+        let want = match k {
+            1 | 2 => (Some("pending"), Some(k)),
+            _ => (Some("failed"), Some(3)),
+        };
+        assert_eq!(
+            (x["status"].as_str(), x["attempts"].as_u64()),
+            want,
+            "run {k}"
+        );
+        assert_eq!(x["number"], 2, "run {k}");
+        if k <= 3 {
+            assert!(
+                err.contains("2: the playlist gave no usable address"),
+                "run {k}: {err}"
+            );
+        } else {
+            assert!(!err.contains("no usable address"), "run {k}: {err}");
+            assert!(err.contains("--retry-failed 2"), "run {k}: {err}");
+        }
+    }
+    assert_eq!(download_ids(&e.calls()), ["a", "c"]);
+    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "03 - Charlie.mp4"]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn temporary_failures_stop_after_three_runs_and_retry_failed_resets_only_the_named_items() {
     let e = Env::new().await;
