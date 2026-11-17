@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tokio::sync::Notify;
 
 /// Everything the window's commands need.
 pub struct AppState {
@@ -23,6 +24,8 @@ pub struct AppState {
     pub progress: Arc<Progress>,
     pub cancel: CancellationToken,
     pub default_dir: String,
+    /// Signalled when a second launch of the app asks this window to come forward.
+    pub show: Arc<Notify>,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<Result<(), String>>>>,
 }
 
@@ -30,8 +33,8 @@ pub struct AppState {
 pub enum Boot {
     /// This process owns the queue: open the window.
     Owner(AppState),
-    /// Another Eid Download window is already open.
-    AlreadyOpen,
+    /// Another Eid Download window is already open; `shown` = it was asked to come forward.
+    AlreadyOpen { shown: bool },
 }
 
 /// How long a background `eid serve` gets to hand the queue over.
@@ -69,6 +72,15 @@ async fn take_over(ep: &Endpoint) -> Result<(), String> {
     Err("the background Eid Download did not stop in time".into())
 }
 
+/// Ask the open window to come forward (a second double-click on the app).
+async fn already_open(ep: &Endpoint) -> Boot {
+    let shown = match Client::connect(ep).await {
+        Ok(mut c) => c.call(Command::Show {}).await.is_ok(),
+        Err(_) => false,
+    };
+    Boot::AlreadyOpen { shown }
+}
+
 /// Start-up: become the single owner of the queue, or find the window that already is.
 pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
     let conn = ConnArgs {
@@ -77,7 +89,7 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
     };
     let ep = conn.endpoint().map_err(|e| e.to_string())?;
     match existing_app(&ep).await? {
-        Some(kind) if kind == APP_GUI => return Ok(Boot::AlreadyOpen),
+        Some(kind) if kind == APP_GUI => return Ok(already_open(&ep).await),
         Some(_) => take_over(&ep).await?,
         None => {}
     }
@@ -118,16 +130,20 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         })
         .map_err(|e| e.to_string())?;
     let cancel = CancellationToken::new();
-    let handler = Arc::new(serve::handler(
-        sched.clone(),
-        MAIN_QUEUE.to_owned(),
-        cancel.clone(),
-        Arc::new(AtomicBool::new(false)),
-        APP_GUI,
+    let show = Arc::new(Notify::new());
+    let handler = Arc::new(core::with_show(
+        serve::handler(
+            sched.clone(),
+            MAIN_QUEUE.to_owned(),
+            cancel.clone(),
+            Arc::new(AtomicBool::new(false)),
+            APP_GUI,
+        ),
+        show.clone(),
     ));
     let running = match eid_ipc::start(&ep, handler, ServeOptions::default()) {
         Ok(r) => r,
-        Err(StartError::AlreadyRunning) => return Ok(Boot::AlreadyOpen),
+        Err(StartError::AlreadyRunning) => return Ok(already_open(&ep).await),
         Err(e) => return Err(e.to_string()),
     };
     let (s2, c2) = (sched.clone(), cancel.clone());
@@ -143,6 +159,7 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         progress,
         cancel,
         default_dir,
+        show,
         task: Mutex::new(Some(task)),
     }))
 }
@@ -250,5 +267,21 @@ pub fn exit_on_cancel(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         c.cancelled().await;
         h.exit(0);
+    });
+}
+
+/// Bring the window forward each time a second launch of the app asks for it.
+pub fn focus_on_show(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    let (show, h) = (st.show.clone(), app.clone());
+    tauri::async_runtime::spawn(async move {
+        loop {
+            show.notified().await;
+            if let Some(w) = h.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }
     });
 }

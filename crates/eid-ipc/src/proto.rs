@@ -40,6 +40,9 @@ pub enum Command {
     Resume {
         item: u64,
     },
+    /// Bring the desktop app's window to the front (a second double-click on the app sends it;
+    /// the headless `eid serve` has no window and refuses it). Never allowed from a browser.
+    Show {},
 }
 
 impl Command {
@@ -170,6 +173,8 @@ mod tests {
         assert!(matches!(r.command, Command::Add { subdir: None, .. }));
         let r = req(r#"{"v":1,"id":"x","command":{"cmd":"pause","item":7}}"#).unwrap();
         assert_eq!(r.command, Command::Pause { item: 7 });
+        let r = req(r#"{"v":1,"id":"x","command":{"cmd":"show"}}"#).unwrap();
+        assert_eq!(r.command, Command::Show {});
     }
 
     #[test]
@@ -234,5 +239,6 @@ mod tests {
         assert!(!Command::Shutdown {}.allowed_from_browser());
         assert!(!Command::Pause { item: 1 }.allowed_from_browser());
         assert!(!Command::Resume { item: 1 }.allowed_from_browser());
+        assert!(!Command::Show {}.allowed_from_browser());
     }
 }

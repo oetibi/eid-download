@@ -197,6 +197,9 @@ pub fn handler(
             .resume_item(item)
             .map(|_| json!({}))
             .map_err(|e| e.to_string()),
+        // the desktop app answers this itself (eid-gui wraps this handler); the headless
+        // server has no window to show
+        Command::Show {} => Err("no window: this is the background server".into()),
     }
 }
 

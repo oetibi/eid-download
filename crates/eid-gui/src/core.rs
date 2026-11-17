@@ -5,11 +5,13 @@
 use eid_engine::queue::{Item, Queue, QueueSet, Status};
 use eid_engine::scheduler::Scheduler;
 use eid_engine::urlsafe;
+use eid_ipc::Command;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 /// The queue every download goes to unless the user picks another folder.
 pub const MAIN_QUEUE: &str = "main";
@@ -413,6 +415,25 @@ pub fn clear_finished(sched: &Scheduler) -> Result<usize, String> {
         .map_err(|e| e.to_string())
 }
 
+/// The desktop app's IPC handler: the one `eid serve` uses, plus `show` (a second launch of the
+/// app asks the open one to bring its window forward instead of showing a second window).
+pub fn with_show<H>(
+    inner: H,
+    show: Arc<Notify>,
+) -> impl Fn(Command) -> Result<serde_json::Value, String> + Send + Sync + 'static
+where
+    H: Fn(Command) -> Result<serde_json::Value, String> + Send + Sync + 'static,
+{
+    move |cmd| match cmd {
+        Command::Show {} => {
+            // stores a permit when the window task is not waiting yet: never lost
+            show.notify_one();
+            Ok(serde_json::json!({}))
+        }
+        other => inner(other),
+    }
+}
+
 /// `edit` wraps the closure's error as "invalid input: X"; give the window just X.
 fn invalid_input_text(s: &str) -> String {
     s.strip_prefix("invalid input: ").unwrap_or(s).to_owned()
@@ -428,6 +449,27 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    #[tokio::test]
+    async fn show_wakes_the_window_and_everything_else_goes_to_the_shared_handler() {
+        let show = Arc::new(Notify::new());
+        let seen = Arc::new(Mutex::new(vec![]));
+        let s2 = seen.clone();
+        let h = with_show(
+            move |c: Command| {
+                s2.lock().unwrap().push(c);
+                Ok(serde_json::json!({"inner": true}))
+            },
+            show.clone(),
+        );
+        // sent before anyone waits: the permit is kept
+        assert_eq!(h(Command::Show {}).unwrap(), serde_json::json!({}));
+        tokio::time::timeout(Duration::from_secs(5), show.notified())
+            .await
+            .expect("show was not signalled");
+        assert_eq!(h(Command::List {}).unwrap()["inner"], true);
+        assert_eq!(*seen.lock().unwrap(), vec![Command::List {}]);
     }
 
     #[test]
@@ -571,6 +613,25 @@ mod tests {
         })
         .unwrap();
         s
+    }
+
+    #[tokio::test]
+    async fn the_background_server_refuses_show_and_the_app_answers_it() {
+        let d = tempfile::tempdir().unwrap();
+        let s = sched(d.path());
+        let mk = || {
+            eid_cli::serve::handler(
+                s.clone(),
+                MAIN_QUEUE.into(),
+                eid_engine::CancellationToken::new(),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                eid_cli::serve::APP_GUI,
+            )
+        };
+        assert!(mk()(Command::Show {}).is_err());
+        let app = with_show(mk(), Arc::new(Notify::new()));
+        assert!(app(Command::Show {}).is_ok());
+        assert_eq!(app(Command::Ping {}).unwrap()["app"], "gui");
     }
 
     #[test]

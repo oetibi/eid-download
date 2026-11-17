@@ -2,8 +2,10 @@
 #![windows_subsystem = "windows"]
 
 use eid_gui::app::{self, AppState, Boot};
+use eid_platform::ui::{fatal_message, fatal_text};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+const TITLE: &str = "Eid Download";
 
 /// `--endpoint NAME`: talk on another per-user endpoint than "main" (like `eid serve`).
 fn endpoint_arg() -> Option<String> {
@@ -17,8 +19,23 @@ fn endpoint_arg() -> Option<String> {
 }
 
 fn main() {
-    let boot = tauri::async_runtime::block_on(app::boot(endpoint_arg()));
-    let mut boot = Some(boot);
+    let state = match tauri::async_runtime::block_on(app::boot(endpoint_arg())) {
+        Ok(Boot::Owner(state)) => state,
+        // the open window came to the front: nothing else to show
+        Ok(Boot::AlreadyOpen { shown: true }) => return,
+        Ok(Boot::AlreadyOpen { shown: false }) => {
+            fatal_message(
+                TITLE,
+                "Eid Download مفتوح بالفعل.\nEid Download is already open.",
+            );
+            return;
+        }
+        Err(e) => {
+            fatal_message(TITLE, &fatal_text(&e));
+            std::process::exit(1);
+        }
+    };
+    let mut state = Some(state);
     let built = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -33,38 +50,33 @@ fn main() {
             app::reveal,
         ])
         .setup(move |a| {
+            a.manage(state.take().expect("setup runs once"));
             let h = a.handle().clone();
-            let notice = |text: String, kind: MessageDialogKind| {
-                let h2 = h.clone();
-                h.dialog()
-                    .message(text)
-                    .title("Eid Download")
-                    .kind(kind)
-                    .show(move |_| h2.exit(0));
-            };
-            match boot.take().expect("setup runs once") {
-                Ok(Boot::Owner(state)) => {
-                    a.manage(state);
-                    app::exit_on_cancel(&h);
-                    WebviewWindowBuilder::new(a, "main", WebviewUrl::App("index.html".into()))
-                        .title("Eid Download — عيد للتحميل")
-                        .inner_size(1040.0, 680.0)
-                        .min_inner_size(720.0, 460.0)
-                        .build()?;
+            app::exit_on_cancel(&h);
+            let window = WebviewWindowBuilder::new(a, "main", WebviewUrl::App("index.html".into()))
+                .title("Eid Download — عيد للتحميل")
+                .inner_size(1040.0, 680.0)
+                .min_inner_size(720.0, 460.0)
+                .build();
+            match window {
+                Ok(_) => app::focus_on_show(&h),
+                // e.g. WebView2 missing: say so, then exit through RunEvent::Exit, which stops
+                // the downloads cleanly and writes the queue
+                Err(e) => {
+                    fatal_message(TITLE, &fatal_text(&e.to_string()));
+                    h.exit(1);
                 }
-                Ok(Boot::AlreadyOpen) => notice(
-                    "Eid Download مفتوح بالفعل.\nEid Download is already open.".into(),
-                    MessageDialogKind::Info,
-                ),
-                Err(e) => notice(
-                    format!("تعذّر تشغيل Eid Download.\nEid Download could not start:\n{e}"),
-                    MessageDialogKind::Error,
-                ),
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("cannot start the window system (is Microsoft Edge WebView2 installed?)");
+        .build(tauri::generate_context!());
+    let built = match built {
+        Ok(b) => b,
+        Err(e) => {
+            fatal_message(TITLE, &fatal_text(&e.to_string()));
+            std::process::exit(1);
+        }
+    };
     built.run(|h, ev| {
         if let RunEvent::Exit = ev {
             if let Some(st) = h.try_state::<AppState>() {

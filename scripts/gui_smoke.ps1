@@ -65,13 +65,14 @@ try {
   WaitFor { $app.Refresh(); $app.MainWindowHandle -ne 0 -and $app.MainWindowTitle -like "Eid Download*" } 60 "the app window"
   "window: '$($app.MainWindowTitle)' (pid $($app.Id))"
 
-  # 4. a second launch must not open a second owner of the queue: it shows a notice, keeps the
-  #    first one running, and the endpoint still answers
+  # 4. a second launch must not open a second owner of the queue: it asks the open window to
+  #    come forward and exits by itself (code 0, no dialog); the first one keeps running
   $second = Start-Process -FilePath $gui -ArgumentList @("--endpoint", $endpoint) -PassThru
-  Start-Sleep -Seconds 3
+  if (-not $second.WaitForExit(20000)) { Stop-Process -Id $second.Id -Force; throw "the second launch did not exit by itself (a dialog?)" }
+  if ($second.ExitCode -ne 0) { throw "the second launch exited with $($second.ExitCode)" }
   if ($app.HasExited) { throw "the first window closed when a second one was started" }
-  if (-not $second.HasExited) { Stop-Process -Id $second.Id -Force }
-  "second launch: first instance kept"
+  if ((Eid @("list")).code -ne 0) { throw "the endpoint stopped answering after a second launch" }
+  "second launch: brought the open window forward and exited (code 0); first instance kept"
 
   # 5. downloads through the app's engine
   foreach ($p in "demo.bin", "cuts.bin") {
@@ -171,6 +172,26 @@ public static class W {
   $q = Get-Content "$profileDir\AppData\Roaming\EidDownload\queues.json" -Raw
   if ($q -notmatch "smoke-cuts.bin") { throw "queue file lost the items" }
   "queue file kept the items"
+
+  # 9. without a usable WebView2 the app must not vanish silently: WebView2's own notice, then
+  #    ours (title "Eid Download"), then a clean exit with code 1 and the queue file intact
+  $env:WEBVIEW2_BROWSER_EXECUTABLE_FOLDER = Join-Path $root "no-webview2"
+  $bad = Start-Process -FilePath $gui -ArgumentList @("--endpoint", $endpoint) -PassThru
+  Remove-Item Env:WEBVIEW2_BROWSER_EXECUTABLE_FOLDER
+  $titles = @()
+  for ($k = 0; $k -lt 6 -and -not $bad.HasExited; $k++) {
+    WaitFor { $bad.Refresh(); $bad.HasExited -or $bad.MainWindowHandle -ne 0 } 30 "a notice from the app without WebView2"
+    if ($bad.HasExited) { break }
+    $titles += $bad.MainWindowTitle
+    $bad.CloseMainWindow() | Out-Null
+    $null = $bad.WaitForExit(3000)
+  }
+  if (-not $bad.HasExited) { Stop-Process -Id $bad.Id -Force; throw "the app without WebView2 did not exit (notices: $($titles -join ', '))" }
+  "without WebView2: notices '$($titles -join "', '")', exit code $($bad.ExitCode)"
+  if ($titles -notcontains "Eid Download") { throw "no Eid Download notice without WebView2" }
+  if ($bad.ExitCode -ne 1) { throw "exit code $($bad.ExitCode) without WebView2, expected 1" }
+  $q = Get-Content "$profileDir\AppData\Roaming\EidDownload\queues.json" -Raw
+  if ($q -notmatch "smoke-cuts.bin") { throw "queue file lost the items after the WebView2 failure" }
   "GUI SMOKE: PASSED"
 } catch {
   $fail = $_
