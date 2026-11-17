@@ -228,7 +228,8 @@ impl State {
                         return Err(bad(format!("unsafe or duplicate file name {f:?}")));
                     }
                 }
-                // done earlier, known only from the download archive (state was lost)
+                // done earlier, known only from the download archive (e.g. a state restored
+                // from an older backup; a lost state next to the archive is refused, M3)
                 (Status::Done, None) => {}
                 (_, Some(_)) => return Err(bad("file on an item that is not done")),
                 _ => {}
@@ -375,6 +376,74 @@ pub fn load(dir: &Path) -> Result<Option<State>, MediaError> {
     Ok(Some(state))
 }
 
+/// The download archive inside the playlist folder (yt-dlp writes it; `args::ARCHIVE_FILE` is
+/// the same file seen from a staging folder).
+pub const ARCHIVE_NAME: &str = ".eid-archive.txt";
+/// Bytes of the archive looked at to decide whether it lists anything.
+const ARCHIVE_PEEK: u64 = 64 * 1024;
+/// Example names kept for the message.
+const MAX_EXAMPLES: usize = 3;
+
+/// What a playlist folder already holds when its state file is missing (review M3).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Leftovers {
+    /// The download archive exists and lists something (or is not a plain file).
+    pub archive: bool,
+    /// Visible entries named `<digits> - …`, any extension.
+    pub numbered: usize,
+    /// Up to [`MAX_EXAMPLES`] of them, sorted.
+    pub examples: Vec<String>,
+}
+
+impl Leftovers {
+    /// Numbering from scratch here could reuse a number (D8 rules 1, 2, 6; F11a(3)).
+    pub fn any(&self) -> bool {
+        self.archive || self.numbered > 0
+    }
+}
+
+/// `<ASCII digits> - <something>`: the shape of the names this program gives (rule 6).
+pub fn is_numbered_name(name: &str) -> bool {
+    let digits = name.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && name[digits..].starts_with(" - ") && name.len() > digits + 3
+}
+
+/// Look, read-only, for signs of earlier runs in `dir`: a non-empty download archive or
+/// numbered files. Nothing is followed, opened for writing, renamed or removed. An archive
+/// that is a link, not a plain file, has several hard links or cannot be inspected or read
+/// counts as present: it is not ours to judge, and the run then stops (fail closed) while
+/// `--list` can still show the listing.
+pub fn leftovers(dir: &Path) -> Result<Leftovers, MediaError> {
+    let mut out = Leftovers::default();
+    let arch = dir.join(ARCHIVE_NAME);
+    out.archive = match std::fs::symlink_metadata(&arch) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+        Ok(md) if !md.file_type().is_file() => true,
+        Ok(md) if md.len() == 0 => false,
+        Ok(md) => {
+            let mut buf = vec![];
+            let read = eid_platform::fs::open_regular_nofollow_read(&arch)
+                .and_then(|f| f.take(ARCHIVE_PEEK).read_to_end(&mut buf));
+            read.is_err() || md.len() > ARCHIVE_PEEK || buf.iter().any(|b| !b.is_ascii_whitespace())
+        }
+    };
+    let rd = std::fs::read_dir(dir).map_err(|e| bad(format!("cannot list the folder: {e}")))?;
+    let mut names = vec![];
+    for ent in rd {
+        let ent = ent.map_err(|e| bad(format!("cannot list the folder: {e}")))?;
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if !name.starts_with('.') && is_numbered_name(&name) {
+            out.numbered += 1;
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.truncate(MAX_EXAMPLES);
+    out.examples = names;
+    Ok(out)
+}
+
 /// Atomic, private write of the state (always the current [`SCHEMA`]).
 pub fn save(dir: &Path, s: &State) -> Result<(), MediaError> {
     s.validate()?;
@@ -453,6 +522,113 @@ mod tests {
         assert_eq!(item_name(2, 7, "x", "mp4"), "07 - x.mp4");
         assert_eq!(item_name(2, 100, "x", "mp4"), "100 - x.mp4");
         assert_eq!(item_name(3, 7, "", "mp3"), "007 - video.mp3");
+    }
+
+    #[test]
+    fn numbered_names_are_recognised_by_shape_only() {
+        for n in [
+            "01 - Alpha.mp4",
+            "001 - a.mp3",
+            "7 - x",
+            "100 - Long.webm",
+            "01 - .mp4",
+        ] {
+            assert!(is_numbered_name(n), "{n:?}");
+        }
+        for n in [
+            "Alpha.mp4",
+            "01-Alpha.mp4",
+            "01 -Alpha.mp4",
+            "01 - ",
+            " 01 - a.mp4",
+            "a01 - b.mp4",
+            "٠١ - عربي.mp4", // not ASCII digits: never produced by item_name
+            "",
+        ] {
+            assert!(!is_numbered_name(n), "{n:?}");
+        }
+        // every name this program gives is recognised
+        assert!(is_numbered_name(&item_name(2, 1, "Alpha", "mp4")));
+        assert!(is_numbered_name(&item_name(3, 1000, "../../x", "mp3")));
+    }
+
+    #[test]
+    fn playlist_lost_state_leftovers_are_found_read_only() {
+        let d = tempfile::tempdir().unwrap();
+        // an empty folder, our dot files and unnumbered files: nothing from an earlier run
+        assert!(!leftovers(d.path()).unwrap().any());
+        std::fs::write(d.path().join(LOCK_FILE), b"").unwrap();
+        std::fs::create_dir(d.path().join(".eid-video-abc")).unwrap();
+        std::fs::write(d.path().join(".01 - hidden.mp4"), b"x").unwrap();
+        std::fs::write(d.path().join("notes.txt"), b"x").unwrap();
+        // an empty or blank archive lists nothing
+        std::fs::write(d.path().join(ARCHIVE_NAME), b"").unwrap();
+        assert!(!leftovers(d.path()).unwrap().any());
+        std::fs::write(d.path().join(ARCHIVE_NAME), b" \r\n\n").unwrap();
+        assert_eq!(leftovers(d.path()).unwrap(), Leftovers::default());
+        // a listed id is enough
+        std::fs::write(d.path().join(ARCHIVE_NAME), b"youtube abc\n").unwrap();
+        let l = leftovers(d.path()).unwrap();
+        assert!(l.archive && l.numbered == 0 && l.any(), "{l:?}");
+        // numbered files alone are enough, whatever the extension
+        std::fs::remove_file(d.path().join(ARCHIVE_NAME)).unwrap();
+        for n in ["03 - C.mp3", "01 - A.mp4", "02 - B.webm", "04 - D.mp4"] {
+            std::fs::write(d.path().join(n), b"x").unwrap();
+        }
+        let l = leftovers(d.path()).unwrap();
+        assert_eq!(
+            l,
+            Leftovers {
+                archive: false,
+                numbered: 4,
+                examples: vec![
+                    "01 - A.mp4".into(),
+                    "02 - B.webm".into(),
+                    "03 - C.mp3".into()
+                ],
+            }
+        );
+        // nothing was created, changed or removed by looking
+        let mut names: Vec<String> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                ".01 - hidden.mp4",
+                ".eid-lock",
+                ".eid-video-abc",
+                "01 - A.mp4",
+                "02 - B.webm",
+                "03 - C.mp3",
+                "04 - D.mp4",
+                "notes.txt"
+            ]
+        );
+        assert!(!d.path().join(STATE_FILE).exists());
+    }
+
+    #[test]
+    fn playlist_lost_state_archive_that_is_a_link_or_folder_counts_and_is_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        // the target is blank: if the link were followed, the archive would look empty
+        let target = outside.path().join("blank.txt");
+        std::fs::write(&target, b"\n").unwrap();
+        eid_platform::fs::symlink_file(&target, &d.path().join(ARCHIVE_NAME))
+            .expect("this test needs symlinks; it must not pass without one");
+        assert!(leftovers(d.path()).unwrap().archive);
+        assert_eq!(std::fs::read(&target).unwrap(), b"\n");
+        let d2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d2.path().join(ARCHIVE_NAME)).unwrap();
+        assert!(leftovers(d2.path()).unwrap().archive);
+    }
+
+    #[test]
+    fn archive_name_is_the_file_the_tool_is_told_to_use() {
+        assert_eq!(crate::args::ARCHIVE_FILE, format!("../{ARCHIVE_NAME}"));
     }
 
     /// Written by the pre-M2 code (`save` of schema 1), kept byte for byte.

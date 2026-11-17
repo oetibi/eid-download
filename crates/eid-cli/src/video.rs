@@ -840,6 +840,70 @@ pub fn playlist_folder(out_dir: &Path, title: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
+/// A file name found on disk, shown in one line: control characters and the invisible
+/// formatting characters (marks, bidi controls, zero-width, line/paragraph separators, BOM,
+/// soft hyphen) become '?'.
+fn neutral_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            let invisible = c.is_control()
+                || matches!(
+                    c,
+                    '\u{00AD}'
+                        | '\u{061C}'
+                        | '\u{180E}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{2028}'..='\u{202E}'
+                        | '\u{2060}'..='\u{206F}'
+                        | '\u{FEFF}'
+                        | '\u{FFF9}'..='\u{FFFB}'
+                );
+            if invisible {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// One line (control characters are replaced when printed): what was found, that nothing was
+/// touched, and the two ways on.
+fn lost_state_message(folder: &Path, left: &eid_media::playlist::Leftovers) -> String {
+    use eid_media::playlist::{ARCHIVE_NAME, STATE_FILE};
+    let mut found = vec![];
+    if left.archive {
+        found.push(format!(
+            "a download archive ({ARCHIVE_NAME}) that lists items"
+        ));
+    }
+    if left.numbered > 0 {
+        let more = if left.numbered > left.examples.len() {
+            ", ..."
+        } else {
+            ""
+        };
+        // names come from the disk, not from us: besides what `printable` replaces later, every
+        // invisible format or separator character that could reorder or hide text becomes '?'
+        let shown: Vec<String> = left.examples.iter().map(|n| neutral_name(n)).collect();
+        found.push(format!(
+            "{} numbered file(s) ({}{more})",
+            left.numbered,
+            shown.join(", ")
+        ));
+    }
+    format!(
+        "{STATE_FILE} is missing in {}, but the folder holds {} from earlier runs. Numbering \
+         again could give a new item a number that is already used, so nothing was downloaded, \
+         no new state was written and no existing file was renamed or changed. To continue: \
+         copy {STATE_FILE} back into that folder from a backup made after the last run there \
+         (an older backup does not know the newest numbers), or download into a new folder \
+         with -d <another folder>",
+        folder.display(),
+        found.join(" and ")
+    )
+}
+
 /// Items yt-dlp reports as not downloadable without signing in (skipped, number kept).
 fn unavailable(availability: Option<&str>) -> bool {
     matches!(
@@ -870,8 +934,25 @@ async fn playlist(
     let folder = playlist_folder(out_dir, &info.title).map_err(Fail::Other)?;
     let _lock = pl::lock_folder(&folder).map_err(Fail::media)?;
     let old = pl::load(&folder).map_err(Fail::media)?;
-    let (mut state, planned) = pl::plan(old, &info.id, &info.entries).map_err(Fail::media)?;
     let p = crate::remote::printable;
+    // the state file is gone but earlier runs left files here: numbering again could reuse
+    // their numbers (review M3, owner decision). Refuse before any download or new state;
+    // `--list` only reads, so it shows the listing with a warning.
+    if old.is_none() {
+        let left = pl::leftovers(&folder).map_err(Fail::media)?;
+        if left.any() {
+            let m = lost_state_message(&folder, &left);
+            if !a.list_only {
+                return Err(Fail::Other(m));
+            }
+            eprintln!(
+                "warning: {}. The numbers below are positions in the current listing, not the \
+                 numbers of the files already there; nothing is written.",
+                p(&m)
+            );
+        }
+    }
+    let (mut state, planned) = pl::plan(old, &info.id, &info.entries).map_err(Fail::media)?;
     // `--retry-failed`: only the named items, and only if they failed or are unavailable
     if let Some(sel) = &a.retry_failed {
         let mut reset = vec![];

@@ -512,16 +512,252 @@ async fn playlist_sync_downloads_only_new_items_via_the_archive() {
         ["fake a", "fake b", "fake c", "fake x", "fake y"],
         "each finished item once"
     );
-    // the state file is lost: the archive alone stops a second download of finished items
+    // the state file is lost (review M3, owner decision): the run is refused before any
+    // download and before a new state is written; files and archive stay as they are
     std::fs::remove_file(folder.join(".eid-playlist.json")).unwrap();
+    let before = e.calls().len();
     let o = playlist(&e, &url, &["-q"]).await;
-    assert!(o.status.success(), "{}", text(&o));
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(
+        text(&o).contains(".eid-playlist.json is missing"),
+        "{}",
+        text(&o)
+    );
+    assert!(download_ids(&e.calls()[before..]).is_empty());
     assert_eq!(visible(&folder).len(), 5, "{:?}", visible(&folder));
     assert_eq!(
         std::fs::read_to_string(folder.join(".eid-archive.txt")).unwrap(),
         archive
     );
-    assert!(folder.join(".eid-playlist.json").exists());
+    assert!(!folder.join(".eid-playlist.json").exists());
+}
+
+/// Every entry of `dir` (dot files too) with the SHA-256 of each file's bytes.
+fn snapshot(dir: &Path) -> Vec<(String, String)> {
+    entries(dir)
+        .into_iter()
+        .map(|n| {
+            let p = dir.join(&n);
+            let h = if p.is_file() {
+                hex(&std::fs::read(&p).unwrap())
+            } else {
+                "<dir>".to_string()
+            };
+            (n, h)
+        })
+        .collect()
+}
+
+// review M3 (owner decision): a lost `.eid-playlist.json` next to earlier downloads stops the
+// run with a clear way on; `--list` still reads, with a warning; nothing is renamed or changed
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn playlist_lost_state_with_archive_and_numbered_files_is_refused() {
+    let e = Env::new().await;
+    let list = write_list(&e, &[item("a", "Alpha"), item("b", "Beta")]);
+    let url = purl(&e, &list, "pl-m3", "Lost", "");
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    let folder = folder_of(&o);
+    // a later item as audio: MP4 and MP3 numbered files side by side
+    write_list(
+        &e,
+        &[item("a", "Alpha"), item("b", "Beta"), item("c", "Gamma")],
+    );
+    let o = playlist(&e, &url, &["-q", "--quality", "audio"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        visible(&folder),
+        ["01 - Alpha.mp4", "02 - Beta.mp4", "03 - Gamma.mp3"]
+    );
+    assert!(!std::fs::read_to_string(folder.join(".eid-archive.txt"))
+        .unwrap()
+        .trim()
+        .is_empty());
+    // the state is lost, and an item is added on top: numbering again would give it 01
+    std::fs::remove_file(folder.join(".eid-playlist.json")).unwrap();
+    write_list(
+        &e,
+        &[
+            item("z", "Zulu"),
+            item("a", "Alpha"),
+            item("b", "Beta"),
+            item("c", "Gamma"),
+        ],
+    );
+    let before = snapshot(&folder);
+    for q in [
+        &["-q"][..],
+        &["-q", "--quality", "audio"],
+        &["--retry-failed", "all"],
+        &["-q", "--skip", "1"],
+    ] {
+        let calls = e.calls().len();
+        let o = playlist(&e, &url, q).await;
+        let t = text(&o);
+        assert_eq!(o.status.code(), Some(1), "{q:?}: {t}");
+        for want in [
+            ".eid-playlist.json is missing",
+            "download archive",
+            "3 numbered file(s) (01 - Alpha.mp4, 02 - Beta.mp4, 03 - Gamma.mp3)",
+            "nothing was downloaded",
+            "from a backup",
+            "-d <another folder>",
+        ] {
+            assert!(t.contains(want), "{q:?}: {want:?} not in {t}");
+        }
+        // refused after the listing, before any download or new state
+        assert!(download_ids(&e.calls()[calls..]).is_empty(), "{q:?}");
+        assert!(!folder.join(".eid-playlist.json").exists(), "{q:?}");
+        assert!(staging_dirs(&folder).is_empty(), "{q:?}");
+        // no file is created, renamed, removed or changed (names and SHA-256)
+        assert_eq!(snapshot(&folder), before, "{q:?}");
+    }
+    // `--list` only reads: it shows the listing, warns, and writes nothing
+    let o = playlist(&e, &url, &["--list"]).await;
+    let t = text(&o);
+    assert!(o.status.success(), "{t}");
+    assert!(t.contains("warning: .eid-playlist.json is missing"), "{t}");
+    assert!(
+        t.contains("not the numbers of the files already there"),
+        "{t}"
+    );
+    assert!(t.contains("Zulu"), "{t}");
+    assert_eq!(snapshot(&folder), before);
+    // a damaged state file is still the load error (never treated as "missing")
+    std::fs::write(folder.join(".eid-playlist.json"), b"{ not json").unwrap();
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("is invalid"), "{}", text(&o));
+    assert!(!text(&o).contains("is missing"), "{}", text(&o));
+    assert_eq!(
+        std::fs::read(folder.join(".eid-playlist.json")).unwrap(),
+        b"{ not json"
+    );
+    std::fs::remove_file(folder.join(".eid-playlist.json")).unwrap(); // written by this test
+    assert_eq!(snapshot(&folder), before);
+    // numbered files alone (no archive) are enough to refuse (the archive alone: eid-media
+    // `playlist_lost_state_leftovers_are_found_read_only`)
+    std::fs::rename(
+        folder.join(".eid-archive.txt"),
+        e.root.path().join("archive-aside"),
+    )
+    .unwrap();
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(!text(&o).contains("download archive"), "{}", text(&o));
+    assert!(!folder.join(".eid-playlist.json").exists());
+    // the other way on: a new folder starts its own numbering, the old one is not touched
+    let fresh = e.out().join("Elsewhere");
+    std::fs::create_dir(&fresh).unwrap();
+    let o = playlist_in(&e, &fresh, &url, &["-q"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        visible(&folder_of(&o)),
+        [
+            "01 - Zulu.mp4",
+            "02 - Alpha.mp4",
+            "03 - Beta.mp4",
+            "04 - Gamma.mp4"
+        ]
+    );
+    // the old folder was left exactly as it was (the archive was moved aside by this test)
+    let mut left = before.clone();
+    left.retain(|(n, _)| n != ".eid-archive.txt");
+    assert_eq!(snapshot(&folder), left);
+}
+
+// names found on disk are shown neutralised; an archive that cannot be judged (a hard link,
+// which the no-follow open refuses on Unix) stops the run but never `--list`
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn playlist_lost_state_message_neutralises_names_and_list_survives_an_odd_archive() {
+    let e = Env::new().await;
+    let list = write_list(&e, &[item("a", "Alpha")]);
+    let url = purl(&e, &list, "pl-m3d", "Odd", "");
+    let folder = e.out().join("Odd");
+    std::fs::create_dir(&folder).unwrap();
+    let hostile = "01 - \u{202E}4pm.exe\u{200F}\u{2028}\u{200B}\u{061C}x\u{85}y.mp4";
+    std::fs::write(folder.join(hostile), b"mine").unwrap();
+    let outside = e.root.path().join("archive-elsewhere.txt");
+    std::fs::write(&outside, b"fake old\n").unwrap();
+    std::fs::hard_link(&outside, folder.join(".eid-archive.txt"))
+        .expect("this test needs a hard link; it must not pass without one");
+    // the folder lock is the one file every run opens (created if missing; Round 16 limit 3)
+    let user_files = |d: &Path| {
+        let mut s = snapshot(d);
+        s.retain(|(n, _)| n != ".eid-lock");
+        s
+    };
+    let before = user_files(&folder);
+    let o = playlist(&e, &url, &["-q"]).await;
+    let t = text(&o);
+    assert_eq!(o.status.code(), Some(1), "{t}");
+    assert!(t.contains("download archive"), "{t}");
+    assert!(
+        t.contains("1 numbered file(s) (01 - ?4pm.exe????x?y.mp4)"),
+        "{t}"
+    );
+    for bad in [
+        '\u{202E}', '\u{200F}', '\u{2028}', '\u{200B}', '\u{061C}', '\u{85}',
+    ] {
+        assert!(!t.contains(bad), "{bad:?} printed: {t:?}");
+    }
+    assert!(download_ids(&e.calls()).is_empty());
+    let o = playlist(&e, &url, &["--list"]).await;
+    let t = text(&o);
+    assert!(o.status.success(), "{t}");
+    assert!(t.contains("warning: .eid-playlist.json is missing"), "{t}");
+    assert!(!t.contains('\u{202E}'), "{t:?}");
+    assert_eq!(user_files(&folder), before);
+    assert!(!folder.join(".eid-playlist.json").exists());
+    assert_eq!(std::fs::read(&outside).unwrap(), b"fake old\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn playlist_lost_state_restored_from_backup_continues_with_the_old_numbers() {
+    let e = Env::new().await;
+    let list = write_list(&e, &[item("a", "Alpha"), item("b", "Beta")]);
+    let url = purl(&e, &list, "pl-m3b", "Backup", "");
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    let folder = folder_of(&o);
+    let backup = std::fs::read(folder.join(".eid-playlist.json")).unwrap();
+    std::fs::remove_file(folder.join(".eid-playlist.json")).unwrap();
+    write_list(
+        &e,
+        &[item("z", "Zulu"), item("a", "Alpha"), item("b", "Beta")],
+    );
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    // the user follows the message: the backup goes back, the same command continues
+    std::fs::write(folder.join(".eid-playlist.json"), &backup).unwrap();
+    let before = e.calls().len();
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(download_ids(&e.calls()[before..]), ["z"]);
+    assert_eq!(
+        visible(&folder),
+        ["01 - Alpha.mp4", "02 - Beta.mp4", "03 - Zulu.mp4"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn playlist_without_state_in_a_folder_without_earlier_runs_starts_normally() {
+    let e = Env::new().await;
+    let list = write_list(&e, &[item("a", "Alpha"), item("b", "Beta")]);
+    let url = purl(&e, &list, "pl-m3c", "Fresh", "");
+    // a folder with the playlist's name already exists, with unnumbered files of the user
+    let folder = e.out().join("Fresh");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("notes.txt"), b"mine").unwrap();
+    std::fs::write(folder.join(".eid-archive.txt"), b"\n").unwrap();
+    let o = playlist(&e, &url, &["-q"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(folder_of(&o), folder);
+    assert_eq!(
+        visible(&folder),
+        ["01 - Alpha.mp4", "02 - Beta.mp4", "notes.txt"]
+    );
+    assert_eq!(std::fs::read(folder.join("notes.txt")).unwrap(), b"mine");
 }
 
 // ------------------------------------------------------------------ D8 numbering over time
