@@ -384,3 +384,4 @@ ctrl_c_ends_the_wait_for_a_locked_file
 only_in_use_errors_count_as_a_locked_staged_file
 # ---- P4 real-tool tests: Deno hard link (STATUS 2026-11-17)
 deno_link_in_our_cache_is_removed_before_the_lock_and_others_still_refuse
+an_archived_item_without_a_published_file_is_reported
