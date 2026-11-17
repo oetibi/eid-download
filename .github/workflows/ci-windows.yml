@@ -84,6 +84,22 @@ jobs:
         continue-on-error: false
         if: ${{ hashFiles('crates/eid-cli/tests/shell_injection.rs') != '' }}
       - run: cargo build --release -p eid-cli
+      # P4 review m10: the shipped eid.exe must not contain the test hooks (EID_TEST_* from the
+      # `test-hooks` feature, EID_FAULT* from `test-faults`). Positive control first: the test
+      # build of eid.exe (built by `cargo test --workspace` above, with both features) must
+      # contain them, otherwise the scan proves nothing.
+      - name: Release eid.exe carries no test hooks
+        shell: pwsh
+        run: |
+          function Markers($path) {
+            $t = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($path))
+            @('EID_TEST_MANIFEST', 'EID_TEST_TOOLS_BASE', 'EID_TEST_CANCEL_FILE', 'EID_TEST_PUBLISH_FAIL', 'EID_FAULT') | Where-Object { $t.Contains($_) }
+          }
+          $ctl = @(Markers 'target\debug\eid.exe')
+          if ($ctl.Count -lt 5) { throw "positive control failed: the test build of eid.exe shows only [$($ctl -join ', ')]" }
+          $bad = @(Markers 'target\release\eid.exe')
+          if ($bad.Count -gt 0) { throw "release eid.exe contains test hooks: $($bad -join ', ')" }
+          "release eid.exe: no test hook markers (control: test build has $($ctl.Count) of 5)"
       # ---- Desktop app + NSIS installer: only once the Tauri app exists (phase P5)
       - uses: actions/setup-node@v4
         if: ${{ hashFiles('apps/desktop/package.json') != '' }}
