@@ -98,6 +98,9 @@ jobs:
           $ctl = @(Markers 'target\debug\eid.exe')
           if ($ctl.Count -lt 5) { throw "positive control failed: the test build of eid.exe shows only [$($ctl -join ', ')]" }
           $bad = @(Markers 'target\release\eid.exe')
+          # also any future hook: the prefixes themselves must not occur in the release binary
+          $rel = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes('target\release\eid.exe'))
+          $bad += @('EID_TEST_', 'EID_FAULT') | Where-Object { $rel.Contains($_) }
           if ($bad.Count -gt 0) { throw "release eid.exe contains test hooks: $($bad -join ', ')" }
           "release eid.exe: no test hook markers (control: test build has $($ctl.Count) of 5)"
       # ---- Desktop app + NSIS installer: only once the Tauri app exists (phase P5)

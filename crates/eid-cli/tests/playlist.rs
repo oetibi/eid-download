@@ -1336,9 +1336,29 @@ async fn one_item_that_cannot_be_published_does_not_end_the_playlist_run() {
     );
     assert_eq!(item_state(&folder, "c")["status"], "done");
     assert_eq!(staging_dirs(&folder).len(), 1, "{:?}", entries(&folder));
-    // the next run (no fault) publishes the kept download under its number
+    // the next run (no fault) publishes the kept download itself under its number: the file
+    // in staging gets a marked modification time, which the published file must carry (the
+    // archive lists the item, so the tool writes nothing new)
+    let st = folder.join(&staging_dirs(&folder)[0]);
+    let kept: Vec<_> = entries(&st);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let mark = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(st.join(&kept[0]))
+        .unwrap()
+        .set_modified(mark)
+        .unwrap();
     let o = playlist(&e, &url, &["-q"]).await;
     assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        std::fs::metadata(folder.join("02 - Bravo.mp4"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        mark,
+        "the kept file was not the one published"
+    );
     assert_eq!(
         visible(&folder),
         ["01 - Alpha.mp4", "02 - Bravo.mp4", "03 - Charlie.mp4"]

@@ -499,13 +499,19 @@ fn check_staging_tree(
     budget: &mut usize,
 ) -> Result<(), String> {
     let refuse = |why: String| format!("refusing to use {}: {why}", root.display());
-    for e in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
-        let e = e.map_err(|e| e.to_string())?;
+    let unreadable = |e: std::io::Error| {
+        refuse(format!(
+            "cannot read {}: {e}",
+            crate::remote::printable(&dir.to_string_lossy())
+        ))
+    };
+    for e in std::fs::read_dir(dir).map_err(unreadable)? {
+        let e = e.map_err(unreadable)?;
         *budget = budget
             .checked_sub(1)
             .ok_or_else(|| refuse(format!("it holds more than {STAGING_MAX_ENTRIES} entries")))?;
         let path = e.path();
-        let md = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        let md = std::fs::symlink_metadata(&path).map_err(unreadable)?;
         if is_link_or_odd(&md) {
             let rel = path.strip_prefix(root).unwrap_or(&path);
             return Err(refuse(format!(
@@ -616,8 +622,10 @@ pub fn publish_name(title: &str, ext: &str, out_dir: &Path) -> Result<String, St
 /// Why [`publish`] published nothing.
 #[derive(Debug)]
 enum PublishError {
-    /// The staged file is not a plain file we can open without following links (something
-    /// was planted in our staging folder): the run stops, fail closed.
+    /// The staged file is not a plain file we can open without following links, or it or the
+    /// destination was swapped while publishing (something was planted in our folders): the
+    /// run stops, fail closed. A file that cannot be opened for another reason (for example
+    /// locked by an antivirus) also stops it: conservative, not retried.
     Refused(String),
     /// This file could not be published (bad container, I/O error, no free name); the file
     /// stays in staging. In a playlist this is a failed item and the run goes on (review m3).
@@ -665,17 +673,31 @@ fn publish(staged: &Path, out_dir: &Path, name: &str) -> Result<PathBuf, Publish
         match eid_platform::fs::publish_verified(&f, staged, &dest) {
             Ok(()) => return Ok(dest),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                return Err(PublishError::Item(format!(
-                    "cannot publish {}: {e}; it is kept in the staging folder",
-                    dest.display()
-                )))
-            }
+            Err(e) => return Err(publish_failure(&dest, e)),
         }
     }
     Err(PublishError::Item(
         "no free file name (1000 taken); it is kept in the staging folder".into(),
     ))
+}
+
+/// A failed `publish_verified`. A swap of the staged file or of the destination (kind
+/// `InvalidData`, eid-platform's contract) stops the run: the file in staging may now be
+/// foreign and must not be published by the next run (review of m3). Anything else fails
+/// only this item.
+fn publish_failure(dest: &Path, e: std::io::Error) -> PublishError {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        PublishError::Refused(format!(
+            "stopped: the file to publish as {} changed while it was being published ({e}); \
+             nothing more is published. Check the staging folder before running again",
+            dest.display()
+        ))
+    } else {
+        PublishError::Item(format!(
+            "cannot publish {}: {e}; it is kept in the staging folder",
+            dest.display()
+        ))
+    }
 }
 
 // ------------------------------------------------------------------ commands
@@ -1003,7 +1025,7 @@ async fn playlist(
     let _ = std::fs::remove_dir_all(&work);
     let Some(listed) = listed else {
         return Err(Fail::Cancelled(
-            "stopped while listing the playlist; nothing was downloaded or written".into(),
+            "stopped while listing the playlist; nothing was downloaded".into(),
         ));
     };
     let info = listed.map_err(Fail::media)?;
@@ -1333,6 +1355,32 @@ mod tests {
             assert!(!n.contains('\u{202E}'), "{t:?} -> {n:?}");
             assert!(n.ends_with(".mp4") || !n.is_empty(), "{t:?} -> {n:?}");
             assert_eq!(d.join(&n).parent().unwrap(), d, "{t:?} escapes: {n:?}");
+        }
+    }
+
+    /// Review of m3: a swap detected while publishing (eid-platform reports it as
+    /// `InvalidData`, pinned in its own tests) stops the run; other I/O errors fail one item.
+    #[test]
+    fn a_swap_while_publishing_stops_the_run_other_errors_fail_one_item() {
+        use std::io::{Error, ErrorKind};
+        let d = Path::new("out").join("01 - a.mp4");
+        let swap = Error::new(ErrorKind::InvalidData, "source was swapped");
+        assert!(matches!(
+            publish_failure(&d, swap),
+            PublishError::Refused(_)
+        ));
+        for k in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::NotFound,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                matches!(
+                    publish_failure(&d, Error::new(k, "x")),
+                    PublishError::Item(_)
+                ),
+                "{k:?}"
+            );
         }
     }
 
