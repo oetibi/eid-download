@@ -257,23 +257,52 @@ fn create_new_impl(path: &Path, private: bool) -> io::Result<File> {
 
 /// Open an EXISTING regular file read/write without following a final symlink, and verify
 /// the *opened handle* is a plain single-link regular file (check after open, not before).
+/// The open itself never blocks (see [`open_plain`]).
 pub fn open_regular_nofollow(path: &Path) -> io::Result<File> {
     let mut o = OpenOptions::new();
     o.read(true).write(true);
-    apply_open_flags(&mut o);
-    let f = o.open(path)?;
-    reject_if_not_plain(&f)?;
-    Ok(f)
+    open_plain(&mut o, path)
 }
 
 /// Read-only variant of [`open_regular_nofollow`].
 pub fn open_regular_nofollow_read(path: &Path) -> io::Result<File> {
     let mut o = OpenOptions::new();
     o.read(true);
-    apply_open_flags(&mut o);
+    open_plain(&mut o, path)
+}
+
+/// Open with the no-follow flags and require a plain regular file. Unix: the open uses
+/// `O_NONBLOCK`, so a FIFO swapped in after a caller's own type check is refused at once
+/// instead of waiting for a writer forever (review r1). The flag is cleared again once the
+/// handle is known to be a regular file, so callers get an ordinary blocking descriptor.
+fn open_plain(o: &mut OpenOptions, path: &Path) -> io::Result<File> {
+    apply_open_flags(o);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(nofollow_flag() | libc::O_NONBLOCK);
+    }
     let f = o.open(path)?;
     reject_if_not_plain(&f)?;
+    #[cfg(unix)]
+    clear_nonblock(&f)?;
     Ok(f)
+}
+
+#[cfg(unix)]
+fn clear_nonblock(f: &File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let fd = f.as_raw_fd();
+    // SAFETY: `fd` is a valid descriptor owned by `f` for the duration of both calls.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: as above; only the O_NONBLOCK status bit changes.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Whether [`open_tool_locked`] really locks on this platform.
@@ -814,6 +843,51 @@ mod tests {
             assert!(open_regular_nofollow(&d.join("hard")).is_err());
         }
         assert_eq!(std::fs::read(&outside).unwrap(), b"SECRET");
+    }
+
+    /// Review r1: a FIFO where a regular file is expected is refused at once by both opens
+    /// (a blocking open would wait for a writer forever), and a regular file still comes back
+    /// as an ordinary blocking descriptor.
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_fifo_is_refused_without_blocking() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let d = tmpdir("fifo");
+        let p = d.join("f");
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a valid NUL-terminated path for the duration of the call.
+        assert_eq!(
+            unsafe { libc::mkfifo(c.as_ptr(), 0o600) },
+            0,
+            "mkfifo failed"
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let q = p.clone();
+        std::thread::spawn(move || {
+            let read = open_regular_nofollow_read(&q).map(|_| ());
+            let rw = open_regular_nofollow(&q).map(|_| ());
+            let _ = tx.send((read, rw));
+        });
+        let (read, rw) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("opening a FIFO blocked");
+        assert_eq!(read.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(rw.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        std::fs::write(d.join("r"), b"x").unwrap();
+        for f in [
+            open_regular_nofollow_read(&d.join("r")).unwrap(),
+            open_regular_nofollow(&d.join("r")).unwrap(),
+        ] {
+            // SAFETY: the descriptor is owned by `f` for the call.
+            let flags = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETFL) };
+            assert!(flags >= 0);
+            assert_eq!(
+                flags & libc::O_NONBLOCK,
+                0,
+                "the descriptor stayed non-blocking"
+            );
+        }
     }
 
     #[test]
