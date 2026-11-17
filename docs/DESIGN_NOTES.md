@@ -227,3 +227,14 @@ Majors were fixed on their own branches (PRs #20–#26); the minors on `fix/p4-r
 | r2 | Windows: error 5 counts as "locked", so a junction swapped in at the staged name is retried and then becomes a failed item, not a stop | **Fixed.** `publish` retries only `eid_platform::fs::is_file_in_use` (errors 32 and 33); every other open error goes to the existing `Refused` branch. **Tested:** only the predicate (`only_in_use_errors_count_as_a_locked_staged_file`). No test drives `publish` with a real error 5. The route from `Refused` to a stopped run is the one `a_swap_while_publishing_one_item_stops_the_playlist_run` covers. |
 | r3 | The lock retry does not watch Ctrl-C | **Fixed.** The pause races the cancel token, and a cancel there returns `PublishError::Cancelled`. **Tested:** only `retry_locked` (`ctrl_c_ends_the_wait_for_a_locked_file`: a one-hour pause ends at once, with no attempt after the cancel). The mapping to `Fail::Cancelled` (exit 130) in `get` and `playlist`, where no item is counted failed, was checked by reading the code; no integration test covers it. Not tested: a real locked file during Ctrl-C. Nits left as they are: if the `select!` were lost, that test would hang until the CI timeout instead of failing fast; the `get` message names no path. |
 | r4 | Only the open is retried, not a locked rename | **Accepted for now.** The rename failure is a failed item and is retried at the next run. |
+
+## P5 (2026-11-17) — deviations from PLAN/ARCHITECTURE, pending owner review
+| Topic | Decision | Why |
+|---|---|---|
+| UI stack | Tauri 2 as planned, but the page is plain HTML/CSS/ES-module JS (no Svelte, no npm, no bundler); `ui/` lives in `crates/eid-gui/ui` | No Node on the build machine; zero JS dependencies; the page is ~600 lines. Moving to Svelte later only replaces `ui/`. |
+| Window ↔ engine | The app runs the engine in-process and serves the same IPC endpoint as `eid serve` (handler shared from `eid_cli::serve`); `ping` now answers `app: "gui" | "serve"` | One queue owner; the CLI and the native host keep working against the window. |
+| Background `eid serve` | The window asks it to `Shutdown` and takes the queue over | Otherwise double-clicking the app while the native host had started `serve` would show nothing. `serve` now flushes the queue file before closing its endpoint. |
+| Folder per download | Each picked folder is its own queue (`folder-N`) | `Item` has no directory; changing a queue's folder would move paused downloads away from their sidecars. |
+| Close button | Exits (downloads stop and resume on next start); no tray yet | Tray is P5 scope but not needed for a first usable build. |
+| Packaging | ZIP from ci-windows (`EidDownload-windows-x64.zip`), installer stays P7 | tauri-cli bundling needs Node/npm or a long `cargo install`. |
+| Licences | `deny.toml` allows MPL-2.0 and `Apache-2.0 WITH LLVM-exception` | Pulled in by Tauri (see DEPENDENCIES.md); owner to confirm. |
