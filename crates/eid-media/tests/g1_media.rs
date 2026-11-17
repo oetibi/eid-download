@@ -251,6 +251,7 @@ async fn child_environment_is_an_allowlist() {
         ("XDG_CONFIG_HOME", "/evil"),
         ("APPDATA", r"C:\evil"),
         ("HOME", "/evil"),
+        ("DENO_DIR", r"C:\evil"),
         ("EID_SECRET", "SENTINEL_ENV"),
         ("HTTPS_PROXY", "http://proxy.example:3128"),
         ("no_proxy", "localhost"),
@@ -280,6 +281,20 @@ async fn child_environment_is_an_allowlist() {
             .map(|(_, v)| v.clone())
     };
     assert_eq!(get("YTDLP_NO_PLUGINS"), Some("1".into()));
+    // Deno's cache (and its hard link to deno.exe) goes to our folder next to the tool set,
+    // never to the parent's DENO_DIR or %LOCALAPPDATA%\deno (STATUS 2026-11-17)
+    assert_eq!(
+        get("DENO_DIR").map(std::path::PathBuf::from),
+        Some(
+            r.tools
+                .ytdlp
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(eid_media::env::DENO_CACHE_DIR)
+        )
+    );
     let path = get("PATH").unwrap();
     let first = std::env::split_paths(&path).next().unwrap();
     assert_eq!(

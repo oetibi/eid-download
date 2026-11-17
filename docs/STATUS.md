@@ -356,5 +356,17 @@
     - تمرير `DENO_DIR` إلى مجلد نختاره جعل Deno يضع ذاكرته **كلها** و`node_compat_bin\node.exe` فيه، ولم يكتب شيئاً في `%LOCALAPPDATA%`، ونجح الفيديو.
     - الرابط الصلب يبقى، لكن داخل مجلدنا، فحذفه قبل كل قفل يعيد `deno.exe` إلى اسم واحد.
     - أُعيد الكود كما كان (`git status` فارغ).
-  - **الإصلاح يحتاج قرار المالك**، لأنه يمس قراراً أمنياً (ADR-0003 قائمة بيئة الأداة، وD11، وAGENTS §6.1). الخيار المقترح: `DENO_DIR` داخل جذر الأدوات، ويُحذف قبل كل قفل، مع اختبار. لم يُنفَّذ.
+  - **الإصلاح (بموافقة المالك 2026-11-17، تعديل ADR-0003):**
+    - `DENO_DIR` دائماً `<جذر الأدوات>\deno-cache`.
+    - `ToolStore::lock` يحذف `deno-cache\node_compat_bin` قبل كل قفل. رابط صلب في أي مكان آخر ما زال مرفوضاً.
+  - **أحمر أولاً:** قبل الإصلاح فشل `deno_link_in_our_cache_is_removed_before_the_lock_and_others_still_refuse` بالرسالة الحقيقية نفسها `refusing file with multiple hard links`. وفشل `child_environment_is_an_allowlist` لأن `DENO_DIR` كان غائباً.
+  - **بعد الإصلاح (محلياً، Windows 10، debug):**
+    - fmt وclippy `-D warnings` نظيفان.
+    - `eid-media`: الوحدة 14، g1_media 12، g2_tools 21 (و1 متجاهَل، (ج)).
+    - `eid-cli`: الوحدة 17، cli 5، playlist 23، queue 5، serve 5، shell_injection 3، video 17. كلها نجحت.
+  - **التحقق الحاسم:** `g3_real` كاملاً **في تشغيل واحد بلا أي حذف يدوي**: **4 من 4 نجحت** في 194.9 ث.
+    - ffprobe: فيديو وصوت.
+    - بدء yt-dlp: 2.54–2.60 ث.
+    - المجلد `a%TEMP%b$HOME c${x}` سليم.
+    - رابط Deno صار في `real-tools\deno-cache` فقط، ولم يُكتب شيء في `%LOCALAPPDATA%\deno`.
 - **لم يُختبر:** MANUAL-TESTS #11 و#14 و#19 (تحتاج سطح المكتب الحقيقي)، وyt-dlp الحقيقي عبر `eid video` نفسه، فهذه الاختبارات تستدعي `eid-media` مباشرة.
