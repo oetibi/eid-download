@@ -964,6 +964,64 @@ async fn tool_hash_is_read_through_the_locked_handle() {
     }
 }
 
+/// Deno, run by yt-dlp, gives itself a second name: `<DENO_DIR>/node_compat_bin/node.exe`, a
+/// hard link to `deno.exe` (found by the real-tool tests, STATUS 2026-11-17). Our `DENO_DIR`
+/// is `<root>/deno-cache`, so that link is removed before every lock and the next run is not
+/// refused. A hard link anywhere else is still refused and left alone. A link or file planted
+/// where our cache folder goes is removed as a name, never followed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deno_link_in_our_cache_is_removed_before_the_lock_and_others_still_refuse() {
+    let fx = Fx::new().await;
+    let s = Set::new(1);
+    fx.serve(&s);
+    let m = s.manifest("t1");
+    let store = fx.store();
+    let paths = store.install(&m, &fx.fetcher()).await.unwrap();
+    let cache = store.root().join(eid_media::env::DENO_CACHE_DIR);
+    let ours = cache.join("node_compat_bin").join("node.exe");
+    std::fs::create_dir_all(ours.parent().unwrap()).unwrap();
+    std::fs::write(cache.join("dep_analysis_cache_v2"), b"cache").unwrap();
+    std::fs::hard_link(&paths.deno, &ours)
+        .expect("cannot create a hard link: this test must not pass without one");
+    // what the first real YouTube run leaves behind: locked again without a refusal
+    let l = store.lock(&m).unwrap();
+    assert_eq!(l.locked_files(), 4);
+    drop(l);
+    assert!(!ours.exists(), "Deno's link to deno.exe is still there");
+    assert!(
+        cache.join("dep_analysis_cache_v2").exists(),
+        "the rest of Deno's cache is kept"
+    );
+    // a hard link outside our cache folder: still refused, and not touched
+    let outside = fx.dir.path().join("elsewhere.exe");
+    std::fs::hard_link(&paths.deno, &outside).unwrap();
+    let e = store.lock(&m).unwrap_err();
+    assert!(e.to_string().contains("hard link"), "{e:?}");
+    assert!(outside.exists(), "a name outside our folders was removed");
+    std::fs::remove_file(&outside).unwrap();
+    store.lock(&m).unwrap();
+    // a link planted where our cache folder goes: the link is removed, its target is not
+    let victim = fx.dir.path().join("victim");
+    std::fs::create_dir_all(victim.join("node_compat_bin")).unwrap();
+    std::fs::write(victim.join("node_compat_bin").join("keep.txt"), b"keep").unwrap();
+    std::fs::remove_dir_all(&cache).unwrap();
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_dir(&victim, &cache);
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&victim, &cache);
+    made.expect("cannot create a directory link: this test must not pass without one");
+    store.lock(&m).unwrap();
+    assert!(
+        std::fs::symlink_metadata(&cache).is_err(),
+        "the planted link is still there"
+    );
+    assert_eq!(
+        std::fs::read(victim.join("node_compat_bin").join("keep.txt")).unwrap(),
+        b"keep",
+        "the link was followed"
+    );
+}
+
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tools_are_locked_against_write_delete_rename_while_a_job_runs() {

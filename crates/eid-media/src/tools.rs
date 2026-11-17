@@ -149,6 +149,7 @@ impl ToolStore {
     /// thread, see [`ToolStore::lock_blocking`].
     pub fn lock(&self, m: &Manifest) -> Result<LockedTools, MediaError> {
         let paths = self.current(m)?;
+        self.drop_deno_links();
         let dir = paths.ytdlp.parent().expect("set folder").to_path_buf();
         let mut handles = vec![];
         for f in m.files() {
@@ -171,6 +172,27 @@ impl ToolStore {
             handles.push(h);
         }
         Ok(LockedTools { paths, handles })
+    }
+
+    /// Remove the second name Deno gives `deno.exe` inside our `DENO_DIR`
+    /// (`<root>/deno-cache/node_compat_bin`, see [`crate::env::DENO_CACHE_DIR`]) so that the
+    /// lock below does not refuse the tool for it. Only that folder is removed; the rest of
+    /// Deno's cache is kept. A link or file planted where the cache folder goes is removed as a
+    /// name and never followed. Best effort: if the removal fails (for example because another
+    /// run's Deno is using it), the lock refuses `deno.exe` as before, which is fail closed. A
+    /// hard link anywhere else is never touched and is still refused.
+    fn drop_deno_links(&self) {
+        let cache = self.root.join(crate::env::DENO_CACHE_DIR);
+        match std::fs::symlink_metadata(&cache) {
+            Ok(md) if md.is_dir() && !md.file_type().is_symlink() => {
+                // remove_dir_all does not follow links inside the tree
+                let _ = std::fs::remove_dir_all(cache.join("node_compat_bin"));
+            }
+            Ok(_) => {
+                let _ = std::fs::remove_file(&cache).or_else(|_| std::fs::remove_dir(&cache));
+            }
+            Err(_) => {}
+        }
     }
 
     /// [`ToolStore::lock`] on tokio's blocking pool.
