@@ -32,12 +32,18 @@ USAGE:\n  eid video info <page-url> [--yes-i-agree] [--lang ar|en]\n\
 \n                                     an item that failed 3 runs in a row, or that the site refused
 \n                                     explicitly (private, removed, sign-in, country, DRM), is not
 \n                                     tried again automatically: --retry-failed tries it again
-\n  eid video consent [--lang ar|en]   show the consent text and whether it was given\n\
+\n  eid video probe <page-url>          print what the address is (video or playlist, title, items,\n\
+                                     offered qualities) as one JSON object (needs consent + tools)\n\
+  eid video setup [--yes-i-agree]    consent (if needed) and install the video tools, then stop\n\
+  eid video consent [--lang ar|en]   show the consent text and whether it was given\n\
   eid video revoke                   withdraw consent and delete the video tools\n\n\
 The first use asks for consent (or takes --yes-i-agree) and then downloads yt-dlp, FFmpeg and\n\
 Deno from their official releases, checked against the SHA-256 pinned in this program.\n\
 Without a terminal and without --yes-i-agree nothing is downloaded or started.\n\
-Ctrl-C stops the tool and everything it started; running the same command again continues.";
+Ctrl-C stops the tool and everything it started; running the same command again continues.\n\n\
+For programs (the desktop app): --events prints one JSON object per line on stdout (plan,\n\
+item, progress, end); --stop-on-stdin-eof stops like Ctrl-C when standard input is closed;\n\
+--items 1,4 (playlist) downloads only those item numbers.";
 
 /// Exit code when consent is missing.
 pub const EXIT_NO_CONSENT: i32 = 3;
@@ -49,6 +55,10 @@ pub enum Sub {
     Consent,
     Revoke,
     Playlist,
+    /// What an address is (video or playlist), as JSON (v0.1, for the desktop app).
+    Probe,
+    /// Consent + tool install only (v0.1, for the desktop app).
+    Setup,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,6 +77,12 @@ pub struct VideoArgs {
     pub list_only: bool,
     /// Playlist: try these failed or unavailable items again from zero (owner decision M2).
     pub retry_failed: Option<RetrySel>,
+    /// Playlist: download only these item numbers (empty = every item not skipped).
+    pub items: Vec<u32>,
+    /// Machine-readable events (JSON lines) on stdout.
+    pub events: bool,
+    /// Stop (like Ctrl-C) when standard input reaches its end (the parent closed it).
+    pub stdin_stop: bool,
 }
 
 /// Which items `--retry-failed` resets.
@@ -119,9 +135,11 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         Some("consent") => Sub::Consent,
         Some("revoke") => Sub::Revoke,
         Some("playlist") => Sub::Playlist,
+        Some("probe") => Sub::Probe,
+        Some("setup") => Sub::Setup,
         other => {
             return Err(format!(
-                "expected info, get, playlist, consent or revoke, got {other:?}"
+                "expected info, get, playlist, probe, setup, consent or revoke, got {other:?}"
             ))
         }
     };
@@ -137,6 +155,9 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         skip: vec![],
         list_only: false,
         retry_failed: None,
+        items: vec![],
+        events: false,
+        stdin_stop: false,
     };
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -157,6 +178,11 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
             }
             "-q" => a.quiet = true,
             "--list" => a.list_only = true,
+            "--events" => a.events = true,
+            "--stop-on-stdin-eof" => a.stdin_stop = true,
+            "--items" => a.items.extend(parse_numbers(
+                it.next().ok_or("--items needs item numbers, e.g. 1,4")?,
+            )?),
             "--skip" => a.skip.extend(parse_numbers(
                 it.next().ok_or("--skip needs item numbers, e.g. 2,5")?,
             )?),
@@ -185,7 +211,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
             }
         }
     }
-    let needs_url = matches!(a.sub, Sub::Info | Sub::Get | Sub::Playlist);
+    let needs_url = matches!(a.sub, Sub::Info | Sub::Get | Sub::Playlist | Sub::Probe);
     if needs_url != a.url.is_some() {
         return Err(if needs_url {
             "a page address is required".into()
@@ -193,8 +219,12 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
             "this command takes no address".into()
         });
     }
-    if (a.sub != Sub::Playlist) && (!a.skip.is_empty() || a.list_only || a.retry_failed.is_some()) {
-        return Err("--skip, --list and --retry-failed only apply to `eid video playlist`".into());
+    if (a.sub != Sub::Playlist)
+        && (!a.skip.is_empty() || a.list_only || a.retry_failed.is_some() || !a.items.is_empty())
+    {
+        return Err(
+            "--skip, --items, --list and --retry-failed only apply to `eid video playlist`".into(),
+        );
     }
     if a.list_only && a.retry_failed.is_some() {
         return Err("--list only shows the plan; it cannot be combined with --retry-failed".into());
@@ -300,6 +330,99 @@ mod test_hooks {
             })
         }
     }
+}
+
+// ------------------------------------------------------------------ events (--events)
+
+/// `--events`: one JSON object per line on stdout, for the desktop app's job list. Every
+/// string in an event comes from [`crate::remote::printable`]-safe sources or is serialized by
+/// serde_json (so it cannot break the line framing).
+pub mod events {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ON: AtomicBool = AtomicBool::new(false);
+
+    pub fn enable() {
+        ON.store(true, Ordering::Relaxed);
+    }
+
+    pub fn on() -> bool {
+        ON.load(Ordering::Relaxed)
+    }
+
+    /// Print one event (no-op without `--events`). A broken stdout is ignored: the run goes on.
+    pub fn emit(v: serde_json::Value) {
+        if !on() {
+            return;
+        }
+        let mut out = std::io::stdout().lock();
+        let _ = serde_json::to_writer(&mut out, &v);
+        let _ = out.write_all(b"\n");
+        let _ = out.flush();
+    }
+}
+
+/// Forward tool progress as `progress` events for item `n` (0 = a single video), at most
+/// every 250 ms (plus the last sample), so a fast download does not flood the reader.
+fn progress_forwarder(
+    n: u32,
+    quiet: bool,
+) -> (
+    tokio::sync::mpsc::Sender<eid_media::progress::Progress>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<eid_media::progress::Progress>(64);
+    let h = tokio::spawn(async move {
+        let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let mut pending: Option<eid_media::progress::Progress> = None;
+        let send = |p: &eid_media::progress::Progress| {
+            events::emit(serde_json::json!({
+                "ev": "progress", "n": n, "done": p.downloaded, "total": p.total,
+                "speed": p.speed, "eta": p.eta_secs, "height": p.height,
+            }))
+        };
+        while let Some(p) = rx.recv().await {
+            if !quiet && !events::on() && n == 0 {
+                match (p.downloaded, p.total) {
+                    (Some(d), Some(t)) if t > 0 => {
+                        eprintln!("  {d}/{t} ({}%)", d.saturating_mul(100) / t)
+                    }
+                    (Some(d), _) => eprintln!("  {d} bytes"),
+                    _ => {}
+                }
+            }
+            if last.elapsed() >= std::time::Duration::from_millis(250) {
+                send(&p);
+                last = std::time::Instant::now();
+                pending = None;
+            } else {
+                pending = Some(p);
+            }
+        }
+        if let Some(p) = pending {
+            send(&p);
+        }
+    });
+    (tx, h)
+}
+
+/// `--stop-on-stdin-eof`: the parent (the desktop app) pauses a job by closing our standard
+/// input; that cancels exactly like Ctrl-C (the tool tree is stopped, partial data is kept).
+fn cancel_on_stdin_eof(cancel: &eid_engine::CancellationToken) {
+    let c = cancel.clone();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 256];
+        let mut stdin = std::io::stdin();
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        c.cancel();
+    });
 }
 
 // ------------------------------------------------------------------ steps
@@ -472,6 +595,56 @@ async fn publish_retrying(
     eid_media::stage::publish_retrying(staged, out_dir, name, cancel, &fault).await
 }
 
+/// The `probe` answer (the shape of the desktop app's `video_probe`, docs/V0.1-CONTRACT.md):
+/// qualities offered for a video come from its formats ([`eid_media::args::offered_heights`],
+/// never above 2160p) plus `best` and `audio`; a playlist offers every policy choice (its items
+/// are not inspected one by one) and lists its items in order, numbered from 1.
+pub fn probe_json(p: &eid_media::info::Probed) -> serde_json::Value {
+    use eid_media::info::Probed;
+    let pr = crate::remote::printable;
+    match p {
+        Probed::Video(i) => {
+            let hs = i
+                .formats
+                .iter()
+                .filter(|f| f.has_video)
+                .filter_map(|f| f.height);
+            let mut q: Vec<String> = eid_media::args::offered_heights(hs)
+                .into_iter()
+                .map(|h| format!("{h}p"))
+                .collect();
+            q.push("best".into());
+            if i.formats.iter().any(|f| f.has_audio) || i.formats.is_empty() {
+                q.push("audio".into());
+            }
+            serde_json::json!({
+                "kind": "video", "id": pr(&i.id), "title": pr(&i.title),
+                "uploader": i.uploader.as_deref().map(pr), "duration": i.duration_secs,
+                "is_live": i.is_live, "qualities": q,
+            })
+        }
+        Probed::Playlist(l) => {
+            let items: Vec<serde_json::Value> = l
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(k, e)| {
+                    serde_json::json!({
+                        "index": k + 1, "id": pr(&e.id), "title": pr(&e.title),
+                        "duration": e.duration_secs,
+                        "available": !eid_media::stage::listed_unavailable(e.availability.as_deref()),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "kind": "playlist", "id": pr(&l.id), "title": pr(&l.title),
+                "uploader": l.uploader.as_deref().map(pr),
+                "qualities": eid_media::args::QUALITY_CHOICES, "items": items,
+            })
+        }
+    }
+}
+
 // ------------------------------------------------------------------ commands
 
 /// Run a video command; returns the exit code. Messages go to stderr, the final path (get) or
@@ -479,7 +652,22 @@ async fn publish_retrying(
 pub async fn run(a: VideoArgs, cancel: eid_engine::CancellationToken) -> i32 {
     #[cfg(feature = "test-hooks")]
     test_hooks::cancel_when_file_appears(&cancel);
-    match run_inner(&a, cancel).await {
+    if a.events {
+        events::enable();
+    }
+    if a.stdin_stop {
+        cancel_on_stdin_eof(&cancel);
+    }
+    let r = run_inner(&a, cancel).await;
+    let (code, msg) = match &r {
+        Ok(()) => (0, None),
+        Err(Fail::NoConsent(m)) => (EXIT_NO_CONSENT, Some(m.clone())),
+        Err(Fail::Cancelled(m)) => (130, Some(m.clone())),
+        Err(Fail::Media(e)) => (1, Some(describe(e))),
+        Err(Fail::Other(m)) => (1, Some(crate::remote::printable(m))),
+    };
+    events::emit(serde_json::json!({"ev": "end", "code": code, "error": msg}));
+    match r {
         Ok(()) => 0,
         Err(Fail::NoConsent(m)) => {
             eprintln!("error: {m}");
@@ -518,7 +706,26 @@ async fn run_inner(a: &VideoArgs, cancel: eid_engine::CancellationToken) -> Resu
         }
         _ => {}
     }
+    if a.sub == Sub::Setup {
+        ensure_consent(a, &settings, &m, &cancel).await?;
+        let locked = ensure_tools(a, &tools, &m, &cancel).await?;
+        drop(locked);
+        events::emit(serde_json::json!({"ev": "ready"}));
+        println!("video tools ready");
+        return Ok(());
+    }
     let url = MediaUrl::parse(a.url.as_deref().unwrap_or("")).map_err(Fail::media)?;
+    // probe is for programs: it never asks and never installs (the app runs `setup` first)
+    if a.sub == Sub::Probe {
+        if !consent::is_granted(&settings, &m).map_err(Fail::media)? {
+            return Err(Fail::NoConsent("TOOLS_MISSING: consent not given".into()));
+        }
+        if let Err(MediaError::NotInstalled) = tools.current(&m) {
+            return Err(Fail::Other(
+                "TOOLS_MISSING: video tools not installed".into(),
+            ));
+        }
+    }
     ensure_consent(a, &settings, &m, &cancel).await?;
     let out_dir = match (&a.sub, &a.dir) {
         (Sub::Get | Sub::Playlist, Some(d)) => d.clone(),
@@ -565,6 +772,23 @@ async fn run_inner(a: &VideoArgs, cancel: eid_engine::CancellationToken) -> Resu
                 );
             }
             drop(locked);
+            Ok(())
+        }
+        Sub::Probe => {
+            let work = tools.root().join(format!(".probe-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir(&work).map_err(|e| Fail::Other(e.to_string()))?;
+            let r = tokio::select! {
+                r = runner.probe(&url, &work) => r,
+                _ = cancel.cancelled() => {
+                    let _ = std::fs::remove_dir_all(&work);
+                    return Err(Fail::Cancelled("stopped".into()));
+                }
+            };
+            let _ = std::fs::remove_dir_all(&work);
+            drop(locked);
+            let v = probe_json(&r.map_err(Fail::media)?);
+            println!("{v}");
             Ok(())
         }
         Sub::Get => get(a, &url, &out_dir, &runner, locked, cancel).await,
@@ -621,23 +845,12 @@ async fn get(
     } else {
         "mp4"
     };
-    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    let quiet = a.quiet;
-    let printer = tokio::spawn(async move {
-        while let Some(p) = rx.recv().await {
-            let p: eid_media::progress::Progress = p;
-            if quiet {
-                continue;
-            }
-            match (p.downloaded, p.total) {
-                (Some(d), Some(t)) if t > 0 => {
-                    eprintln!("  {d}/{t} ({}%)", d.saturating_mul(100) / t)
-                }
-                (Some(d), _) => eprintln!("  {d} bytes"),
-                _ => {}
-            }
-        }
-    });
+    events::emit(serde_json::json!({
+        "ev": "plan", "kind": "video", "title": info.title, "folder": out_dir.display().to_string(),
+        "items": [{"n": 0, "title": info.title, "state": "todo"}],
+    }));
+    events::emit(serde_json::json!({"ev": "item", "n": 0, "state": "running"}));
+    let (tx, printer) = progress_forwarder(0, a.quiet);
     let r = tokio::select! {
         r = runner.download(url, &staging, a.quality.clone(), a.limit_bps, false, Some(tx)) => r,
         // dropping the download future kills yt-dlp and everything it started (job / group)
@@ -670,6 +883,10 @@ async fn get(
         Err(e) => return Err(Fail::Other(e.to_string())),
     };
     let _ = std::fs::remove_dir_all(&staging);
+    events::emit(serde_json::json!({
+        "ev": "item", "n": 0, "state": "done",
+        "file": dest.file_name().map(|f| f.to_string_lossy().into_owned()),
+    }));
     println!("{}", dest.display());
     Ok(())
 }
@@ -839,6 +1056,37 @@ async fn playlist(
     }
     // numbers are fixed from here on (D8)
     pl::save(&folder, &state).map_err(Fail::media)?;
+    for n in a
+        .items
+        .iter()
+        .filter(|n| !planned.iter().any(|(k, _)| k == *n))
+    {
+        eprintln!("--items {n}: no item of this playlist has that number; ignored");
+    }
+    let deselected = |n: &u32| a.skip.contains(n) || (!a.items.is_empty() && !a.items.contains(n));
+    if events::on() {
+        let items: Vec<serde_json::Value> = planned
+            .iter()
+            .map(|(n, e)| {
+                let st = match state.get(&e.id).map(|i| i.status) {
+                    Some(Status::Done) => "done",
+                    Some(Status::Unavailable) => "unavailable",
+                    Some(Status::Failed) => "failed",
+                    _ if deselected(n) => "skipped",
+                    _ => "todo",
+                };
+                serde_json::json!({"n": n, "id": e.id, "title": e.title, "state": st,
+                    "file": state.get(&e.id).and_then(|i| i.file.clone())})
+            })
+            .collect();
+        events::emit(serde_json::json!({
+            "ev": "plan", "kind": "playlist", "title": info.title,
+            "folder": folder.display().to_string(), "items": items,
+        }));
+    }
+    let item_ev = |n: u32, st: &str, err: Option<String>| {
+        events::emit(serde_json::json!({"ev": "item", "n": n, "state": st, "error": err}))
+    };
     let ext = if a.quality == Quality::AudioMp3 {
         "mp3"
     } else {
@@ -885,6 +1133,7 @@ async fn playlist(
             }
             pl::save(&folder, &state).map_err(Fail::media)?;
             gone += 1;
+            item_ev(*n, "unavailable", None);
             if !a.quiet {
                 eprintln!(
                     "{n}: unavailable (private, removed, sign-in only, other country or DRM); \
@@ -893,7 +1142,7 @@ async fn playlist(
             }
             continue;
         }
-        if a.skip.contains(n) {
+        if deselected(n) {
             skipped += 1;
             continue;
         }
@@ -905,6 +1154,7 @@ async fn playlist(
             _ => {
                 failed += 1;
                 eprintln!("{n}: the playlist gave no usable address for this item");
+                item_ev(*n, "failed", Some("no usable address".into()));
                 temporary(&mut state, &e.id, *n);
                 pl::save(&folder, &state).map_err(Fail::media)?;
                 continue;
@@ -915,16 +1165,27 @@ async fn playlist(
         }
         let staging =
             prepare_staging(&folder, &staging_name(&item_url, &a.quality)).map_err(Fail::Other)?;
+        item_ev(*n, "running", None);
+        let (tx, fwd) = if events::on() {
+            let (tx, h) = progress_forwarder(*n, true);
+            (Some(tx), Some(h))
+        } else {
+            (None, None)
+        };
         let r = tokio::select! {
-            r = runner.download(&item_url, &staging, a.quality.clone(), a.limit_bps, true, None) => r,
+            r = runner.download(&item_url, &staging, a.quality.clone(), a.limit_bps, true, tx) => r,
             _ = cancel.cancelled() => {
                 drop(locked);
+                item_ev(*n, "paused", None);
                 return Err(Fail::Cancelled(format!(
                     "stopped at item {n}; finished items are kept. Run the same command again \
                      to continue."
                 )));
             }
         };
+        if let Some(h) = fwd {
+            let _ = h.await;
+        }
         match r {
             Ok(_) => match finished_file(&staging, ext) {
                 Ok(staged) => {
@@ -945,6 +1206,7 @@ async fn playlist(
                                 i.file = dest.file_name().map(|f| f.to_string_lossy().into_owned());
                             }
                             got += 1;
+                            item_ev(*n, "done", None);
                         }
                         // something planted in our staging folder: stop, fail closed
                         Err(PublishError::Refused(m)) => return Err(Fail::Other(m)),
@@ -961,6 +1223,7 @@ async fn playlist(
                         Err(PublishError::Item(m) | PublishError::Locked(m)) => {
                             failed += 1;
                             eprintln!("{n}: {}", p(&m));
+                            item_ev(*n, "failed", Some(p(&m)));
                             temporary(&mut state, &e.id, *n);
                         }
                     }
@@ -972,6 +1235,7 @@ async fn playlist(
                         i.status = Status::Done;
                         i.attempts = 0;
                     }
+                    item_ev(*n, "done", None);
                     // the item was not done in our state, so the tool recorded it in the
                     // archive but we never published its file (for example the staging folder
                     // was emptied in between): say so, even with -q (owner decision m5(a))
@@ -987,6 +1251,7 @@ async fn playlist(
                 Err(m) => {
                     failed += 1;
                     eprintln!("{n}: {m}");
+                    item_ev(*n, "failed", Some(p(&m)));
                     temporary(&mut state, &e.id, *n);
                 }
             },
@@ -1001,6 +1266,11 @@ async fn playlist(
                     MediaError::ToolFailed { hint: Some(h), .. } if h.blocks_auto_retry()
                 );
                 eprintln!("{n}: {}", describe(&err));
+                item_ev(
+                    *n,
+                    if explicit { "unavailable" } else { "failed" },
+                    Some(describe(&err)),
+                );
                 if explicit {
                     if let Some(i) = state.get_mut(&e.id) {
                         i.status = Status::Unavailable;
