@@ -278,8 +278,7 @@
       <p id="v-status" class="note" hidden></p>
       <div id="v-tools" class="tools-box" hidden>
         <p data-t="vd_tools_missing"></p>
-        <label class="check"><input id="v-consent" type="checkbox"><span data-t="vd_tools_consent"></span></label>
-        <button type="button" id="v-install" data-t="v_install" disabled></button>
+        <button type="button" id="v-install" data-t="v_install"></button>
       </div>
       <div id="v-result" hidden>
         <h3><bdi id="v-name" dir="auto"></bdi></h3>
@@ -312,6 +311,19 @@
     </form>
   </dialog>
 
+  <dialog id="dlg-consent">
+    <form method="dialog">
+      <h2 data-t="c_title"></h2>
+      <p class="note" data-t="c_lead"></p>
+      <pre id="c-text" class="consent-text" dir="auto" tabindex="0"></pre>
+      <p id="c-error" class="error" hidden></p>
+      <label class="check"><input id="c-agree" type="checkbox"><span data-t="c_agree"></span></label>
+      <div class="buttons">
+        <button type="button" id="c-install" class="primary" data-t="v_install" disabled></button>
+        <button type="submit" id="c-cancel" data-t="cancel"></button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="dlg-info">
     <form method="dialog">
       <h2 id="info-title"></h2>

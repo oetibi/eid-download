@@ -139,6 +139,7 @@ export function mockApi(params = new URLSearchParams()) {
     pick_folder: () => "D:\\Downloads\\مجلد",
     reveal: ({ id }) => { if (find(id).status !== "done") throw "not_finished"; },
     tools_status: () => ({ installed: toolsInstalled, consent: toolsInstalled, ytdlp_version: toolsInstalled ? "2026.11.01 (mock)" : undefined, ffmpeg_version: toolsInstalled ? "7.1 (mock)" : undefined }),
+    tools_consent_text: ({ lang }) => (lang === "ar" ? "نص الموافقة (تجريبي): تُنزَّل yt-dlp وFFmpeg وDeno من مصادرها الرسمية..." : "Agreement (mock): yt-dlp, FFmpeg and Deno are downloaded from their official sources..."),
     tools_install: async ({ accept }) => { if (accept !== true) throw "consent_required"; await sleep(300); toolsInstalled = true; },
     video_probe: async ({ url }) => {
       await sleep(600);

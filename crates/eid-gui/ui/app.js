@@ -838,12 +838,50 @@ $("#set-folder-pick").addEventListener("click", async () => {
   } catch (e) { failure(e); }
 });
 $("#set-folder-reset").addEventListener("click", () => { saveSetting("folder", null); showSettingsFolder(); showFolder(); });
-$("#set-tools-install").addEventListener("click", async () => {
+/**
+ * The tools are installed only after the user read the real agreement text (from the backend,
+ * in the window's language) and ticked the box: `tools_install` is never called otherwise.
+ * Resolves true when the install started.
+ */
+let consentDone = null;
+async function askConsent() {
+  const dlg = $("#dlg-consent");
+  $("#c-agree").checked = false;
+  $("#c-install").disabled = true;
+  $("#c-error").hidden = true;
+  $("#c-text").textContent = "…";
+  dlg.showModal();
+  try {
+    $("#c-text").textContent = await api.call("tools_consent_text", { lang: settings.lang });
+  } catch (e) {
+    $("#c-text").textContent = "";
+    $("#c-error").hidden = false;
+    $("#c-error").textContent = errMessage(e);
+  }
+  return new Promise((res) => { consentDone = res; });
+}
+$("#c-agree").addEventListener("change", (e) => {
+  $("#c-install").disabled = !e.target.checked || !$("#c-text").textContent || $("#c-text").textContent === "…";
+});
+$("#c-install").addEventListener("click", async () => {
+  if (!$("#c-agree").checked) return;
+  $("#c-install").disabled = true;
   try {
     await api.call("tools_install", { accept: true });
+    $("#dlg-consent").close();
+    consentDone?.(true);
+  } catch (e) {
+    $("#c-error").hidden = false;
+    $("#c-error").textContent = errMessage(e);
+    $("#c-install").disabled = false;
+  }
+});
+$("#dlg-consent").addEventListener("close", () => { consentDone?.(false); consentDone = null; });
+$("#set-tools-install").addEventListener("click", async () => {
+  if (await askConsent()) {
     toast(t("v_installing"));
     setTimeout(() => showTools($("#set-tools"), $("#set-tools-install")), 1500);
-  } catch (e) { failure(e); }
+  }
 });
 
 // ---------------------------------------------------------------- video / playlist dialog
@@ -860,8 +898,7 @@ function openVideo(prefill) {
   $("#in-vurl").value = prefill ?? "";
   $("#v-result").hidden = true;
   $("#v-tools").hidden = true;
-  $("#v-consent").checked = false;
-  $("#v-install").disabled = true;
+  $("#v-install").disabled = false;
   vStatus(null); vError(null);
   updateVideoStart();
   $("#dlg-video").showModal();
@@ -961,14 +998,8 @@ $("#v-none").addEventListener("click", () => { for (const c of $$("#v-items inpu
 $("#v-pick").addEventListener("click", async () => {
   try { const p = await api.call("pick_folder"); if (p) { videoFolder = p; showVideoFolder(); } } catch (e) { failure(e); }
 });
-$("#v-consent").addEventListener("change", (e) => { $("#v-install").disabled = !e.target.checked; });
 $("#v-install").addEventListener("click", async () => {
-  if (!$("#v-consent").checked) return;
-  $("#v-install").disabled = true;
-  try {
-    await api.call("tools_install", { accept: true });
-    vStatus(t("v_installing"));
-  } catch (e) { vError(errMessage(e)); $("#v-install").disabled = false; }
+  if (await askConsent()) vStatus(t("v_installing"));
 });
 $("#v-cancel").addEventListener("click", () => { probeSeq++; $("#dlg-video").close(); });
 $("#form-video").addEventListener("submit", async (e) => {
