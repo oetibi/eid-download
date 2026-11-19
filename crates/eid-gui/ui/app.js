@@ -1,206 +1,669 @@
 // Eid Download window. Talks to the Rust side through Tauri `invoke`; outside Tauri (a plain
-// browser, for layout checks) it uses an in-memory mock. Untrusted text (file names, links,
-// error details) is only ever set through textContent, never as HTML.
+// browser, for layout checks and benchmarks) it uses the in-memory mock in mock.js.
+// Untrusted text (file names, links, titles, error details) is only ever set through
+// textContent / attributes, never as HTML.
+// Lightness: the download table is virtual (only the visible rows exist in the DOM), each cell
+// is written only when its text changes, all DOM work is batched in requestAnimationFrame, and
+// the list is polled fast only while something moves and not at all while the window is hidden.
 import { TEXT } from "./i18n.js";
+import {
+  ACTIVE, BUSY, CATEGORIES, mergeList, buildView, inView, categoryOf, fraction, clickSelect,
+  pollDelay, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing,
+} from "./logic.js";
 
 const tauri = window.__TAURI__;
+const usingMock = !tauri;
 const api = tauri
   ? { call: (cmd, args) => tauri.core.invoke(cmd, args) }
-  : (await import("./mock.js")).mockApi();
+  : (await import("./mock.js")).mockApi(new URLSearchParams(location.search));
 
 const $ = (s) => document.querySelector(s);
-let lang = localStorage.getItem("lang") === "en" ? "en" : "ar";
-let filter = "all";
-let items = [];
+const $$ = (s) => document.querySelectorAll(s);
+const ROW_H = 28; // keep in sync with .tr height in style.css
+const OVERSCAN = 6;
+
+// ---------------------------------------------------------------- settings (local only)
+const settings = {
+  lang: localStorage.getItem("lang") === "en" ? "en" : "ar",
+  theme: ["light", "dark"].includes(localStorage.getItem("theme")) ? localStorage.getItem("theme") : "system",
+  folder: localStorage.getItem("folder") || null,
+  quality: localStorage.getItem("quality") || "best",
+  sidebar: localStorage.getItem("sidebar") !== "off",
+};
+function saveSetting(k, v) {
+  settings[k] = v;
+  if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, typeof v === "boolean" ? (v ? "on" : "off") : v);
+}
+
+const t = (k, ...a) => {
+  const v = TEXT[settings.lang][k];
+  return typeof v === "function" ? v(...a) : v ?? k;
+};
+const errText = (k) => TEXT[settings.lang].err[k] ?? null;
+const units = () => [t("unit_b"), t("unit_kb"), t("unit_mb"), t("unit_gb"), t("unit_tb")];
+const size = (n) => fmtSize(n, units());
+
+// ---------------------------------------------------------------- state
+const store = new Map(); // id -> item as sent by `list`
+let rev = null; // last revision from `list` (null = backend without revisions)
 let defaultDir = "";
+let view = "all";
+let sortKey = "id", sortDir = -1;
+let viewItems = []; // items shown, sorted
+let order = []; // their ids
+let selected = new Set();
+let anchor = null;
+let cursor = null; // keyboard focus row id
+let propsId = null;
 let pickedFolder = null;
-const rows = new Map();
+let jobs = [];
+let jobsAvailable = true;
+let jobsRetryAt = 0;
+let firstRenderDone = false;
+const stats = { polls: [], renders: [] }; // only read by the benchmark (mock mode)
 
-const t = (k) => TEXT[lang][k] ?? k;
-const errText = (k) => TEXT[lang].err[k] ?? null;
-
-function applyLang() {
-  document.documentElement.lang = lang;
-  document.documentElement.dir = lang === "ar" ? "rtl" : "ltr";
-  document.title = t("app_title");
-  for (const el of document.querySelectorAll("[data-t]")) el.textContent = t(el.dataset.t);
-  $("#in-links").placeholder = t("links_ph");
-  showFolder();
-  rows.forEach((r) => r.remove());
-  rows.clear();
-  render();
-}
-
-function size(n) {
-  if (n == null) return "?";
-  const u = [t("unit_b"), t("unit_kb"), t("unit_mb"), t("unit_gb")];
-  let i = 0, v = n;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return `${v.toFixed(i === 0 ? 0 : v < 10 ? 2 : 1)} ${u[i]}`;
-}
-function duration(s) {
-  if (s == null) return "";
-  if (s < 60) return `${s} ${t("t_s")}`;
-  if (s < 3600) return `${Math.floor(s / 60)} ${t("t_m")} ${s % 60} ${t("t_s")}`;
-  return `${Math.floor(s / 3600)} ${t("t_h")} ${Math.floor((s % 3600) / 60)} ${t("t_m")}`;
-}
-
-let toastTimer;
-function toast(msg) {
-  const el = $("#toast");
-  el.textContent = msg;
-  el.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.hidden = true), 4500);
-}
-function failure(e) {
-  const raw = String(e?.message ?? e);
-  const key = raw.replace(/^invalid input: /, "").replace(/ /g, "_");
-  toast(errText(key) ?? errText(raw) ?? raw);
-}
-
-const ACTIVE = new Set(["pending", "waiting", "running", "paused"]);
-function matches(it) {
-  if (filter === "active") return ACTIVE.has(it.status);
-  if (filter === "done") return it.status === "done";
-  if (filter === "failed") return it.status === "failed";
-  return true;
-}
-
+// ---------------------------------------------------------------- small helpers
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
   if (text != null) e.textContent = text;
   return e;
 }
+function setText(node, v) {
+  if (node._v !== v) { node._v = v; node.textContent = v; }
+}
+function setAttr(node, name, v) {
+  const k = `_a_${name}`;
+  if (node[k] !== v) { node[k] = v; if (v == null) node.removeAttribute(name); else node.setAttribute(name, v); }
+}
+let toastTimer;
+function toast(msg) {
+  const e = $("#toast");
+  e.textContent = msg;
+  e.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (e.hidden = true), 4500);
+}
+function errMessage(e) {
+  const raw = String(e?.message ?? e);
+  const key = raw.replace(/^invalid input: /, "").replace(/ /g, "_");
+  if (/not found|unknown command|not allowed/i.test(raw) && /command/i.test(raw)) return errText("not_available");
+  return errText(key) ?? errText(raw) ?? raw;
+}
+const failure = (e) => toast(errMessage(e));
 
-function makeRow(id) {
-  const li = el("li", "item");
-  li.dataset.id = id;
-  const name = el("bdi", "name");
-  const ops = el("div", "ops");
-  const meta = el("div", "meta");
-  const bar = el("div", "progress");
-  bar.append(el("i"));
-  const err = el("div", "err");
-  li.append(name, ops, meta, bar, err);
-  return li;
+// ---------------------------------------------------------------- theme & language
+function applyTheme() {
+  if (settings.theme === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = settings.theme;
 }
 
-function button(label, action, id) {
-  const b = el("button", null, label);
-  b.type = "button";
-  b.addEventListener("click", async () => {
-    b.disabled = true;
-    try {
-      await action(id);
-      await refresh();
-    } catch (e) {
-      failure(e);
-    } finally {
-      b.disabled = false;
-    }
-  });
-  return b;
+function applyLang() {
+  const d = document.documentElement;
+  d.lang = settings.lang;
+  d.dir = settings.lang === "ar" ? "rtl" : "ltr";
+  document.title = t("app_title");
+  for (const n of $$("[data-t]")) n.textContent = t(n.dataset.t);
+  $("#in-links").placeholder = t("links_ph");
+  $("#in-vurl").placeholder = "https://www.youtube.com/watch?v=…";
+  for (const n of $$("fieldset.soon, fieldset.soon *")) n.title = t("soon_tip");
+  for (const row of pool) row.reset();
+  folderKey = "";
+  jobEls.forEach((x) => x.li.remove());
+  jobEls.clear();
+  showFolder();
+  invalidate(true);
 }
 
-function opsFor(it) {
-  const out = [];
-  if (["running", "pending", "waiting"].includes(it.status)) out.push(button(t("pause"), (id) => api.call("pause", { id }), it.id));
-  if (it.status === "paused") out.push(button(t("resume"), (id) => api.call("resume", { id }), it.id));
-  if (it.status === "failed") out.push(button(t("retry"), (id) => api.call("resume", { id }), it.id));
-  if (it.status === "done") out.push(button(t("reveal"), (id) => api.call("reveal", { id }), it.id));
-  if (it.status !== "running") {
-    out.push(button(t("remove"), async (id) => {
-      await api.call("remove", { id });
-      toast(t("removed"));
-    }, it.id));
-  }
-  return out;
+// ---------------------------------------------------------------- polling
+let pollTimer = null;
+let polling = false;
+let pollAgain = false;
+let pollCount = 0;
+let gotList = false;
+
+function anyBusy() {
+  for (const it of store.values()) if (BUSY.has(it.status)) return true;
+  return jobs.some((j) => j.state === "queued" || j.state === "running");
 }
 
-function fill(li, it) {
-  li.className = `item s-${it.status}`;
-  li.querySelector(".name").textContent = it.name;
-  li.querySelector(".name").title = it.name;
-  // operations change only with the status (keeps focus and clicks stable while polling)
-  const ops = li.querySelector(".ops");
-  if (ops.dataset.status !== it.status) {
-    ops.dataset.status = it.status;
-    ops.replaceChildren(...opsFor(it));
-  }
-  const meta = li.querySelector(".meta");
-  const parts = [el("span", "badge", t(`st_${it.status}`))];
-  const r = it.rate;
-  if (r) {
-    parts.push(el("span", null, r.total != null ? `${size(r.done)} ${t("of")} ${size(r.total)}` : `${size(r.done)} · ${t("unknown_size")}`));
-    if (it.status === "running" && r.speed > 0) parts.push(el("span", null, `${size(r.speed)}${t("unit_s")}`));
-    if (it.status === "running" && r.eta != null) parts.push(el("span", null, `${duration(r.eta)} ${t("left")}`));
-  }
-  if (it.attempts > 1 && it.status !== "done") parts.push(el("span", null, `${t("attempts")} ${it.attempts}`));
-  const url = el("bdi", "url", it.url);
-  url.dir = "ltr";
-  url.title = `${it.url}\n${it.folder}`;
-  parts.push(url);
-  meta.replaceChildren(...parts);
-
-  const bar = li.querySelector(".progress");
-  const fillEl = bar.firstChild;
-  const pct = r && r.total ? Math.min(100, (r.done / r.total) * 100) : it.status === "done" ? 100 : 0;
-  bar.classList.toggle("indet", it.status === "running" && !(r && r.total));
-  fillEl.style.width = `${pct.toFixed(1)}%`;
-  bar.title = r && r.total ? `${pct.toFixed(1)}%` : "";
-
-  const err = li.querySelector(".err");
-  if (it.error_kind && it.status !== "done") {
-    err.hidden = false;
-    const small = el("small", null, `${t("details")}: ${it.error}`);
-    small.dir = "auto";
-    err.replaceChildren(document.createTextNode(errText(it.error_kind) ?? it.error), small);
-  } else {
-    err.hidden = true;
-    err.replaceChildren();
-  }
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  const d = pollDelay({ hidden: document.visibilityState === "hidden", busy: anyBusy() });
+  if (d != null) pollTimer = setTimeout(poll, d);
 }
 
-function render() {
-  const counts = { all: items.length, active: 0, done: 0, failed: 0 };
-  for (const it of items) {
-    if (ACTIVE.has(it.status)) counts.active++;
-    if (it.status === "done") counts.done++;
-    if (it.status === "failed") counts.failed++;
+async function poll() {
+  if (polling) { pollAgain = true; return; }
+  polling = true;
+  pollAgain = false;
+  try {
+    await refresh();
+    const wantJobs = view === "jobs" || jobs.some((j) => j.state === "queued" || j.state === "running") || pollCount % 5 === 0;
+    if (wantJobs) await refreshJobs();
+    pollCount++;
+  } finally {
+    polling = false;
+    if (pollAgain) kick(); else schedulePoll();
   }
-  for (const [k, v] of Object.entries(counts)) $(`[data-count="${k}"]`).textContent = v;
-  const list = $("#list");
-  const shown = items.filter(matches);
-  const keep = new Set(shown.map((i) => i.id));
-  for (const [id, li] of rows) if (!keep.has(id)) { li.remove(); rows.delete(id); }
-  shown.forEach((it, idx) => {
-    let li = rows.get(it.id);
-    if (!li) { li = makeRow(it.id); rows.set(it.id, li); }
-    fill(li, it);
-    if (list.children[idx] !== li) list.insertBefore(li, list.children[idx] ?? null);
-  });
-  const empty = $("#empty");
-  empty.hidden = shown.length > 0;
-  empty.textContent = items.length === 0 ? t("empty") : t("empty_filter");
 }
 
 async function refresh() {
+  const t0 = performance.now();
   try {
-    const s = await api.call("list");
-    items = s.items;
-    defaultDir = s.default_dir;
-    render();
+    const s = await api.call("list", rev != null ? { since: rev } : {});
+    if (s?.default_dir) defaultDir = s.default_dir;
+    const r = mergeList(store, s);
+    rev = r.rev;
+    if (r.changed || !gotList) invalidate(true);
+    gotList = true;
   } catch (e) {
     console.error(e);
   }
+  if (usingMock) { stats.polls.push(performance.now() - t0); if (stats.polls.length > 500) stats.polls.shift(); }
 }
 
+/** Ask the next poll to come now (after a user action). */
+function kick() {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(poll, 0);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") clearTimeout(pollTimer);
+  else kick();
+});
+
+// ---------------------------------------------------------------- render scheduling
+let rafPending = false;
+let dirtyData = false;
+function invalidate(data) {
+  if (data) dirtyData = true;
+  if (!rafPending) { rafPending = true; requestAnimationFrame(frame); }
+}
+
+function frame() {
+  rafPending = false;
+  const t0 = performance.now();
+  if (dirtyData) {
+    dirtyData = false;
+    recomputeView();
+    renderSidebar();
+    renderStatusBar();
+    renderProps();
+    if (view === "jobs") renderJobs();
+    updateCommands();
+  }
+  renderRows();
+  if (usingMock) { stats.renders.push(performance.now() - t0); if (stats.renders.length > 500) stats.renders.shift(); }
+  if (!firstRenderDone && gotList) {
+    firstRenderDone = true;
+    performance.mark("eid-first-render");
+  }
+}
+
+function recomputeView() {
+  viewItems = view === "jobs" ? [] : buildView(store, view, sortKey, sortDir);
+  order = viewItems.map((i) => i.id);
+  for (const id of selected) if (!store.has(id)) selected.delete(id);
+  $("#spacer").style.height = `${viewItems.length * ROW_H}px`;
+  const empty = $("#empty");
+  const isEmpty = viewItems.length === 0 && view !== "jobs";
+  if (empty.hidden !== !isEmpty) empty.hidden = !isEmpty;
+  if (isEmpty) setText(empty, store.size === 0 ? t("empty") : t("empty_filter"));
+}
+
+// ---------------------------------------------------------------- virtual table
+const viewport = $("#viewport");
+const pool = [];
+
+class Row {
+  constructor() {
+    const r = el("div", "tr");
+    r.setAttribute("role", "row");
+    this.el = r;
+    this.name = el("bdi", "c-name");
+    this.name.dir = "auto";
+    this.size = el("div", "c-size");
+    this.prog = el("div", "c-prog");
+    this.bar = el("div", "pbar");
+    this.fill = el("i");
+    this.bar.append(this.fill);
+    this.pct = el("span", "pct");
+    this.prog.append(this.bar, this.pct);
+    this.status = el("div", "c-status");
+    this.speed = el("div", "c-speed");
+    this.eta = el("div", "c-eta");
+    this.url = el("bdi", "c-url");
+    this.url.dir = "ltr";
+    r.append(this.name, this.size, this.prog, this.status, this.speed, this.eta, this.url);
+    this.reset();
+  }
+  reset() {
+    this.id = null; this.top = null; this.cls = null; this.frac = null;
+    for (const c of [this.name, this.size, this.pct, this.status, this.speed, this.eta, this.url]) { c._v = undefined; c._a_title = undefined; }
+  }
+  bind(it, idx) {
+    const top = idx * ROW_H;
+    if (this.top !== top) { this.top = top; this.el.style.transform = `translateY(${top}px)`; }
+    if (this.id !== it.id) { this.id = it.id; this.el.dataset.id = it.id; }
+    const sel = selected.has(it.id);
+    const cls = `tr s-${it.status}${sel ? " sel" : ""}${cursor === it.id ? " cur" : ""}`;
+    if (this.cls !== cls) { this.cls = cls; this.el.className = cls; setAttr(this.el, "aria-selected", sel ? "true" : "false"); }
+    setText(this.name, it.name);
+    setAttr(this.name, "title", it.name);
+    const r = it.rate;
+    setText(this.size, r?.total != null ? size(r.total) : r ? `${size(r.done)} / ?` : "");
+    const f = fraction(it);
+    const fv = f == null ? 0 : Math.round(f * 1000) / 1000;
+    if (this.frac !== fv) { this.frac = fv; this.fill.style.transform = `scaleX(${fv})`; }
+    setText(this.pct, f == null ? "" : `${(f * 100).toFixed(1)}%`);
+    setText(this.status, t(`st_${it.status}`));
+    const errTip = it.error_kind && it.status !== "done" ? `${errText(it.error_kind) ?? it.error_kind}\n${t("details")}: ${it.error ?? ""}` : null;
+    setAttr(this.status, "title", errTip);
+    const running = it.status === "running";
+    setText(this.speed, running && r?.speed > 0 ? `${size(r.speed)}${t("unit_s")}` : "");
+    setText(this.eta, running && r?.eta != null ? fmtClock(r.eta) : "");
+    setText(this.url, it.url);
+    setAttr(this.url, "title", `${it.url}\n${it.folder}`);
+    if (this.el.hidden) this.el.hidden = false;
+  }
+  hide() {
+    if (!this.el.hidden) this.el.hidden = true;
+    this.id = null;
+  }
+}
+
+function ensurePool() {
+  const need = Math.ceil((viewport.clientHeight || 600) / ROW_H) + OVERSCAN * 2;
+  while (pool.length < need) {
+    const r = new Row();
+    pool.push(r);
+    viewport.append(r.el);
+  }
+}
+
+function renderRows() {
+  ensurePool();
+  const first = Math.max(0, Math.floor(viewport.scrollTop / ROW_H) - OVERSCAN);
+  for (let k = 0; k < pool.length; k++) {
+    const idx = first + k;
+    const it = viewItems[idx];
+    if (it) pool[k].bind(it, idx); else pool[k].hide();
+  }
+}
+
+viewport.addEventListener("scroll", () => invalidate(false), { passive: true });
+new ResizeObserver(() => invalidate(false)).observe(viewport);
+
+function scrollToRow(id) {
+  const idx = order.indexOf(id);
+  if (idx < 0) return;
+  const top = idx * ROW_H, h = viewport.clientHeight;
+  if (top < viewport.scrollTop) viewport.scrollTop = top;
+  else if (top + ROW_H > viewport.scrollTop + h) viewport.scrollTop = top + ROW_H - h;
+}
+
+function rowIdFrom(e) {
+  const r = e.target.closest?.(".tr");
+  return r && r.dataset.id ? Number(r.dataset.id) : null;
+}
+
+viewport.addEventListener("click", (e) => {
+  const id = rowIdFrom(e);
+  if (id == null) {
+    if (!e.ctrlKey && !e.shiftKey) { selected = new Set(); invalidate(true); }
+    return;
+  }
+  const s = clickSelect(selected, anchor, order, id, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey });
+  selected = s.selected; anchor = s.anchor; cursor = id;
+  viewport.focus({ preventScroll: true });
+  invalidate(true);
+});
+viewport.addEventListener("dblclick", (e) => {
+  const id = rowIdFrom(e);
+  if (id != null) openProps(id);
+});
+viewport.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  const id = rowIdFrom(e);
+  if (id == null) return;
+  if (!selected.has(id)) { selected = new Set([id]); anchor = id; cursor = id; invalidate(true); }
+  updateCommands();
+  showMenu($("#ctx"), e.clientX, e.clientY);
+});
+
+// sortable headers
+for (const b of $$("#thead [data-sort]")) {
+  b.addEventListener("click", () => {
+    const k = b.dataset.sort;
+    if (sortKey === k) sortDir = -sortDir;
+    else { sortKey = k; sortDir = k === "name" || k === "url" || k === "status" ? 1 : -1; }
+    for (const x of $$("#thead [data-sort]")) x.removeAttribute("aria-sort");
+    b.setAttribute("aria-sort", sortDir === 1 ? "ascending" : "descending");
+    invalidate(true);
+  });
+}
+
+// ---------------------------------------------------------------- sidebar & status bar
+let folderKey = "";
+function renderSidebar() {
+  const counts = { all: store.size, active: 0, unfinished: 0, finished: 0, failed: 0 };
+  for (const c of CATEGORIES) counts[c] = 0;
+  counts.other = 0;
+  const folders = new Map();
+  for (const it of store.values()) {
+    if (BUSY.has(it.status)) counts.active++;
+    if (it.status !== "done") counts.unfinished++; else counts.finished++;
+    if (it.status === "failed") counts.failed++;
+    counts[categoryOf(it.name)]++;
+    folders.set(it.folder, (folders.get(it.folder) ?? 0) + 1);
+  }
+  counts.jobs = jobs.length;
+  for (const b of $$("[data-count]")) setText(b, String(counts[b.dataset.count] ?? 0));
+  // folders: rebuilt only when the set of folders changes
+  const list = [...folders.keys()].sort().slice(0, 30);
+  const key = list.join("\n");
+  const ul = $("#tree-folders");
+  if (key !== folderKey) {
+    folderKey = key;
+    ul.replaceChildren(...list.map((f) => {
+      const li = el("li");
+      const b = el("button");
+      b.type = "button";
+      b.dataset.view = `folder:${f}`;
+      b.title = f;
+      const name = el("bdi", null, f.split(/[\\/]/).filter(Boolean).pop() || f);
+      name.dir = "auto";
+      b.append(svgIcon("i-folder"), name, el("b"));
+      b.classList.toggle("on", view === b.dataset.view);
+      li.append(b);
+      return li;
+    }));
+  }
+  for (const b of ul.querySelectorAll("button")) setText(b.querySelector("b"), String(folders.get(b.dataset.view.slice(7)) ?? 0));
+}
+
+function svgIcon(id) {
+  const ns = "http://www.w3.org/2000/svg";
+  const s = document.createElementNS(ns, "svg");
+  s.setAttribute("class", "ic");
+  const u = document.createElementNS(ns, "use");
+  u.setAttribute("href", `#${id}`);
+  s.append(u);
+  return s;
+}
+
+document.querySelector(".sidebar").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-view]");
+  if (b) setView(b.dataset.view);
+});
+
+function setView(v) {
+  view = v;
+  for (const b of $$("[data-view]")) b.classList.toggle("on", b.dataset.view === v);
+  const jobsView = v === "jobs";
+  $("#table-view").hidden = jobsView;
+  $("#jobs-view").hidden = !jobsView;
+  viewport.scrollTop = 0;
+  if (jobsView) { renderJobs(); refreshJobs().then(() => invalidate(true)); }
+  invalidate(true);
+}
+
+function renderStatusBar() {
+  let running = 0, speed = 0;
+  for (const it of store.values()) {
+    if (it.status === "running") { running++; speed += it.rate?.speed ?? 0; }
+  }
+  for (const j of jobs) if (j.state === "running") speed += j.speed ?? 0;
+  setText($("#sb-active"), t("sb_active", running));
+  setText($("#sb-speed"), t("sb_speed", `${size(speed)}${t("unit_s")}`));
+  setText($("#sb-count"), t("sb_count", store.size));
+  setText($("#sb-selected"), t("sb_selected", selected.size));
+}
+
+// ---------------------------------------------------------------- commands
+const selItems = () => [...selected].map((id) => store.get(id)).filter(Boolean);
+const SOON = new Set(["open_file", "scheduler"]);
+
+async function each(list, cmd) {
+  const res = await Promise.allSettled(list.map((it) => api.call(cmd, { id: it.id })));
+  const bad = res.find((r) => r.status === "rejected");
+  if (bad) failure(bad.reason);
+  kick();
+}
+
+const commands = {
+  add: { run: () => openAdd() },
+  add_video: { run: () => openVideo() },
+  settings: { run: () => openSettings() },
+  resume: {
+    on: () => selItems().some((i) => i.status === "paused" || i.status === "failed"),
+    run: () => each(selItems().filter((i) => i.status === "paused" || i.status === "failed"), "resume"),
+  },
+  pause: {
+    on: () => selItems().some((i) => BUSY.has(i.status)),
+    run: () => each(selItems().filter((i) => BUSY.has(i.status)), "pause"),
+  },
+  toggle: {
+    on: () => selItems().some((i) => i.status !== "done"),
+    run: () => (commands.pause.on() ? commands.pause.run() : commands.resume.run()),
+  },
+  pause_all: {
+    on: () => [...store.values()].some((i) => BUSY.has(i.status)),
+    run: () => each([...store.values()].filter((i) => BUSY.has(i.status)), "pause"),
+  },
+  resume_all: {
+    on: () => [...store.values()].some((i) => i.status === "paused"),
+    run: () => each([...store.values()].filter((i) => i.status === "paused"), "resume"),
+  },
+  remove: {
+    on: () => selItems().length > 0,
+    run: async () => {
+      const list = selItems();
+      const can = list.filter((i) => i.status !== "running");
+      const res = await Promise.allSettled(can.map((it) => api.call("remove", { id: it.id })));
+      const ok = res.filter((r) => r.status === "fulfilled").length;
+      const bad = res.find((r) => r.status === "rejected");
+      const skipped = list.length - can.length;
+      const msg = [ok === 1 && list.length === 1 ? t("removed") : ok ? t("removed_n", ok) : null, skipped ? t("skipped_running", skipped) : null, bad ? errMessage(bad.reason) : null].filter(Boolean);
+      if (msg.length) toast(msg.join("\n"));
+      kick();
+    },
+  },
+  clear_finished: {
+    on: () => [...store.values()].some((i) => i.status === "done"),
+    run: async () => {
+      try { toast(t("cleared_n", await api.call("clear_finished"))); } catch (e) { failure(e); }
+      kick();
+    },
+  },
+  select_all: {
+    on: () => view !== "jobs" && order.length > 0,
+    run: () => { selected = new Set(order); anchor = order[0] ?? null; invalidate(true); },
+  },
+  properties: { on: () => selected.size > 0, run: () => openProps(selItems()[0]?.id) },
+  reveal: {
+    on: () => selItems().length === 1 && selItems()[0].status === "done",
+    run: async () => { try { await api.call("reveal", { id: selItems()[0].id }); } catch (e) { failure(e); } },
+  },
+  open_file: { on: () => false, run: () => {} },
+  scheduler: { on: () => false, run: () => {} },
+  redownload: {
+    on: () => selItems().some((i) => i.status === "failed"),
+    run: () => each(selItems().filter((i) => i.status === "failed"), "resume"),
+  },
+  copy_link: {
+    on: () => selItems().length > 0,
+    run: () => copyText(selItems().map((i) => i.url).join("\n")),
+  },
+  toggle_sidebar: {
+    run: () => { saveSetting("sidebar", !settings.sidebar); applySidebar(); },
+  },
+  view_jobs: { run: () => setView("jobs") },
+  theme_system: { run: () => { saveSetting("theme", "system"); applyTheme(); updateCommands(); } },
+  theme_light: { run: () => { saveSetting("theme", "light"); applyTheme(); updateCommands(); } },
+  theme_dark: { run: () => { saveSetting("theme", "dark"); applyTheme(); updateCommands(); } },
+  lang: { run: () => setLang(settings.lang === "ar" ? "en" : "ar") },
+  shortcuts: { run: () => openInfo(t("c_shortcuts"), t("shortcuts_body")) },
+  about: { run: () => openInfo(t("c_about"), t("about_body")) },
+};
+
+function updateCommands() {
+  for (const n of $$("[data-cmd]")) {
+    const c = commands[n.dataset.cmd];
+    if (!c) continue;
+    const on = c.on ? c.on() : true;
+    if (n.disabled !== !on) n.disabled = !on;
+    if (SOON.has(n.dataset.cmd)) setAttr(n, "title", t("soon_tip"));
+    if (n.dataset.cmd.startsWith("theme_")) setAttr(n, "aria-checked", n.dataset.cmd === `theme_${settings.theme}` ? "true" : "false");
+  }
+}
+
+function run(cmd) {
+  const c = commands[cmd];
+  if (!c || (c.on && !c.on())) return;
+  closeMenus();
+  Promise.resolve(c.run()).catch(failure);
+}
+
+document.addEventListener("click", (e) => {
+  const n = e.target.closest?.("[data-cmd]");
+  if (n && !n.disabled) { run(n.dataset.cmd); return; }
+  if (!e.target.closest?.(".menu, [data-menu]")) closeMenus();
+});
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = el("textarea");
+    ta.value = text;
+    document.body.append(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+  toast(t("copied"));
+}
+
+function applySidebar() {
+  $("#sidebar").hidden = !settings.sidebar;
+}
+
+function setLang(l) {
+  saveSetting("lang", l);
+  applyLang();
+}
+
+// ---------------------------------------------------------------- menus
+let openMenu = null;
+function closeMenus() {
+  for (const m of $$(".menu")) m.hidden = true;
+  for (const b of $$("[data-menu]")) b.classList.remove("open");
+  openMenu = null;
+}
+function showMenu(menu, x, y) {
+  closeMenus();
+  menu.hidden = false;
+  const r = menu.getBoundingClientRect();
+  const left = Math.max(4, Math.min(x - (document.documentElement.dir === "rtl" ? r.width : 0), innerWidth - r.width - 4));
+  const top = Math.max(4, Math.min(y, innerHeight - r.height - 4));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  openMenu = menu;
+  menu.querySelector("button:not(:disabled)")?.focus();
+}
+function openMenuFor(b) {
+  updateCommands();
+  const m = $(`#menu-${b.dataset.menu}`);
+  const r = b.getBoundingClientRect();
+  showMenu(m, document.documentElement.dir === "rtl" ? r.right : r.left, r.bottom);
+  b.classList.add("open");
+}
+for (const b of $$("[data-menu]")) {
+  b.addEventListener("click", () => {
+    const m = $(`#menu-${b.dataset.menu}`);
+    if (openMenu === m) closeMenus(); else openMenuFor(b);
+  });
+  b.addEventListener("mouseenter", () => {
+    if (openMenu && !openMenu.classList.contains("ctx") && openMenu !== $(`#menu-${b.dataset.menu}`)) openMenuFor(b);
+  });
+}
+// arrow keys inside an open menu
+document.addEventListener("keydown", (e) => {
+  if (!openMenu) return;
+  const items = [...openMenu.querySelectorAll("button:not(:disabled)")];
+  const i = items.indexOf(document.activeElement);
+  if (e.key === "Escape") { e.preventDefault(); closeMenus(); viewport.focus(); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); items[(i + 1) % items.length]?.focus(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); items[(i - 1 + items.length) % items.length]?.focus(); }
+  else return;
+  e.stopImmediatePropagation();
+}, true);
+window.addEventListener("blur", closeMenus);
+window.addEventListener("resize", closeMenus);
+
+// ---------------------------------------------------------------- keyboard
+const inField = (e) => e.target.closest?.("input, textarea, select, [contenteditable]");
+const anyDialog = () => document.querySelector("dialog[open]");
+
+document.addEventListener("keydown", (e) => {
+  const ctrl = e.ctrlKey || e.metaKey;
+  if (anyDialog()) return;
+  if (ctrl && e.shiftKey && (e.key === "N" || e.key === "n")) { e.preventDefault(); run("add_video"); return; }
+  if (ctrl && (e.key === "n" || e.key === "N")) { e.preventDefault(); run("add"); return; }
+  if (ctrl && e.key === ",") { e.preventDefault(); run("settings"); return; }
+  if (e.key === "F1") { e.preventDefault(); run("shortcuts"); return; }
+  if (inField(e) || view === "jobs") return;
+  const onButton = e.target.closest?.("button");
+  if (ctrl && (e.key === "a" || e.key === "A")) { e.preventDefault(); run("select_all"); return; }
+  if (e.key === "Delete") { e.preventDefault(); run("remove"); return; }
+  if (onButton) return; // Space/Enter on a button press that button
+  if (e.key === " ") { e.preventDefault(); run("toggle"); return; }
+  if (e.key === "Enter") { e.preventDefault(); run("properties"); return; }
+  if ((e.shiftKey && e.key === "F10") || e.key === "ContextMenu") {
+    e.preventDefault();
+    if (!selected.size) return;
+    const id = cursor ?? [...selected][0];
+    scrollToRow(id);
+    const vr = viewport.getBoundingClientRect();
+    const y = vr.top + order.indexOf(id) * ROW_H - viewport.scrollTop + ROW_H;
+    updateCommands();
+    showMenu($("#ctx"), document.documentElement.dir === "rtl" ? vr.right - 40 : vr.left + 40, y);
+    return;
+  }
+  const moves = { ArrowDown: 1, ArrowUp: -1, PageDown: 10, PageUp: -10, Home: -Infinity, End: Infinity };
+  if (e.key in moves && order.length) {
+    e.preventDefault();
+    const cur = order.indexOf(cursor);
+    let next = cur < 0 ? 0 : cur + moves[e.key];
+    next = Math.max(0, Math.min(order.length - 1, Number.isFinite(next) ? next : next > 0 ? order.length - 1 : 0));
+    const id = order[next];
+    const s = clickSelect(selected, anchor, order, id, { shift: e.shiftKey, ctrl: false });
+    selected = s.selected; anchor = e.shiftKey ? s.anchor : id; cursor = id;
+    scrollToRow(id);
+    invalidate(true);
+  }
+});
+
+// Ctrl+V anywhere outside a text field: open "add" (or the video dialog for a video site link)
+document.addEventListener("paste", (e) => {
+  if (inField(e) || anyDialog()) return;
+  const text = (e.clipboardData?.getData("text") ?? "").trim();
+  if (!/^https?:\/\//i.test(text)) return;
+  e.preventDefault();
+  if (/^https?:\/\/([a-z0-9-]+\.)*(youtube\.com|youtu\.be)\//i.test(text) && !/\s/.test(text)) openVideo(text);
+  else openAdd(text);
+});
+
+// ---------------------------------------------------------------- add dialog (behaviour of v0.0.1 kept)
+const effectiveFolder = () => pickedFolder ?? settings.folder ?? null;
 function showFolder() {
   const f = $("#folder-show");
-  f.textContent = pickedFolder ?? `${t("folder_default")} — ${defaultDir}`;
-  f.title = pickedFolder ?? defaultDir;
+  const eff = effectiveFolder();
+  f.textContent = eff ?? `${t("folder_default")} — ${defaultDir}`;
+  f.title = eff ?? defaultDir;
   $("#btn-reset").hidden = !pickedFolder;
 }
 
@@ -208,6 +671,7 @@ function openAdd(prefill) {
   $("#add-error").hidden = true;
   $("#in-links").value = prefill ?? "";
   $("#in-name").value = "";
+  pickedFolder = null;
   showFolder();
   $("#dlg-add").showModal();
   $("#in-links").focus();
@@ -221,31 +685,25 @@ async function submitAdd(ev) {
   start.disabled = true;
   try {
     const name = $("#in-name").value.trim();
-    const r = await api.call("add", {
-      links: $("#in-links").value,
-      folder: pickedFolder,
-      name: name || null,
-    });
+    const r = await api.call("add", { links: $("#in-links").value, folder: effectiveFolder(), name: name || null });
     if (r.refused.length) {
       const lines = r.refused.map(([u, k]) => `• ⁨${u}⁩ —${errText(k) ?? k}`);
-      errEl.textContent = `${r.added.length ? t("added_n")(r.added.length) + "\n" : ""}${t("refused_n")(r.refused.length)}\n${lines.join("\n")}`;
+      errEl.textContent = `${r.added.length ? t("added_n", r.added.length) + "\n" : ""}${t("refused_n", r.refused.length)}\n${lines.join("\n")}`;
       errEl.hidden = false;
       $("#in-links").value = r.refused.map(([u]) => u).join("\n");
     } else {
       $("#dlg-add").close();
-      toast(t("added_n")(r.added.length));
+      toast(t("added_n", r.added.length));
     }
-    await refresh();
+    kick();
   } catch (e) {
-    const k = String(e?.message ?? e);
-    errEl.textContent = errText(k) ?? k;
+    errEl.textContent = errMessage(e);
     errEl.hidden = false;
   } finally {
     start.disabled = false;
   }
 }
 
-$("#btn-add").addEventListener("click", () => openAdd());
 $("#btn-cancel").addEventListener("click", () => $("#dlg-add").close());
 $("#form-add").addEventListener("submit", submitAdd);
 $("#btn-pick").addEventListener("click", async () => {
@@ -255,32 +713,409 @@ $("#btn-pick").addEventListener("click", async () => {
   } catch (e) { failure(e); }
 });
 $("#btn-reset").addEventListener("click", () => { pickedFolder = null; showFolder(); });
-$("#btn-clear").addEventListener("click", async () => {
+$("#btn-lang").addEventListener("click", () => run("lang"));
+
+// ---------------------------------------------------------------- properties dialog
+function openProps(id) {
+  if (id == null || !store.has(id)) return;
+  propsId = id;
+  renderProps();
+  $("#dlg-props").showModal();
+}
+function renderProps() {
+  const dlg = $("#dlg-props");
+  if (propsId == null || !dlg.open) return;
+  const it = store.get(propsId);
+  if (!it) { dlg.close(); return; }
+  const r = it.rate;
+  setText($("#p-name"), it.name);
+  setText($("#p-status"), t(`st_${it.status}`));
+  const f = fraction(it);
+  setText($("#p-done"), r ? (r.total != null ? `${size(r.done)} ${t("of")} ${size(r.total)}${f != null ? ` (${(f * 100).toFixed(1)}%)` : ""}` : `${size(r.done)} · ${t("unknown_size")}`) : "—");
+  setText($("#p-speed"), it.status === "running" && r?.speed ? `${size(r.speed)}${t("unit_s")}` : "—");
+  setText($("#p-eta"), it.status === "running" && r?.eta != null ? fmtClock(r.eta) : "—");
+  setText($("#p-attempts"), String(it.attempts ?? 0));
+  setText($("#p-url"), it.url);
+  setText($("#p-folder"), it.folder);
+  $("#p-bar").style.transform = `scaleX(${f ?? 0})`;
+  $("#p-bar").parentElement.className = `pbar big s-${it.status}`;
+  const pe = $("#p-error");
+  const hasErr = !!(it.error_kind && it.status !== "done");
+  pe.hidden = !hasErr;
+  if (hasErr) setText(pe, `${errText(it.error_kind) ?? it.error_kind}\n${t("details")}: ${it.error ?? ""}`);
+  const tg = $("#p-toggle");
+  const label = BUSY.has(it.status) ? t("c_pause") : it.status === "failed" ? t("c_redownload") : t("c_resume");
+  setText(tg, label);
+  tg.disabled = it.status === "done";
+  $("#p-reveal").disabled = it.status !== "done";
+}
+$("#p-toggle").addEventListener("click", async () => {
+  const it = store.get(propsId);
+  if (!it) return;
+  try { await api.call(BUSY.has(it.status) ? "pause" : "resume", { id: it.id }); } catch (e) { failure(e); }
+  kick();
+});
+$("#p-reveal").addEventListener("click", async () => {
+  try { await api.call("reveal", { id: propsId }); } catch (e) { failure(e); }
+});
+$("#p-copy").addEventListener("click", () => { const it = store.get(propsId); if (it) copyText(it.url); });
+$("#dlg-props").addEventListener("close", () => { propsId = null; viewport.focus(); });
+
+// ---------------------------------------------------------------- info dialog
+function openInfo(title, body) {
+  $("#info-title").textContent = title;
+  const b = $("#info-body");
+  if (Array.isArray(body)) {
+    const dl = el("dl", "grid keys");
+    for (const [k, v] of body) {
+      const dt = el("dt");
+      dt.append(el("kbd", null, k));
+      dl.append(dt, el("dd", null, v));
+    }
+    b.replaceChildren(dl);
+  } else {
+    b.replaceChildren(el("p", null, body));
+  }
+  $("#dlg-info").showModal();
+}
+
+// ---------------------------------------------------------------- settings dialog
+function qualityLabel(q) {
+  return q === "best" ? t("q_best") : q === "audio" ? t("q_audio") : q === "2160p" ? t("q_2160p") : q;
+}
+function fillQualitySelect(sel, list, pick) {
+  sel.replaceChildren(...list.map((q) => { const o = el("option", null, qualityLabel(q)); o.value = q; return o; }));
+  sel.value = list.includes(pick) ? pick : list.includes("best") ? "best" : list[0] ?? "";
+}
+function showSettingsFolder() {
+  const f = $("#set-folder");
+  f.textContent = settings.folder ?? `${t("folder_default")} — ${defaultDir}`;
+  f.title = settings.folder ?? defaultDir;
+  $("#set-folder-reset").hidden = !settings.folder;
+}
+async function showTools(target, button) {
   try {
-    const n = await api.call("clear_finished");
-    toast(t("cleared_n")(n));
-    await refresh();
-  } catch (e) { failure(e); }
-});
-$("#btn-lang").addEventListener("click", () => {
-  lang = lang === "ar" ? "en" : "ar";
-  localStorage.setItem("lang", lang);
-  applyLang();
-});
-for (const b of document.querySelectorAll("[data-filter]")) {
+    const s = await api.call("tools_status");
+    target.textContent = s.installed ? t("tools_ok", s.ytdlp_version, s.ffmpeg_version) : t("tools_no");
+    if (button) button.hidden = !!s.installed;
+    return s;
+  } catch {
+    target.textContent = t("tools_unknown");
+    if (button) button.hidden = true;
+    return null;
+  }
+}
+function openSettings() {
+  $("#set-lang").value = settings.lang;
+  $("#set-theme").value = settings.theme;
+  fillQualitySelect($("#set-quality"), ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"], settings.quality);
+  showSettingsFolder();
+  showTools($("#set-tools"), $("#set-tools-install"));
+  $("#dlg-settings").showModal();
+}
+for (const b of $$("#dlg-settings [data-tab]")) {
   b.addEventListener("click", () => {
-    filter = b.dataset.filter;
-    document.querySelectorAll("[data-filter]").forEach((x) => x.classList.toggle("on", x === b));
-    render();
+    for (const x of $$("#dlg-settings [data-tab]")) x.classList.toggle("on", x === b);
+    for (const p of $$("#dlg-settings [data-pane]")) p.hidden = p.dataset.pane !== b.dataset.tab;
   });
 }
-// Ctrl+V anywhere outside a text field: open "add" with the pasted link
-document.addEventListener("paste", (e) => {
-  if (e.target.closest?.("textarea, input") || $("#dlg-add").open) return;
-  const text = e.clipboardData?.getData("text") ?? "";
-  if (/^\s*https?:\/\//i.test(text)) { e.preventDefault(); openAdd(text.trim()); }
+$("#set-lang").addEventListener("change", (e) => {
+  setLang(e.target.value);
+  openSettingsTexts();
+});
+function openSettingsTexts() {
+  fillQualitySelect($("#set-quality"), ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"], settings.quality);
+  $("#set-theme").value = settings.theme;
+  showSettingsFolder();
+  showTools($("#set-tools"), $("#set-tools-install"));
+}
+$("#set-theme").addEventListener("change", (e) => { saveSetting("theme", e.target.value); applyTheme(); updateCommands(); });
+$("#set-quality").addEventListener("change", (e) => saveSetting("quality", e.target.value));
+$("#set-folder-pick").addEventListener("click", async () => {
+  try {
+    const p = await api.call("pick_folder");
+    if (p) { saveSetting("folder", p); showSettingsFolder(); showFolder(); }
+  } catch (e) { failure(e); }
+});
+$("#set-folder-reset").addEventListener("click", () => { saveSetting("folder", null); showSettingsFolder(); showFolder(); });
+$("#set-tools-install").addEventListener("click", async () => {
+  try {
+    await api.call("tools_install", { accept: true });
+    toast(t("v_installing"));
+    setTimeout(() => showTools($("#set-tools"), $("#set-tools-install")), 1500);
+  } catch (e) { failure(e); }
 });
 
+// ---------------------------------------------------------------- video / playlist dialog
+let probe = null; // { url, result }
+let probeSeq = 0;
+let videoFolder = null;
+const vStatus = (msg) => { const s = $("#v-status"); s.hidden = !msg; s.textContent = msg ?? ""; };
+const vError = (msg) => { const s = $("#v-error"); s.hidden = !msg; s.textContent = msg ?? ""; };
+
+function openVideo(prefill) {
+  probe = null;
+  probeSeq++;
+  videoFolder = null;
+  $("#in-vurl").value = prefill ?? "";
+  $("#v-result").hidden = true;
+  $("#v-tools").hidden = true;
+  $("#v-consent").checked = false;
+  $("#v-install").disabled = true;
+  vStatus(null); vError(null);
+  updateVideoStart();
+  $("#dlg-video").showModal();
+  $("#in-vurl").focus();
+  if (prefill) doProbe();
+}
+
+function showVideoFolder() {
+  const f = $("#v-folder");
+  const eff = videoFolder ?? settings.folder;
+  f.textContent = eff ?? `${t("folder_default")} — ${defaultDir}`;
+  f.title = eff ?? defaultDir;
+}
+
+function fmtDur(s) { return s != null && Number.isFinite(s) ? fmtClock(s) : ""; }
+
+async function doProbe() {
+  const url = $("#in-vurl").value.trim();
+  vError(null);
+  $("#v-tools").hidden = true;
+  if (!/^https?:\/\/\S+$/i.test(url)) { vError(errText("bad_url")); return; }
+  const seq = ++probeSeq;
+  probe = null;
+  $("#v-result").hidden = true;
+  updateVideoStart();
+  $("#btn-probe").disabled = true;
+  vStatus(t("vd_probing"));
+  try {
+    const r = await api.call("video_probe", { url });
+    if (seq !== probeSeq) return;
+    probe = { url, result: r };
+    renderProbe();
+  } catch (e) {
+    if (seq !== probeSeq) return;
+    if (isToolsMissing(e)) $("#v-tools").hidden = false;
+    else vError(errMessage(String(e?.message ?? e).replace(/^[A-Z_]+:\s*/, "")));
+  } finally {
+    if (seq === probeSeq) { $("#btn-probe").disabled = false; vStatus(null); }
+  }
+}
+
+function renderProbe() {
+  const r = probe.result;
+  $("#v-result").hidden = false;
+  setText($("#v-name"), r.title ?? "");
+  const meta = [r.kind === "playlist" ? t("vd_kind_playlist") : t("vd_kind_video")];
+  if (r.uploader) meta.push(`${t("vd_by")}: ${r.uploader}`);
+  if (r.duration != null) meta.push(`${t("vd_duration")}: ${fmtDur(r.duration)}`);
+  if (r.kind === "playlist") meta.push(t("vd_items", r.items?.length ?? 0));
+  $("#v-meta").textContent = meta.join(" · ");
+  fillQualitySelect($("#v-quality"), safeQualities(r.qualities), settings.quality);
+  const isList = r.kind === "playlist";
+  $("#v-playlist").hidden = !isList;
+  if (isList) {
+    const ul = $("#v-items");
+    const width = String(r.items?.length ?? 0).length < 3 ? 3 : String(r.items.length).length;
+    ul.replaceChildren(...(r.items ?? []).map((x) => {
+      const li = el("li");
+      const lab = el("label", "check");
+      const cb = el("input");
+      cb.type = "checkbox"; cb.checked = true; cb.dataset.index = x.index;
+      const title = el("bdi", "v-title", x.title ?? "");
+      title.dir = "auto";
+      lab.append(cb, el("span", "num", String(x.index).padStart(width, "0")), title, el("span", "dur", fmtDur(x.duration)));
+      li.append(lab);
+      return li;
+    }));
+    $("#v-folder-note").textContent = t("vd_folder_note", r.title ?? "");
+  }
+  showVideoFolder();
+  updateVideoStart();
+}
+
+function pickedIndices() {
+  return [...$$("#v-items input:checked")].map((c) => Number(c.dataset.index));
+}
+function updateVideoStart() {
+  let ok = !!probe && $("#v-quality").value !== "";
+  if (ok && probe.result.kind === "playlist") {
+    const total = probe.result.items?.length ?? 0;
+    const n = pickedIndices().length;
+    $("#v-count").textContent = t("vd_count", n, total);
+    ok = n > 0;
+  }
+  $("#v-start").disabled = !ok;
+}
+
+$("#btn-probe").addEventListener("click", doProbe);
+$("#in-vurl").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doProbe(); } });
+$("#in-vurl").addEventListener("input", () => {
+  if (probe && $("#in-vurl").value.trim() !== probe.url) { probe = null; $("#v-result").hidden = true; updateVideoStart(); }
+});
+$("#v-items").addEventListener("change", updateVideoStart);
+$("#v-quality").addEventListener("change", updateVideoStart);
+$("#v-all").addEventListener("click", () => { for (const c of $$("#v-items input")) c.checked = true; updateVideoStart(); });
+$("#v-none").addEventListener("click", () => { for (const c of $$("#v-items input")) c.checked = false; updateVideoStart(); });
+$("#v-pick").addEventListener("click", async () => {
+  try { const p = await api.call("pick_folder"); if (p) { videoFolder = p; showVideoFolder(); } } catch (e) { failure(e); }
+});
+$("#v-consent").addEventListener("change", (e) => { $("#v-install").disabled = !e.target.checked; });
+$("#v-install").addEventListener("click", async () => {
+  if (!$("#v-consent").checked) return;
+  $("#v-install").disabled = true;
+  try {
+    await api.call("tools_install", { accept: true });
+    vStatus(t("v_installing"));
+  } catch (e) { vError(errMessage(e)); $("#v-install").disabled = false; }
+});
+$("#v-cancel").addEventListener("click", () => { probeSeq++; $("#dlg-video").close(); });
+$("#form-video").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!probe) return;
+  const quality = $("#v-quality").value;
+  if (!safeQualities([quality]).length) { vError(errText("bad_quality")); return; }
+  const dir = videoFolder ?? settings.folder ?? null;
+  $("#v-start").disabled = true;
+  try {
+    if (probe.result.kind === "playlist") {
+      const idx = pickedIndices();
+      if (!idx.length) { vError(t("vd_none_selected")); return; }
+      const all = idx.length === (probe.result.items?.length ?? 0);
+      await api.call("playlist_add", all ? { url: probe.url, quality, dir } : { url: probe.url, quality, items: idx, dir });
+    } else {
+      await api.call("video_add", { url: probe.url, quality, dir });
+    }
+    $("#dlg-video").close();
+    toast(t("video_added"));
+    jobsAvailable = true;
+    setView("jobs");
+  } catch (err) {
+    vError(errMessage(err));
+  } finally {
+    updateVideoStart();
+  }
+});
+
+// ---------------------------------------------------------------- video jobs view
+const jobEls = new Map(); // job -> { li, parts, itemsOpen, itemEls }
+
+async function refreshJobs() {
+  if (!jobsAvailable && Date.now() < jobsRetryAt) return;
+  try {
+    const r = await api.call("video_jobs");
+    jobs = Array.isArray(r) ? r : [];
+    jobsAvailable = true;
+  } catch {
+    jobsAvailable = false;
+    jobsRetryAt = Date.now() + 30000;
+    jobs = [];
+  }
+  invalidate(true);
+}
+
+function jobButton(label, cmd, job) {
+  const b = el("button", "small", label);
+  b.type = "button";
+  b.addEventListener("click", async () => {
+    b.disabled = true;
+    try { await api.call(cmd, { job }); } catch (e) { failure(e); }
+    await refreshJobs();
+    b.disabled = false;
+  });
+  return b;
+}
+
+function makeJob(j) {
+  const li = el("li", "job");
+  const title = el("bdi", "j-title");
+  title.dir = "auto";
+  const meta = el("div", "j-meta");
+  const bar = el("div", "pbar");
+  const fill = el("i");
+  bar.append(fill);
+  const nums = el("div", "j-nums");
+  const ops = el("div", "j-ops");
+  const items = el("ul", "j-items");
+  items.hidden = true;
+  li.append(title, ops, meta, bar, nums, items);
+  const x = { li, title, meta, bar, fill, nums, ops, items, opsKey: "", itemEls: [] };
+  jobEls.set(j.job, x);
+  return x;
+}
+
+function renderJobs() {
+  const ul = $("#jobs");
+  const empty = $("#jobs-empty");
+  empty.hidden = jobs.length > 0;
+  if (!jobs.length) setText(empty, jobsAvailable ? t("jobs_empty") : t("jobs_unavailable"));
+  const keep = new Set(jobs.map((j) => j.job));
+  for (const [k, x] of jobEls) if (!keep.has(k)) { x.li.remove(); jobEls.delete(k); }
+  jobs.forEach((j, i) => {
+    const x = jobEls.get(j.job) ?? makeJob(j);
+    if (ul.children[i] !== x.li) ul.insertBefore(x.li, ul.children[i] ?? null);
+    x.li.className = `job js-${j.state}`;
+    setText(x.title, j.title ?? "");
+    const kind = j.kind === "playlist" ? t("vd_kind_playlist") : t("vd_kind_video");
+    setText(x.meta, `${kind} · ${t(`js_${j.state}`)} · ${t("j_quality", qualityLabel(j.quality), j.got_height)} · ${t("j_items", j.done_items ?? 0, j.total_items ?? 0, j.failed_items ?? 0)}`);
+    const f = jobFraction(j);
+    x.fill.style.transform = `scaleX(${f})`;
+    const bytes = j.total_bytes ? `${size(j.bytes ?? 0)} ${t("of")} ${size(j.total_bytes)}` : j.bytes ? size(j.bytes) : "";
+    const speed = j.state === "running" && j.speed ? `${size(j.speed)}${t("unit_s")}` : "";
+    setText(x.nums, [`${(f * 100).toFixed(1)}%`, bytes, speed].filter(Boolean).join(" · "));
+    const opsKey = `${j.state}|${j.failed_items > 0}|${!!j.items?.length}|${settings.lang}`;
+    if (x.opsKey !== opsKey) {
+      x.opsKey = opsKey;
+      const ops = [];
+      if (j.state === "running" || j.state === "queued") ops.push(jobButton(t("c_pause"), "video_pause", j.job));
+      if (j.state === "paused") ops.push(jobButton(t("c_resume"), "video_resume", j.job));
+      if (j.failed_items > 0 || j.state === "failed") ops.push(jobButton(t("j_retry"), "video_retry", j.job));
+      if (j.items?.length) {
+        const b = el("button", "small ghost", t("j_show_items"));
+        b.type = "button";
+        b.addEventListener("click", () => { x.items.hidden = !x.items.hidden; renderJobs(); });
+        ops.push(b);
+      }
+      if (j.state !== "running") ops.push(jobButton(t("j_remove"), "video_remove", j.job));
+      x.ops.replaceChildren(...ops);
+    }
+    if (!x.items.hidden && j.items) renderJobItems(x, j.items);
+  });
+}
+
+function renderJobItems(x, items) {
+  while (x.itemEls.length < items.length) {
+    const li = el("li", "j-item");
+    const num = el("span", "num");
+    const title = el("bdi", "v-title");
+    title.dir = "auto";
+    const bar = el("div", "pbar");
+    const fill = el("i");
+    bar.append(fill);
+    const st = el("span", "j-st");
+    li.append(num, title, bar, st);
+    x.items.append(li);
+    x.itemEls.push({ li, num, title, fill, st });
+  }
+  while (x.itemEls.length > items.length) x.itemEls.pop().li.remove();
+  items.forEach((it, i) => {
+    const e = x.itemEls[i];
+    setText(e.num, String(it.index).padStart(3, "0"));
+    setText(e.title, it.title ?? "");
+    const p = it.state === "done" ? 1 : Math.min(1, Math.max(0, it.progress ?? 0));
+    e.fill.style.transform = `scaleX(${p})`;
+    const label = `${t(`js_${it.state}`)}${it.got_height ? ` · ${it.got_height}p` : ""}`;
+    setText(e.st, it.state === "running" ? `${(p * 100).toFixed(0)}%` : label);
+    setAttr(e.st, "title", it.error ?? null);
+    const cls = `j-item js-${it.state}`;
+    if (e.li.className !== cls) e.li.className = cls;
+  });
+}
+
+// ---------------------------------------------------------------- start
+applyTheme();
+applySidebar();
 applyLang();
-await refresh();
-setInterval(refresh, 700);
+if (usingMock) window.__eid = { stats, store, refresh, poll, invalidate, viewport };
+await poll();

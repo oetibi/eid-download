@@ -8,26 +8,167 @@
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <header class="bar">
-    <div class="brand"><span class="logo" aria-hidden="true">⭳</span><h1 data-t="app_title"></h1></div>
-    <div class="actions">
-      <button id="btn-add" class="primary" data-t="add"></button>
-      <button id="btn-clear" data-t="clear_finished"></button>
-      <button id="btn-lang" class="ghost" data-t="lang_switch"></button>
+  <!-- Icons: simple line drawings made for Eid Download (no third-party icon set). -->
+  <svg class="icons" aria-hidden="true" focusable="false">
+    <symbol id="i-add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3z"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="i-stopall" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></symbol>
+    <symbol id="i-remove" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-clear" viewBox="0 0 24 24"><path d="M4 12l4 4 8-8M14 18h6M17 15v6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4l9 16H3zM12 10v4M12 17h.01"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4"/></symbol>
+    <symbol id="i-box" viewBox="0 0 24 24"><path d="M4 8l8-4 8 4v8l-8 4-8-4zM4 8l8 4 8-4M12 12v8"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM9 12h6M9 16h6"/></symbol>
+    <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="16" r="2"/></symbol>
+    <symbol id="i-app" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 16l5-5 4 4 2-2 5 5"/></symbol>
+  </svg>
+
+  <div class="app">
+    <nav class="menubar" role="menubar" id="menubar">
+      <button type="button" role="menuitem" aria-haspopup="true" data-menu="tasks" data-t="m_tasks"></button>
+      <button type="button" role="menuitem" aria-haspopup="true" data-menu="downloads" data-t="m_downloads"></button>
+      <button type="button" role="menuitem" aria-haspopup="true" data-menu="view" data-t="m_view"></button>
+      <button type="button" role="menuitem" aria-haspopup="true" data-menu="help" data-t="m_help"></button>
+      <span class="spacer"></span>
+      <button type="button" id="btn-lang" class="ghost small" data-t="lang_switch"></button>
+    </nav>
+
+    <div class="menu" id="menu-tasks" role="menu" hidden>
+      <button type="button" role="menuitem" data-cmd="add"><span data-t="c_add"></span><kbd>Ctrl+N</kbd></button>
+      <button type="button" role="menuitem" data-cmd="add_video"><span data-t="c_add_video"></span><kbd>Ctrl+Shift+N</kbd></button>
+      <hr>
+      <button type="button" role="menuitem" data-cmd="settings"><span data-t="c_settings"></span><kbd>Ctrl+,</kbd></button>
     </div>
-  </header>
+    <div class="menu" id="menu-downloads" role="menu" hidden>
+      <button type="button" role="menuitem" data-cmd="resume"><span data-t="c_resume"></span></button>
+      <button type="button" role="menuitem" data-cmd="pause"><span data-t="c_pause"></span></button>
+      <button type="button" role="menuitem" data-cmd="toggle"><span data-t="c_toggle"></span><kbd>Space</kbd></button>
+      <button type="button" role="menuitem" data-cmd="resume_all"><span data-t="c_resume_all"></span></button>
+      <button type="button" role="menuitem" data-cmd="pause_all"><span data-t="c_pause_all"></span></button>
+      <hr>
+      <button type="button" role="menuitem" data-cmd="remove"><span data-t="c_remove"></span><kbd>Del</kbd></button>
+      <button type="button" role="menuitem" data-cmd="clear_finished"><span data-t="c_clear_finished"></span></button>
+      <hr>
+      <button type="button" role="menuitem" data-cmd="select_all"><span data-t="c_select_all"></span><kbd>Ctrl+A</kbd></button>
+      <button type="button" role="menuitem" data-cmd="properties"><span data-t="c_properties"></span><kbd>Enter</kbd></button>
+      <button type="button" role="menuitem" data-cmd="scheduler"><span data-t="c_scheduler"></span></button>
+    </div>
+    <div class="menu" id="menu-view" role="menu" hidden>
+      <button type="button" role="menuitem" data-cmd="toggle_sidebar"><span data-t="c_toggle_sidebar"></span></button>
+      <button type="button" role="menuitem" data-cmd="view_jobs"><span data-t="c_view_jobs"></span></button>
+      <hr>
+      <button type="button" role="menuitemradio" data-cmd="theme_system"><span data-t="c_theme_system"></span></button>
+      <button type="button" role="menuitemradio" data-cmd="theme_light"><span data-t="c_theme_light"></span></button>
+      <button type="button" role="menuitemradio" data-cmd="theme_dark"><span data-t="c_theme_dark"></span></button>
+      <hr>
+      <button type="button" role="menuitem" data-cmd="lang"><span data-t="lang_switch"></span></button>
+    </div>
+    <div class="menu" id="menu-help" role="menu" hidden>
+      <button type="button" role="menuitem" data-cmd="shortcuts"><span data-t="c_shortcuts"></span><kbd>F1</kbd></button>
+      <button type="button" role="menuitem" data-cmd="about"><span data-t="c_about"></span></button>
+    </div>
 
-  <nav class="filters" role="tablist">
-    <button role="tab" data-filter="all" class="on"><span data-t="f_all"></span> <b data-count="all">0</b></button>
-    <button role="tab" data-filter="active"><span data-t="f_active"></span> <b data-count="active">0</b></button>
-    <button role="tab" data-filter="done"><span data-t="f_done"></span> <b data-count="done">0</b></button>
-    <button role="tab" data-filter="failed"><span data-t="f_failed"></span> <b data-count="failed">0</b></button>
-  </nav>
+    <div class="toolbar" role="toolbar" id="toolbar">
+      <button type="button" id="btn-add" class="tool primary" data-cmd="add"><svg class="ic"><use href="#i-add"/></svg><span data-t="t_add"></span></button>
+      <button type="button" class="tool" data-cmd="add_video"><svg class="ic"><use href="#i-video"/></svg><span data-t="t_add_video"></span></button>
+      <span class="sep"></span>
+      <button type="button" class="tool" data-cmd="resume"><svg class="ic"><use href="#i-play"/></svg><span data-t="t_resume"></span></button>
+      <button type="button" class="tool" data-cmd="pause"><svg class="ic"><use href="#i-pause"/></svg><span data-t="t_pause"></span></button>
+      <button type="button" class="tool" data-cmd="pause_all"><svg class="ic"><use href="#i-stopall"/></svg><span data-t="t_pause_all"></span></button>
+      <span class="sep"></span>
+      <button type="button" class="tool" data-cmd="remove"><svg class="ic"><use href="#i-remove"/></svg><span data-t="t_remove"></span></button>
+      <button type="button" id="btn-clear" class="tool" data-cmd="clear_finished"><svg class="ic"><use href="#i-clear"/></svg><span data-t="t_clear"></span></button>
+      <span class="sep"></span>
+      <button type="button" class="tool" data-cmd="scheduler"><svg class="ic"><use href="#i-clock"/></svg><span data-t="t_scheduler"></span></button>
+      <button type="button" class="tool" data-cmd="settings"><svg class="ic"><use href="#i-gear"/></svg><span data-t="t_settings"></span></button>
+    </div>
 
-  <main>
-    <ul id="list" class="list" aria-live="polite"></ul>
-    <p id="empty" class="empty" hidden></p>
-  </main>
+    <div class="body">
+      <aside class="sidebar" id="sidebar" aria-label="categories">
+        <div class="group" data-t="g_downloads"></div>
+        <ul class="tree" id="tree-status">
+          <li><button type="button" data-view="all" class="on"><svg class="ic"><use href="#i-list"/></svg><span data-t="v_all"></span><b data-count="all">0</b></button></li>
+          <li><button type="button" data-view="active"><svg class="ic"><use href="#i-down"/></svg><span data-t="v_active"></span><b data-count="active">0</b></button></li>
+          <li><button type="button" data-view="unfinished"><svg class="ic"><use href="#i-pause"/></svg><span data-t="v_unfinished"></span><b data-count="unfinished">0</b></button></li>
+          <li><button type="button" data-view="finished"><svg class="ic"><use href="#i-check"/></svg><span data-t="v_finished"></span><b data-count="finished">0</b></button></li>
+          <li><button type="button" data-view="failed"><svg class="ic"><use href="#i-alert"/></svg><span data-t="v_failed"></span><b data-count="failed">0</b></button></li>
+        </ul>
+        <div class="group" data-t="g_types"></div>
+        <ul class="tree" id="tree-types">
+          <li><button type="button" data-view="compressed"><svg class="ic"><use href="#i-box"/></svg><span data-t="v_compressed"></span><b data-count="compressed">0</b></button></li>
+          <li><button type="button" data-view="documents"><svg class="ic"><use href="#i-doc"/></svg><span data-t="v_documents"></span><b data-count="documents">0</b></button></li>
+          <li><button type="button" data-view="music"><svg class="ic"><use href="#i-music"/></svg><span data-t="v_music"></span><b data-count="music">0</b></button></li>
+          <li><button type="button" data-view="video"><svg class="ic"><use href="#i-video"/></svg><span data-t="v_video"></span><b data-count="video">0</b></button></li>
+          <li><button type="button" data-view="programs"><svg class="ic"><use href="#i-app"/></svg><span data-t="v_programs"></span><b data-count="programs">0</b></button></li>
+          <li><button type="button" data-view="pictures"><svg class="ic"><use href="#i-image"/></svg><span data-t="v_pictures"></span><b data-count="pictures">0</b></button></li>
+          <li><button type="button" data-view="other"><svg class="ic"><use href="#i-file"/></svg><span data-t="v_other"></span><b data-count="other">0</b></button></li>
+        </ul>
+        <div class="group" data-t="g_folders"></div>
+        <ul class="tree" id="tree-folders"></ul>
+        <div class="group" data-t="g_video"></div>
+        <ul class="tree">
+          <li><button type="button" data-view="jobs"><svg class="ic"><use href="#i-video"/></svg><span data-t="v_jobs"></span><b data-count="jobs">0</b></button></li>
+        </ul>
+      </aside>
+
+      <main class="main">
+        <section id="table-view" class="table-view">
+          <div class="thead" id="thead" role="row">
+            <button type="button" class="c-name" data-sort="name" data-t="col_name"></button>
+            <button type="button" class="c-size" data-sort="size" data-t="col_size"></button>
+            <button type="button" class="c-prog" data-sort="progress" data-t="col_progress"></button>
+            <button type="button" class="c-status" data-sort="status" data-t="col_status"></button>
+            <button type="button" class="c-speed" data-sort="speed" data-t="col_speed"></button>
+            <button type="button" class="c-eta" data-sort="eta" data-t="col_eta"></button>
+            <button type="button" class="c-url" data-sort="url" data-t="col_url"></button>
+          </div>
+          <div class="viewport" id="viewport" tabindex="0" role="grid" aria-multiselectable="true">
+            <div class="spacer" id="spacer"></div>
+          </div>
+          <p id="empty" class="empty" hidden></p>
+        </section>
+
+        <section id="jobs-view" class="jobs-view" hidden>
+          <div class="jobs-head">
+            <h2 data-t="v_jobs"></h2>
+            <button type="button" class="primary" data-cmd="add_video" data-t="c_add_video"></button>
+          </div>
+          <p id="jobs-empty" class="empty" hidden></p>
+          <ul id="jobs" class="jobs"></ul>
+        </section>
+      </main>
+    </div>
+
+    <footer class="statusbar" id="statusbar">
+      <span id="sb-active"></span>
+      <span id="sb-speed"></span>
+      <span id="sb-count"></span>
+      <span id="sb-selected"></span>
+    </footer>
+  </div>
+
+  <div class="menu ctx" id="ctx" role="menu" hidden>
+    <button type="button" role="menuitem" data-cmd="open_file"><span data-t="c_open_file"></span></button>
+    <button type="button" role="menuitem" data-cmd="reveal"><span data-t="c_reveal"></span></button>
+    <hr>
+    <button type="button" role="menuitem" data-cmd="resume"><span data-t="c_resume"></span></button>
+    <button type="button" role="menuitem" data-cmd="pause"><span data-t="c_pause"></span></button>
+    <button type="button" role="menuitem" data-cmd="redownload"><span data-t="c_redownload"></span></button>
+    <hr>
+    <button type="button" role="menuitem" data-cmd="copy_link"><span data-t="c_copy_link"></span></button>
+    <button type="button" role="menuitem" data-cmd="remove"><span data-t="c_remove"></span><kbd>Del</kbd></button>
+    <hr>
+    <button type="button" role="menuitem" data-cmd="properties"><span data-t="c_properties"></span><kbd>Enter</kbd></button>
+  </div>
 
   <div id="toast" class="toast" role="status" hidden></div>
 
@@ -51,6 +192,131 @@
         <button type="button" id="btn-cancel" class="ghost" data-t="cancel"></button>
         <button type="submit" id="btn-start" class="primary" data-t="start"></button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-props">
+    <form method="dialog" class="props">
+      <h2><bdi id="p-name" dir="auto"></bdi></h2>
+      <div class="pbar big"><i id="p-bar"></i></div>
+      <dl class="grid">
+        <dt data-t="col_status"></dt><dd id="p-status"></dd>
+        <dt data-t="p_done"></dt><dd id="p-done"></dd>
+        <dt data-t="col_speed"></dt><dd id="p-speed"></dd>
+        <dt data-t="col_eta"></dt><dd id="p-eta"></dd>
+        <dt data-t="p_attempts"></dt><dd id="p-attempts"></dd>
+        <dt data-t="col_url"></dt><dd><bdi id="p-url" dir="ltr" class="wrap"></bdi></dd>
+        <dt data-t="folder_label"></dt><dd><bdi id="p-folder" dir="ltr" class="wrap"></bdi></dd>
+      </dl>
+      <p id="p-error" class="error" hidden></p>
+      <p class="note" data-t="p_segments_note"></p>
+      <div class="buttons">
+        <button type="button" id="p-copy" class="ghost" data-t="c_copy_link"></button>
+        <button type="button" id="p-reveal" data-t="c_reveal"></button>
+        <button type="button" id="p-toggle"></button>
+        <button type="submit" id="p-close" class="primary" data-t="close"></button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-settings">
+    <form method="dialog" class="settings">
+      <h2 data-t="c_settings"></h2>
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="general" class="on" data-t="s_general"></button>
+        <button type="button" role="tab" data-tab="downloads" data-t="s_downloads"></button>
+        <button type="button" role="tab" data-tab="video" data-t="s_video"></button>
+      </div>
+      <div class="tab" data-pane="general">
+        <label for="set-lang" data-t="s_language"></label>
+        <select id="set-lang"><option value="ar">العربية</option><option value="en">English</option></select>
+        <label for="set-theme" data-t="s_theme"></label>
+        <select id="set-theme">
+          <option value="system" data-t="c_theme_system"></option>
+          <option value="light" data-t="c_theme_light"></option>
+          <option value="dark" data-t="c_theme_dark"></option>
+        </select>
+      </div>
+      <div class="tab" data-pane="downloads" hidden>
+        <label data-t="s_default_folder"></label>
+        <div class="row folder">
+          <bdi id="set-folder" class="path" dir="ltr"></bdi>
+          <button type="button" id="set-folder-pick" data-t="choose"></button>
+          <button type="button" id="set-folder-reset" class="ghost" data-t="reset_folder"></button>
+        </div>
+        <p class="note" data-t="s_default_folder_note"></p>
+        <fieldset class="soon" disabled>
+          <legend data-t="soon_title"></legend>
+          <label for="set-conns" data-t="s_connections"></label>
+          <input id="set-conns" type="number" min="1" max="32" value="8">
+          <label for="set-limit" data-t="s_speed_limit"></label>
+          <input id="set-limit" type="number" min="0" value="0">
+          <label class="check"><input id="set-notify" type="checkbox"><span data-t="s_notify"></span></label>
+        </fieldset>
+      </div>
+      <div class="tab" data-pane="video" hidden>
+        <label for="set-quality" data-t="s_default_quality"></label>
+        <select id="set-quality"></select>
+        <label data-t="s_tools"></label>
+        <p id="set-tools" class="note"></p>
+        <button type="button" id="set-tools-install" hidden data-t="v_install"></button>
+      </div>
+      <div class="buttons">
+        <button type="submit" class="primary" data-t="close"></button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-video">
+    <form id="form-video" method="dialog" class="video">
+      <h2 data-t="vd_title"></h2>
+      <label for="in-vurl" data-t="vd_url"></label>
+      <div class="row">
+        <input id="in-vurl" type="text" dir="ltr" spellcheck="false" autocomplete="off">
+        <button type="button" id="btn-probe" data-t="vd_probe"></button>
+      </div>
+      <p id="v-status" class="note" hidden></p>
+      <div id="v-tools" class="tools-box" hidden>
+        <p data-t="vd_tools_missing"></p>
+        <label class="check"><input id="v-consent" type="checkbox"><span data-t="vd_tools_consent"></span></label>
+        <button type="button" id="v-install" data-t="v_install" disabled></button>
+      </div>
+      <div id="v-result" hidden>
+        <h3><bdi id="v-name" dir="auto"></bdi></h3>
+        <p id="v-meta" class="note"></p>
+        <label for="v-quality" data-t="vd_quality"></label>
+        <select id="v-quality"></select>
+        <p id="v-got-note" class="note" data-t="vd_quality_note"></p>
+        <div id="v-playlist" hidden>
+          <div class="row between">
+            <strong id="v-count"></strong>
+            <span>
+              <button type="button" id="v-all" class="ghost small" data-t="vd_all"></button>
+              <button type="button" id="v-none" class="ghost small" data-t="vd_none"></button>
+            </span>
+          </div>
+          <ul id="v-items" class="v-items"></ul>
+          <p id="v-folder-note" class="note"></p>
+        </div>
+        <label data-t="folder_label"></label>
+        <div class="row folder">
+          <bdi id="v-folder" class="path" dir="ltr"></bdi>
+          <button type="button" id="v-pick" data-t="choose"></button>
+        </div>
+      </div>
+      <p id="v-error" class="error" hidden></p>
+      <div class="buttons">
+        <button type="button" id="v-cancel" class="ghost" data-t="cancel"></button>
+        <button type="submit" id="v-start" class="primary" data-t="start" disabled></button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-info">
+    <form method="dialog">
+      <h2 id="info-title"></h2>
+      <div id="info-body" class="info"></div>
+      <div class="buttons"><button type="submit" class="primary" data-t="close"></button></div>
     </form>
   </dialog>
 </body>
