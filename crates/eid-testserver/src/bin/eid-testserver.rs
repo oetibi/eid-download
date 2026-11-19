@@ -20,6 +20,15 @@ async fn main() -> std::io::Result<()> {
             behavior,
         );
     }
+    // v0.2 window test: a link that answers with a web page (like a YouTube "watch" page)
+    server.add(
+        "/watch",
+        Content::Bytes(b"<!doctype html><title>page</title><p>a web page, not a file".repeat(100)),
+        Behavior {
+            content_type: Some("text/html; charset=utf-8".into()),
+            ..Behavior::well_behaved()
+        },
+    );
     println!("{}", server.base_url());
     tokio::signal::ctrl_c().await
 }

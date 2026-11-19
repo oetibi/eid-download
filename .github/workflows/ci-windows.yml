@@ -150,6 +150,23 @@ jobs:
           $f = Get-Content target\ext\firefox\manifest.json -Raw | ConvertFrom-Json
           if ($f.browser_specific_settings.gecko.id -ne 'eid-download@eid-download') { throw "Firefox id" }
           Get-ChildItem dist\ext
+      # v0.2 (owner's real-Windows report): the REAL window driven through its buttons over
+      # WebView2's DevTools port: the app alone in Explorer's "inside the ZIP" folder (startup
+      # bar, a real file with SHA-256, YouTube -> Video window with a working probe, web page
+      # refused, toolbar Pause/Resume), then an extracted copy (Connect the browsers -> HKCU
+      # keys -> its eid-native-host answers like a browser's, Disconnect). Local server only.
+      - name: Window end-to-end (real WebView2 window, clicks, files, registry, native host)
+        shell: pwsh
+        run: |
+          node scripts/windows/window_e2e.mjs --bin target\release --out window-e2e
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: window-e2e
+          retention-days: 14
+          path: window-e2e/*
+          if-no-files-found: warn
       - name: Package EidDownload-windows-x64.zip
         shell: pwsh
         run: |

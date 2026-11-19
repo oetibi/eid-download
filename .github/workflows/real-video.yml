@@ -48,3 +48,30 @@ jobs:
           name: real-video-${{ matrix.source }}-log
           retention-days: 30
           path: real-video-${{ matrix.source }}.log
+
+  # v0.2 (owner's real-Windows report): the same real tools and a real PeerTube video, but from
+  # the REAL window, started the way the owner started it (alone, from inside the ZIP folder):
+  # agreement -> tools installed from the window -> probe -> 360p -> the file is saved.
+  window:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p eid-gui -p eid-cli -p eid-native-host -p eid-testserver
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Window end-to-end with real tools and a real video (--online)
+        shell: pwsh
+        run: |
+          node scripts/windows/window_e2e.mjs --bin target\release --out window-e2e --online 2>&1 | Tee-Object -FilePath window-e2e-online.log
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: window-e2e-online
+          retention-days: 30
+          path: |
+            window-e2e/*
+            window-e2e-online.log
