@@ -82,6 +82,12 @@ impl VideoSetup {
         if !accept {
             return Err("the agreement is required".into());
         }
+        // the worker process and its driver task need the async runtime; called from outside
+        // it (a plain Tauri command runs on the window thread) this used to panic and close
+        // the app (real-window test on Windows): refuse instead
+        let rt = tokio::runtime::Handle::try_current()
+            .map_err(|_| "internal error: the tool setup was started outside the app's runtime")?;
+        let _in_rt = rt.enter();
         let mut g = lock(&self.st);
         if g.running {
             return Ok(());
@@ -108,7 +114,7 @@ impl VideoSetup {
         let me = self.clone();
         // never fired: setup is stopped by closing its input (app exit)
         let (_keep, krx) = tokio::sync::oneshot::channel::<()>();
-        tokio::spawn(async move {
+        rt.spawn(async move {
             let _keep = _keep;
             let (code, err) = me.jobs.drive(None, child, krx).await;
             let mut g = lock(&me.st);

@@ -31,8 +31,13 @@ pub fn tools_consent_text(st: State<'_, AppState>, lang: String) -> Result<Strin
     st.setup.consent_text(&lang)
 }
 
+/// `async` on purpose: a plain Tauri command runs on the window's main thread, outside the
+/// async runtime, and `install` starts the worker process and a task that need it. As a plain
+/// command, "Install" closed the app (panic: no runtime) once the worker could start at all;
+/// found by the real-window test on Windows (real-video.yml, run 44631503045). Before that,
+/// the missing eid.exe (os error 2) failed earlier and hid it.
 #[tauri::command]
-pub fn tools_install(st: State<'_, AppState>, accept: bool) -> Result<(), String> {
+pub async fn tools_install(st: State<'_, AppState>, accept: bool) -> Result<(), String> {
     st.setup.install(accept)
 }
 
