@@ -12,7 +12,7 @@ Usage (from the repository root):
   python3 scripts/bench/engine_bench.py --suite throttled --size 67108864 --throttle 4194304
   python3 scripts/bench/engine_bench.py --suite single --size 268435456
 
-Options: --work DIR (where files are written; default ./target/bench-work, i.e. a real disk,
+Options: --eid PATH (binary to measure, default target/release/eid), --work DIR (where files are written; default ./target/bench-work, i.e. a real disk,
 not tmpfs), --conns 1,2,4 (override the connection list), --extra "--ramp-ms 50" (passed to
 `eid get` verbatim, for experiments), --json (one JSON object per line instead of a table).
 Numbers depend on the machine; compare runs on the same machine, never quote as constants.
@@ -69,11 +69,11 @@ def start_server(size, throttle):
     return p, url, sha
 
 
-def run_once(url, work, conns, extra):
+def run_once(eid, url, work, conns, extra):
     out = os.path.join(work, "run")
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
-    argv = [EID, "get", url, "-d", out, "-c", str(conns), "-q"] + extra
+    argv = [eid, "get", url, "-d", out, "-c", str(conns), "-q"] + extra
     t0 = time.monotonic()
     p = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     _, status, ru = os.wait4(p.pid, 0)
@@ -100,8 +100,9 @@ def main():
     ap.add_argument("--extra", default="")
     ap.add_argument("--work", default=os.path.join(ROOT, "target", "bench-work"))
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--eid", default=EID, help="eid binary to measure (e.g. a baseline build)")
     a = ap.parse_args()
-    for b in (EID, SERVER):
+    for b in (a.eid, SERVER):
         if not os.path.exists(b):
             sys.exit(f"missing {b}: cargo build --release -p eid-cli -p eid-testserver")
     path_part, conns_list = SUITES[a.suite]
@@ -114,13 +115,13 @@ def main():
     try:
         if not a.json:
             print(f"# suite={a.suite} size={a.size} throttle/conn={a.throttle if a.suite == 'throttled' else '-'} "
-                  f"reps={a.reps} extra={a.extra!r} nproc={os.cpu_count()}")
+                  f"reps={a.reps} extra={a.extra!r} nproc={os.cpu_count()} eid={a.eid}")
             print("| conns | wall s (median) | min..max | MiB/s (median) | peak RSS MiB (max) | CPU s (median) | CPU s/GiB |")
             print("|---:|---:|---:|---:|---:|---:|---:|")
         for c in conns_list:
             walls, cpus, rss = [], [], []
             for _ in range(a.reps):
-                path, wall, ru = run_once(base + path_part, a.work, c, extra)
+                path, wall, ru = run_once(a.eid, base + path_part, a.work, c, extra)
                 got = sha256_file(path)
                 if got != want:
                     sys.exit(f"SHA-256 MISMATCH conns={c}: {got} != {want}")
