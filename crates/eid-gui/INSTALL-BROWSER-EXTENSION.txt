@@ -1,0 +1,77 @@
+Eid Download - تثبيت إضافة المتصفح / Installing the browser extension
+=====================================================================
+
+الإضافة تضيف زر «تحميل» فوق الفيديو في الصفحات، وترسل الروابط إلى Eid Download.
+تحتاج أمرين: (1) ربط البرنامج بالمتصفح، (2) تثبيت الإضافة في المتصفح.
+
+1) ربط البرنامج بالمتصفح (مرة واحدة)
+------------------------------------
+- النسخة المثبَّتة (setup.exe): المثبّت يربطها تلقائياً. لا شيء تفعله.
+- النسخة المحمولة (ZIP):
+  أ. انقر بالزر الأيمن على ملف ZIP ← «استخراج الكل» (Extract All). لا تشغّل البرنامج من داخل
+     ملف ZIP دون استخراج.
+  ب. شغّل EidDownload.exe من المجلد المستخرج.
+  ج. الإعدادات ← «سطح المكتب» ← «إضافة المتصفح» ← «ربط المتصفحات بهذه النسخة».
+     يجب أن يظهر: Chrome / Edge / Firefox: مربوط بهذه النسخة.
+  د. إن نقلت المجلد لاحقاً، اضغط الزر مرة أخرى.
+
+2) تثبيت الإضافة
+----------------
+المجلد browser-extension بجانب البرنامج فيه:
+  chrome-edge   لـ Google Chrome وMicrosoft Edge
+  firefox       لـ Mozilla Firefox
+
+Chrome أو Edge:
+  1. افتح chrome://extensions (أو edge://extensions في Edge).
+  2. فعّل «وضع المطوّر» (Developer mode).
+  3. «تحميل إضافة غير مضغوطة» (Load unpacked) ← اختر المجلد browser-extension\chrome-edge.
+  4. تأكد أن رقم الإضافة (ID) هو: ambokeecedpgicighhcpdfjphdnphgaa
+     (البرنامج يقبل هذا الرقم فقط).
+  5. لا تحذف المجلد ولا تنقله بعد ذلك: المتصفح يقرأ الإضافة منه.
+  6. أعد تشغيل المتصفح.
+
+Firefox:
+  Firefox العادي لا يقبل تثبيتاً دائماً إلا لإضافة موقّعة من Mozilla، والإضافة لم تُوقَّع بعد
+  (التوقيع يحتاج حساب المالك على addons.mozilla.org). حتى ذلك الحين التثبيت مؤقت:
+  1. افتح about:debugging#/runtime/this-firefox
+  2. «تحميل إضافة مؤقتة» (Load Temporary Add-on...) ← اختر الملف
+     browser-extension\firefox\manifest.json
+  3. تُزال الإضافة عند إغلاق Firefox، فكرر الخطوتين في كل مرة.
+
+3) التحقق
+---------
+- افتح خيارات الإضافة ← «اختبار الاتصال». يجب أن تظهر: «Eid Download استجاب».
+- افتح صفحة فيديو (مثلاً يوتيوب): يظهر زر Eid فوق الفيديو.
+- إن ظهر «برنامج Eid Download غير مثبّت، أو أن اتصاله بالمتصفح غير مسجَّل»: افتح Eid Download ← الإعدادات ← «إضافة المتصفح» وتأكد أن
+  المتصفح «مربوط بهذه النسخة»، ثم أعد تشغيل المتصفح.
+
+ما لم يُختبر يدوياً بعد: التثبيت الفعلي للإضافة في Chrome وEdge وFirefox على Windows حقيقي
+(الاختبارات الآلية تشغّل الإضافة في Chrome على Linux وتتحقق من التسجيل في Windows).
+
+
+Installing the browser extension (English)
+==========================================
+The extension adds a "Download" button over videos and sends links to Eid Download.
+Two steps: (1) connect the app to the browsers, (2) install the extension in the browser.
+
+1) Connect the app (once)
+- Installed copy (setup.exe): the installer does it. Nothing to do.
+- Portable copy (ZIP): right-click the ZIP > Extract All (never run the app from inside the
+  ZIP); run EidDownload.exe from the extracted folder; Settings > Desktop > Browser extension >
+  "Connect the browsers to this copy". Each browser must say "connected to this copy".
+  Press it again if you move the folder.
+
+2) Install the extension (folder browser-extension next to the app)
+Chrome / Edge: open chrome://extensions (edge://extensions), turn on Developer mode,
+  "Load unpacked", pick browser-extension\chrome-edge. The ID must be
+  ambokeecedpgicighhcpdfjphdnphgaa. Do not move or delete the folder afterwards. Restart the browser.
+Firefox: release Firefox installs permanently only extensions signed by Mozilla; this one is
+  not signed yet (signing needs the owner's addons.mozilla.org account). Until then it is
+  temporary: about:debugging#/runtime/this-firefox > "Load Temporary Add-on..." > pick
+  browser-extension\firefox\manifest.json. It is removed when Firefox closes.
+
+3) Check: the extension's options > "Test connection" must say that Eid Download answered; a
+video page shows the Eid button over the video.
+
+Not tested by hand yet: installing the extension in Chrome, Edge and Firefox on a real Windows
+PC (the automated tests run the extension in Chrome on Linux and check the registration on Windows).

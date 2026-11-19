@@ -70,7 +70,7 @@ try {
     Check (Test-Path $ip) "$f installed in $inst"
     Check ((Sha $ip) -eq (Sha (Join-Path $Bin $f))) "$f identical (SHA-256) to $Bin\$f"
   }
-  foreach ($f in "uninstall.exe", "LICENSE.txt", "THIRD-PARTY-LICENSES.html", "README.txt") {
+  foreach ($f in "uninstall.exe", "LICENSE.txt", "THIRD-PARTY-LICENSES.html", "README.txt", "INSTALL-BROWSER-EXTENSION.txt", "browser-extension\chrome-edge\manifest.json", "browser-extension\chrome-edge\background.js", "browser-extension\firefox\manifest.json", "browser-extension\firefox\background.js") {
     Check (Test-Path (Join-Path $inst $f)) "$f installed"
   }
   Check (Test-Path $startMenu) "start-menu shortcut $startMenu"

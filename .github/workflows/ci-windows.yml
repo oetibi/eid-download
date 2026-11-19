@@ -131,12 +131,38 @@ jobs:
         with: { tool: cargo-about@0.9.3 }   # pinned; installed from its GitHub release, checksum verified
       - name: Third-party license notices (fails on any license not in about.toml)
         run: cargo about generate --locked --fail -o THIRD-PARTY-LICENSES.html about.hbs
+      # v0.2 (owner's Windows test: the extension could not be found or installed): the unpacked
+      # extension (Chrome/Edge with the pinned id, Firefox) ships in the ZIP and the installer,
+      # with INSTALL-BROWSER-EXTENSION.txt; the store/sideload packages go into the artifact
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Browser extension (unit tests, unpacked build, packages)
+        shell: pwsh
+        run: |
+          Push-Location extension; node --test; $rc = $LASTEXITCODE; Pop-Location
+          if ($rc -ne 0) { throw "extension tests failed" }
+          node scripts/ext/build.mjs --out target\ext
+          if ($LASTEXITCODE -ne 0) { throw "extension build failed" }
+          node scripts/ext/package.mjs --out dist\ext
+          if ($LASTEXITCODE -ne 0) { throw "extension packaging failed" }
+          $m = Get-Content target\ext\chrome\manifest.json -Raw | ConvertFrom-Json
+          if (-not $m.key) { throw "the unpacked Chrome/Edge build must keep the key (pinned id)" }
+          $f = Get-Content target\ext\firefox\manifest.json -Raw | ConvertFrom-Json
+          if ($f.browser_specific_settings.gecko.id -ne 'eid-download@eid-download') { throw "Firefox id" }
+          Get-ChildItem dist\ext
       - name: Package EidDownload-windows-x64.zip
         shell: pwsh
         run: |
           $d = 'dist\EidDownload-windows-x64'
           New-Item -ItemType Directory -Force $d | Out-Null
           Copy-Item target\release\EidDownload.exe, target\release\eid.exe, target\release\eid-native-host.exe $d
+          Copy-Item crates\eid-gui\INSTALL-BROWSER-EXTENSION.txt $d
+          New-Item -ItemType Directory -Force "$d\browser-extension" | Out-Null
+          Copy-Item -Recurse target\ext\chrome "$d\browser-extension\chrome-edge"
+          Copy-Item -Recurse target\ext\firefox "$d\browser-extension\firefox"
+          foreach ($p in 'EidDownload.exe', 'eid.exe', 'eid-native-host.exe', 'INSTALL-BROWSER-EXTENSION.txt', 'browser-extension\chrome-edge\manifest.json', 'browser-extension\firefox\manifest.json') {
+            if (-not (Test-Path (Join-Path $d $p))) { throw "the ZIP would miss $p" }
+          }
           Copy-Item crates\eid-gui\README-WINDOWS.txt "$d\README.txt"
           Copy-Item LICENSE "$d\LICENSE.txt"
           Copy-Item THIRD-PARTY-LICENSES.html $d
@@ -203,6 +229,8 @@ jobs:
           path: |
             dist/EidDownload-windows-x64.zip
             dist/EidDownload-*-windows-x64-setup.exe
+            dist/ext/*.zip
+            crates/eid-gui/INSTALL-BROWSER-EXTENSION.txt
             target/release/EidDownload.exe
             target/release/eid.exe
             target/release/eid-native-host.exe

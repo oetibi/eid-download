@@ -18,7 +18,10 @@ Eid Download - عيد للتحميل (Windows 10/11, 64-bit)
   إن لم يفتح البرنامج: ثبّت «WebView2 Runtime» من موقع Microsoft.
 - إزالة تحميل من القائمة لا تحذف الملف من القرص.
 - eid.exe هو سطر الأوامر لنفس البرنامج (eid add / list / pause / resume / stop يتحكم بالنافذة المفتوحة).
-- eid-native-host.exe لإضافة المتصفح (لم تُنشر الإضافة بعد).
+- eid-native-host.exe يصل إضافة المتصفح بالبرنامج. الإضافة نفسها في المجلد browser-extension،
+  وخطوات تثبيتها في INSTALL-BROWSER-EXTENSION.txt. النسخة المحمولة: الإعدادات ← سطح المكتب ←
+  «ربط المتصفحات بهذه النسخة» (مرة واحدة).
+- لا تشغّل البرنامج من داخل ملف ZIP دون استخراجه («استخراج الكل» أولاً).
 - الرخصة: MIT (LICENSE.txt). رخص المكتبات المضمَّنة: THIRD-PARTY-LICENSES.html.
 
 Running
@@ -29,4 +32,7 @@ Running
    Ctrl+V in the window with a copied link also opens it.
 4. Per download: Pause / Resume / Retry / Remove from list / Show in folder.
 Closing the window stops the downloads; they resume on the next start. Needs Microsoft Edge WebView2.
+Browser extension: folder browser-extension, steps in INSTALL-BROWSER-EXTENSION.txt; the portable
+copy needs Settings > Desktop > "Connect the browsers to this copy" once.
+Never run the app from inside the ZIP without extracting it (Extract All first).
 License: MIT (LICENSE.txt). Third-party licenses: THIRD-PARTY-LICENSES.html.

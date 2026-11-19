@@ -327,6 +327,28 @@ pub fn add(
 }
 
 /// v0.2: the category names the add dialog offers for its sub-folder choice.
+/// v0.2: Settings > "Browser extension": where Chrome, Edge and Firefox point today.
+#[tauri::command]
+pub fn browser_status() -> Result<Vec<crate::browser::LinkState>, String> {
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    Ok(crate::browser::status(&me, crate::browser::HOST_NAME))
+}
+
+/// v0.2: connect the three browsers to THIS copy (per user, no admin).
+#[tauri::command]
+pub fn browser_connect() -> Result<Vec<crate::browser::LinkState>, String> {
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    let data = eid_platform::dirs::local_data_dir().ok_or("no per-user data folder")?;
+    crate::browser::connect(&me, crate::browser::HOST_NAME, &data)
+}
+
+/// v0.2: remove the registrations that point at THIS copy (never another copy's).
+#[tauri::command]
+pub fn browser_disconnect() -> Result<Vec<crate::browser::LinkState>, String> {
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    crate::browser::disconnect(&me, crate::browser::HOST_NAME)
+}
+
 /// v0.2 startup self-check: problems with where the app runs (`core::install_problems`), shown
 /// once as a bar in the window.
 #[tauri::command]

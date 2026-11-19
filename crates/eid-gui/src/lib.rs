@@ -2,6 +2,7 @@
 //! `eid serve`. [`core`] is the logic (unit tested everywhere); [`app`] wires it to Tauri.
 
 pub mod app;
+pub mod browser;
 pub mod core;
 pub mod desktop;
 pub mod listdiff;

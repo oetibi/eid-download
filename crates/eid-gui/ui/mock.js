@@ -122,6 +122,9 @@ export function mockApi(params = new URLSearchParams()) {
   const warnings = [];
   window.__eidMockWarn = (id, text) => warnings.push([id, text]);
   window.__eidMockLimit = (id) => limits.get(id);
+  let browsers = ["chrome", "edge", "firefox"].map((browser) => params.get("browser") === "other"
+    ? { browser, state: "other", host: "C:\\Program Files\\Eid Download\\eid-native-host.exe" }
+    : { browser, state: "none", host: null });
   const handlers = {
     list: ({ since }) => {
       tick();
@@ -135,6 +138,18 @@ export function mockApi(params = new URLSearchParams()) {
       return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR, power: pw, warnings: ws };
     },
     // `?check=from_zip,no_native_host`: what the startup self-check reports
+    // `?browser=other`: the browsers point at another copy (e.g. the installed one)
+    browser_status: () => browsers.map((s) => ({ ...s })),
+    browser_connect: () => {
+      const bad = (params.get("check") ?? "").split(",").filter(Boolean)[0];
+      if (bad) throw bad;
+      browsers = browsers.map((s) => ({ ...s, state: "this", host: "C:\\Apps\\Eid\\eid-native-host.exe" }));
+      return browsers.map((s) => ({ ...s }));
+    },
+    browser_disconnect: () => {
+      browsers = browsers.map((s) => (s.state === "this" ? { ...s, state: "none", host: null } : s));
+      return browsers.map((s) => ({ ...s }));
+    },
     self_check: () => (params.get("check") ?? "").split(",").filter(Boolean),
     categories: () => ["Compressed", "Documents", "Music", "Video", "Pictures", "Programs"],
     import_list: () => { const r = window.__eidMockImport ?? null; if (r) for (const u of r.urls) touch(mk({ name: u.split("/").pop(), url: u })); return r && { added: r.urls.length, refused: r.refused ?? 0, duplicates: 0, credentials_dropped: 0 }; },

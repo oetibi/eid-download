@@ -1577,7 +1577,39 @@ function sendTrayTexts() {
 }
 api.on?.("tray", (action) => { if (action === "pause_all" || action === "resume_all") run(action); });
 
+// v0.2: browser extension connection (Settings > Desktop)
+const BR_NAME = { chrome: "Chrome", edge: "Edge", firefox: "Firefox" };
+function showBrowsers(list) {
+  const ul = $("#browser-list");
+  ul.replaceChildren(...(Array.isArray(list) ? list : []).filter((s) => Object.hasOwn(BR_NAME, s?.browser)).map((s) => {
+    const li = document.createElement("li");
+    const st = ["this", "other", "none", "error"].includes(s.state) ? s.state : "error";
+    li.className = st;
+    li.dataset.browser = s.browser;
+    li.dataset.state = st;
+    li.textContent = t(`br_${st}`, BR_NAME[s.browser], String(s.host ?? ""));
+    return li;
+  }));
+}
+async function browserCall(cmd) {
+  const err = $("#browser-error");
+  err.hidden = true;
+  try {
+    const r = await api.call(cmd);
+    showBrowsers(r);
+    return true;
+  } catch (e) {
+    const k = String(e);
+    err.textContent = k === "from_zip" ? t("chk_from_zip") : k === "no_native_host" ? t("chk_no_native_host") : errMessage(e);
+    err.hidden = false;
+    return false;
+  }
+}
+$("#browser-connect").addEventListener("click", async () => { if (await browserCall("browser_connect")) toast(t("br_done")); });
+$("#browser-disconnect").addEventListener("click", () => browserCall("browser_disconnect"));
+
 async function fillDesktopFields() {
+  browserCall("browser_status");
   const s = await loadEngine();
   if (!s) return;
   $("#set-tray").checked = s.tray !== false;

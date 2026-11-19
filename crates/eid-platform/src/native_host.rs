@@ -234,8 +234,8 @@ mod imp {
         }
     }
 
-    /// Read the default value of the registered key back (tests only).
-    #[cfg(test)]
+    /// Read the default value of the registered key back (the manifest path), `None` if the
+    /// key or its value does not exist.
     pub fn read_back(browser: Browser, name: &str) -> io::Result<Option<String>> {
         use windows_sys::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_SZ};
         let key = key_path(browser, name);
@@ -329,6 +329,53 @@ pub fn unregister(manifest: &Manifest, browsers: &[Browser]) -> io::Result<()> {
         }
         Ok(())
     }
+}
+
+/// v0.2: the native host program `browser` would start for host `name` today, if any: the
+/// registered manifest is found (Windows: the HKCU key's manifest path; elsewhere: the file in
+/// the browser's per-user directory), read (at most 64 KiB) and its `path` resolved (a relative
+/// path is relative to the manifest's folder, as the browsers do on Windows). `Ok(None)` when
+/// nothing is registered or the manifest file is gone.
+pub fn registered_host(browser: Browser, name: &str) -> io::Result<Option<PathBuf>> {
+    if !valid_host_name(name) {
+        return Err(bad("invalid native host name"));
+    }
+    #[cfg(windows)]
+    let manifest = imp::read_back(browser, name)?.map(PathBuf::from);
+    #[cfg(not(windows))]
+    let manifest = {
+        let home = std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| bad("no HOME directory"))?;
+        Some(unix_location(browser, &home, name))
+    };
+    let Some(manifest) = manifest else {
+        return Ok(None);
+    };
+    host_of_manifest(&manifest)
+}
+
+fn host_of_manifest(manifest: &Path) -> io::Result<Option<PathBuf>> {
+    use std::io::Read;
+    let f = match std::fs::File::open(manifest) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut text = String::new();
+    f.take(64 * 1024).read_to_string(&mut text)?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| bad("the registered manifest is not JSON"))?;
+    let Some(p) = v["path"].as_str().filter(|p| !p.is_empty()) else {
+        return Err(bad("the registered manifest has no path"));
+    };
+    let p = PathBuf::from(p);
+    Ok(Some(if p.is_absolute() {
+        p
+    } else {
+        manifest.parent().map_or(p.clone(), |d| d.join(&p))
+    }))
 }
 
 fn register_with(
@@ -519,9 +566,20 @@ mod tests {
             let text = std::fs::read_to_string(&x.manifest).unwrap();
             serde_json::from_str::<serde_json::Value>(&text).unwrap();
         }
+        // the registered program is found back
+        for b in all {
+            assert_eq!(
+                registered_host(b, &m.name).unwrap(),
+                Some(m.exe.clone()),
+                "{b:?}"
+            );
+        }
         // idempotent
         register(&m, &all, &dir).unwrap();
         unregister(&m, &all).unwrap();
+        for b in all {
+            assert_eq!(registered_host(b, &m.name).unwrap(), None, "{b:?}");
+        }
         for b in all {
             assert_eq!(imp::read_back(b, &m.name).unwrap(), None);
         }
@@ -547,5 +605,31 @@ mod tests {
         assert!(home
             .join(".mozilla/native-messaging-hosts/com.eid.download.json")
             .is_file());
+    }
+
+    /// The installer writes `"path": "eid-native-host.exe"` (relative to the manifest's
+    /// folder); the app writes an absolute path. Both resolve; junk is an error, absence `None`.
+    #[test]
+    fn the_host_of_a_registered_manifest_is_resolved() {
+        let d = tempfile::tempdir().unwrap();
+        let m = d.path().join("m.json");
+        assert_eq!(host_of_manifest(&m).unwrap(), None);
+        std::fs::write(
+            &m,
+            r#"{"name":"com.eid.download","path":"eid-native-host.exe"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            host_of_manifest(&m).unwrap(),
+            Some(d.path().join("eid-native-host.exe"))
+        );
+        let abs = d.path().join("x").join("eid-native-host.exe");
+        std::fs::write(&m, serde_json::json!({"path": abs}).to_string()).unwrap();
+        assert_eq!(host_of_manifest(&m).unwrap(), Some(abs));
+        for junk in ["not json", "{}", r#"{"path":""}"#, r#"{"path":5}"#] {
+            std::fs::write(&m, junk).unwrap();
+            assert!(host_of_manifest(&m).is_err(), "{junk}");
+        }
+        assert!(registered_host(Browser::Chrome, "../evil").is_err());
     }
 }

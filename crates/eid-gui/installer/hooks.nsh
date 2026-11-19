@@ -38,3 +38,21 @@
   !insertmacro EID_NM_UNREGISTER "${EID_NM_EDGE}" "edge"
   !insertmacro EID_NM_UNREGISTER "${EID_NM_FIREFOX}" "firefox"
 !macroend
+
+; v0.2: the unpacked browser extension is installed as resources under browser-extension\.
+; The uninstaller deletes its files; remove the folders too, deepest first (RMDir removes only
+; EMPTY folders, so nothing the user added there is lost). Checked by verify_installer.ps1.
+!macro EID_EXT_RMDIRS T
+  RMDir "$INSTDIR\browser-extension\${T}\_locales\ar"
+  RMDir "$INSTDIR\browser-extension\${T}\_locales\en"
+  RMDir "$INSTDIR\browser-extension\${T}\_locales"
+  RMDir "$INSTDIR\browser-extension\${T}\icons"
+  RMDir "$INSTDIR\browser-extension\${T}\lib"
+  RMDir "$INSTDIR\browser-extension\${T}"
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  !insertmacro EID_EXT_RMDIRS "chrome-edge"
+  !insertmacro EID_EXT_RMDIRS "firefox"
+  RMDir "$INSTDIR\browser-extension"
+!macroend

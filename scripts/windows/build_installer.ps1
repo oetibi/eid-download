@@ -30,6 +30,12 @@ Copy-Item crates\eid-gui\README-WINDOWS.txt (Join-Path $stage "README.txt")
 Copy-Item LICENSE (Join-Path $stage "LICENSE.txt")
 if (-not (Test-Path THIRD-PARTY-LICENSES.html)) { throw "THIRD-PARTY-LICENSES.html is missing (cargo about generate)" }
 Copy-Item THIRD-PARTY-LICENSES.html $stage
+# v0.2: the unpacked browser extension and its instructions (built by scripts/ext/build.mjs
+# --out target\ext in ci-windows.yml)
+Copy-Item crates\eid-gui\INSTALL-BROWSER-EXTENSION.txt $stage
+foreach ($t in @{ chrome = "chrome-edge"; firefox = "firefox" }.GetEnumerator()) {
+  if (-not (Test-Path "target\ext\$($t.Key)\manifest.json")) { throw "target\ext\$($t.Key) is missing (node scripts/ext/build.mjs --out target\ext)" }
+}
 
 # Native Messaging manifests from the single ID file
 $nmArgs = @("scripts\windows\native_host_manifests.py", "extension\native-host-ids.json", $stage)
@@ -42,6 +48,14 @@ if ($LASTEXITCODE -ne 0) { throw "native_host_manifests.py failed" }
 $res = [ordered]@{}
 Get-ChildItem -File $stage | Sort-Object Name | ForEach-Object {
   $res["../../target/installer-stage/$($_.Name)"] = $_.Name
+}
+# every file of the extension, one by one (exact install paths, removed again by the uninstaller)
+foreach ($t in [ordered]@{ chrome = "chrome-edge"; firefox = "firefox" }.GetEnumerator()) {
+  $src = (Resolve-Path "target\ext\$($t.Key)").Path
+  Get-ChildItem -File -Recurse $src | Sort-Object FullName | ForEach-Object {
+    $rel = $_.FullName.Substring($src.Length + 1).Replace('\', '/')
+    $res["../../target/ext/$($t.Key)/$rel"] = "browser-extension/$($t.Value)/$rel"
+  }
 }
 $overlay = [ordered]@{ bundle = [ordered]@{ active = $true; resources = $res } }
 $overlayPath = Join-Path $root "target\tauri.installer.conf.json"
