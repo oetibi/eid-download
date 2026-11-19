@@ -49,6 +49,7 @@ const results = [];
 
 function log(...a) { console.log(...a); }
 async function check(name, fn) {
+  log(`...  ${name}`);
   try { await fn(); results.push({ name, ok: true }); log(`ok   ${name}`); }
   catch (e) { failed++; results.push({ name, ok: false, error: String(e?.stack ?? e) }); log(`FAIL ${name}\n     ${e?.stack ?? e}`); }
 }
@@ -56,7 +57,15 @@ const assert = (c, m) => { if (!c) throw new Error(m); };
 async function until(fn, ms, what) {
   const t0 = Date.now();
   let last;
-  while (Date.now() - t0 < ms) { try { last = await fn(); if (last) return last; } catch (e) { if (e?.fatal) throw e; last = e; } await sleep(250); }
+  while (Date.now() - t0 < ms) {
+    // one attempt may never answer (a DevTools call to a busy page): it is bounded too
+    const left = Math.max(1000, ms - (Date.now() - t0));
+    try {
+      last = await Promise.race([fn(), sleep(Math.min(left, 30000)).then(() => { throw new Error("no answer within 30 s"); })]);
+      if (last) return last;
+    } catch (e) { if (e?.fatal) throw e; last = e; }
+    await sleep(250);
+  }
   throw new Error(`timed out after ${ms} ms: ${what} (last: ${last?.message ?? JSON.stringify(last)})`);
 }
 const sha = (f) => createHash("sha256").update(fs.readFileSync(f)).digest("hex");
@@ -138,7 +147,12 @@ async function startApp(exe, extraArgs = ["--endpoint", ENDPOINT]) {
     if (d.id && pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); }
     if (d.method === "Runtime.exceptionThrown") errors.push(d.params.exceptionDetails.exception?.description ?? d.params.exceptionDetails.text);
   };
-  const send = (method, params = {}) => new Promise((res) => { const id = ++seq; pending.set(id, res); ws.send(JSON.stringify({ id, method, params })); });
+  const send = (method, params = {}) => new Promise((res, rej) => {
+    const id = ++seq;
+    const t = setTimeout(() => { pending.delete(id); rej(new Error(`DevTools ${method}: no answer within 60 s`)); }, 60000);
+    pending.set(id, (d) => { clearTimeout(t); res(d); });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
   await send("Runtime.enable");
   await send("Page.enable");
   const ev = async (expr) => {
@@ -221,10 +235,17 @@ try {
       await until(() => w.ev("document.querySelector('#dlg-consent').open && document.querySelector('#c-text').textContent.length > 20"), 30000, "agreement");
       await w.ev("(() => { const c = document.querySelector('#c-agree'); c.checked = true; c.dispatchEvent(new Event('change')); })()");
       await w.ev(click("#c-install"));
+      // the tool store: <LOCALAPPDATA>\EidDownload\tools\current.json names the installed set
       const tools = path.join(PROFILE, "AppData\\Local\\EidDownload\\tools");
-      await until(() => ["yt-dlp.exe", "ffmpeg.exe", "deno.exe"].every((f) => fs.existsSync(path.join(tools, f))), 900000, "tools installed");
-      log(`     tools: ${fs.readdirSync(tools).join(", ")}`);
-      await until(() => w.ev("document.querySelector('#v-tools').hidden"), 120000, "the window sees the tools");
+      const status = () => w.ev("document.querySelector('#dlg-video').innerText").catch((e) => String(e));
+      try {
+        await until(() => fs.existsSync(path.join(tools, "current.json")), 900000, "tools installed (current.json)");
+      } catch (e) { throw new Error(`${e.message}; the window says: ${await status()}`); }
+      const all = [];
+      const walk = (d) => { for (const x of fs.readdirSync(d, { withFileTypes: true })) { const q = path.join(d, x.name); if (x.isDirectory()) walk(q); else all.push(path.relative(tools, q)); } };
+      walk(tools);
+      log(`     tools: ${all.join(", ")}`);
+      for (const f of ["yt-dlp.exe", "ffmpeg.exe", "deno.exe"]) assert(all.some((x) => x.endsWith(f)), `${f} missing: ${all}`);
       await w.ev(typeIn("#in-vurl", PEERTUBE));
       await w.ev(click("#btn-probe"));
       await until(() => w.ev("!document.querySelector('#v-result').hidden"), 180000, "real probe result");

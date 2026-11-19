@@ -735,9 +735,11 @@ pub fn add_links_with(
     };
     let mut r = AddReport::default();
     for l in links {
-        // v0.2: a video page is never a file (the window opens the video dialog for it)
+        // v0.2: a video page is never a file (the window opens the video dialog for it).
+        // The link goes back WHOLE: the window needs `?v=...` (redaction drops the query; the
+        // real-window test caught it), and `video_page` never matches a link with credentials.
         if eid_engine::links::video_page(&l).is_some() {
-            r.refused.push((urlsafe::redact_text(&l), "video_page"));
+            r.refused.push((l.clone(), "video_page"));
             continue;
         }
         let sub = category_subdir(&l, name, category)?;
@@ -1140,6 +1142,9 @@ mod tests {
         assert_eq!(r.added.len(), 1, "{r:?}");
         assert_eq!(r.refused.len(), 3, "{r:?}");
         assert!(r.refused.iter().all(|(_, k)| *k == "video_page"), "{r:?}");
+        // the window opens the video dialog with exactly this link (query included)
+        assert_eq!(r.refused[0].0, "https://www.youtube.com/watch?v=abc");
+        assert_eq!(r.refused[2].0, "https://www.youtube.com/playlist?list=PL1");
         let urls: Vec<String> = s
             .snapshot()
             .queues
