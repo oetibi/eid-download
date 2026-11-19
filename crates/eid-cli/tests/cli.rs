@@ -17,6 +17,20 @@ fn content(seed: u64) -> Content {
         len: 12 << 20,
     }
 }
+/// For the kill/resume test: slow enough that, with 4 connections, the rest of the file takes
+/// seconds after the 30% checkpoint, so the kill always lands mid-download. ci-windows on PR #7
+/// (run 44578065231, attempt 1): at 2.5 MB/s per connection every byte of the 12 MiB file could
+/// be saved between the >=30% checkpoint and the kill (since v0.1 the engine opens its
+/// connections faster), and the resume then had nothing to request.
+fn kill_window_slow() -> Behavior {
+    Behavior {
+        throttle_bps: Some(600_000),
+        ..Behavior::default()
+    }
+}
+
+/// Used only by the Unix Ctrl-C test below (the kill/resume test has its own, slower server).
+#[cfg(unix)]
 fn slow() -> Behavior {
     Behavior {
         throttle_bps: Some(2_500_000),
@@ -134,7 +148,7 @@ async fn cli_never_prints_credentials_or_query() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cli_sigkill_then_resume_completes_from_frontier() {
     let srv = TestServer::start().await;
-    srv.add("/k.bin", content(2), slow());
+    srv.add("/k.bin", content(2), kill_window_slow());
     let url = format!("{}/k.bin", srv.base_url());
     let dir = tempfile::tempdir().unwrap();
     let mut child = command(EID, get_args(&url, dir.path(), &["-c", "4"]))
@@ -167,6 +181,13 @@ async fn cli_sigkill_then_resume_completes_from_frontier() {
     let sp = dir.path().join("k.bin.eid-state");
     let st2 = state::load(&sp).unwrap_or(st);
     let done: u64 = st2.segments.iter().map(|s| s.next - s.start).sum();
+    // the kill must have landed mid-download, or this test proves nothing about resuming: say so
+    // plainly instead of failing later on "no requests"
+    assert!(
+        !dir.path().join("k.bin").exists() && done < content(2).len(),
+        "every byte was already saved before the kill (done {done} of {}): slow the server further",
+        content(2).len()
+    );
     srv.reset_stats("/k.bin");
     srv.set_behavior("/k.bin", Behavior::default());
     let out = run(
