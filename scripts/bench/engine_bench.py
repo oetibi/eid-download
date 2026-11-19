@@ -15,6 +15,10 @@ Usage (from the repository root):
 Options: --eid PATH (binary to measure, default target/release/eid), --work DIR (where files are written; default ./target/bench-work, i.e. a real disk,
 not tmpfs), --conns 1,2,4 (override the connection list), --extra "--ramp-ms 50" (passed to
 `eid get` verbatim, for experiments), --json (one JSON object per line instead of a table).
+--connect-delay-ms MS: the server waits MS before the first request of every NEW connection
+(simulates the TCP+TLS handshake round trips a reused connection would skip; v0.2, ADR-0012).
+Every row also reports how many TCP connections and HTTP requests one download used (median),
+from the server's own counters.
 Numbers depend on the machine; compare runs on the same machine, never quote as constants.
 """
 import argparse
@@ -49,9 +53,10 @@ def sha256_file(path):
             h.update(b)
 
 
-def start_server(size, throttle):
+def start_server(size, throttle, connect_delay_ms=0):
     p = subprocess.Popen(
-        [SERVER, "--size", str(size), "--throttle-per-conn", str(throttle)],
+        [SERVER, "--size", str(size), "--throttle-per-conn", str(throttle),
+         "--connect-delay-ms", str(connect_delay_ms)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
@@ -67,6 +72,18 @@ def start_server(size, throttle):
         elif k == "SHA256":
             sha = v
     return p, url, sha
+
+
+def server_stats(p, path):
+    """Connections/requests the server saw for `path` since the previous call (then reset)."""
+    p.stdin.write("STATS\n")
+    p.stdin.flush()
+    while True:
+        line = p.stdout.readline()
+        if not line:
+            sys.exit("benchserver exited early")
+        if line.startswith("STATS "):
+            return json.loads(line[6:])[path]
 
 
 def run_once(eid, url, work, conns, extra):
@@ -101,6 +118,7 @@ def main():
     ap.add_argument("--work", default=os.path.join(ROOT, "target", "bench-work"))
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--eid", default=EID, help="eid binary to measure (e.g. a baseline build)")
+    ap.add_argument("--connect-delay-ms", type=int, default=0)
     a = ap.parse_args()
     for b in (a.eid, SERVER):
         if not os.path.exists(b):
@@ -110,18 +128,22 @@ def main():
         conns_list = [int(c) for c in a.conns.split(",")]
     extra = shlex.split(a.extra)
     os.makedirs(a.work, exist_ok=True)
-    server, base, want = start_server(a.size, a.throttle)
+    server, base, want = start_server(a.size, a.throttle, a.connect_delay_ms)
     gib = a.size / (1 << 30)
     try:
         if not a.json:
             print(f"# suite={a.suite} size={a.size} throttle/conn={a.throttle if a.suite == 'throttled' else '-'} "
-                  f"reps={a.reps} extra={a.extra!r} nproc={os.cpu_count()} eid={a.eid}")
-            print("| conns | wall s (median) | min..max | MiB/s (median) | peak RSS MiB (max) | CPU s (median) | CPU s/GiB |")
-            print("|---:|---:|---:|---:|---:|---:|---:|")
+                  f"reps={a.reps} extra={a.extra!r} connect_delay_ms={a.connect_delay_ms} nproc={os.cpu_count()} eid={a.eid}")
+            print("| conns | wall s (median) | min..max | MiB/s (median) | peak RSS MiB (max) | CPU s (median) | CPU s/GiB | TCP conns | requests |")
+            print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
         for c in conns_list:
-            walls, cpus, rss = [], [], []
+            walls, cpus, rss, tcp, reqs = [], [], [], [], []
+            server_stats(server, path_part)  # reset
             for _ in range(a.reps):
                 path, wall, ru = run_once(a.eid, base + path_part, a.work, c, extra)
+                st = server_stats(server, path_part)
+                tcp.append(st["connections"])
+                reqs.append(st["requests"])
                 got = sha256_file(path)
                 if got != want:
                     sys.exit(f"SHA-256 MISMATCH conns={c}: {got} != {want}")
@@ -138,13 +160,15 @@ def main():
                 "mib_per_s": round(a.size / (1 << 20) / w, 1),
                 "peak_rss_mib": round(max(rss), 1), "cpu_median_s": round(cpu, 3),
                 "cpu_s_per_gib": round(cpu / gib, 3), "sha256_ok": True,
+                "tcp_connections_median": statistics.median(tcp), "requests_median": statistics.median(reqs),
+                "connect_delay_ms": a.connect_delay_ms,
             }
             if a.json:
                 print(json.dumps(row), flush=True)
             else:
                 print(f"| {c} | {row['wall_median_s']} | {row['wall_min_s']}..{row['wall_max_s']} | "
                       f"{row['mib_per_s']} | {row['peak_rss_mib']} | {row['cpu_median_s']} | "
-                      f"{row['cpu_s_per_gib']} |", flush=True)
+                      f"{row['cpu_s_per_gib']} | {row['tcp_connections_median']} | {row['requests_median']} |", flush=True)
     finally:
         server.stdin.close()
         server.wait(timeout=10)

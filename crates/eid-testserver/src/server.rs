@@ -33,6 +33,9 @@ struct Shared {
     changed: Notify,
     start: Instant,
     address: SocketAddr,
+    /// Delay before the first request of every new connection is read (benchmarks: simulates
+    /// the round trips of a TCP + TLS handshake that a reused keep-alive connection skips).
+    connect_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 /// Owns the listener and all client tasks; dropping it cancels even stalled clients.
@@ -51,6 +54,7 @@ impl TestServer {
             changed: Notify::new(),
             start: Instant::now(),
             address: listener.local_addr().expect("listener address"),
+            connect_delay_ms: std::sync::atomic::AtomicU64::new(0),
         });
         let state = shared.clone();
         let task = tokio::spawn(async move {
@@ -70,6 +74,15 @@ impl TestServer {
             }
         });
         Self { shared, task }
+    }
+
+    /// Every connection accepted from now on waits `d` before its first request is read
+    /// (0 = none, the default). Later requests on the same connection do not wait.
+    pub fn set_connect_delay(&self, d: Duration) {
+        let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        self.shared
+            .connect_delay_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn base_url(&self) -> String {
@@ -463,6 +476,12 @@ fn parse_range(value: &str, total: u64) -> Option<(u64, u64)> {
 }
 
 async fn connection(mut socket: TcpStream, shared: Arc<Shared>, id: usize) -> io::Result<()> {
+    let delay = shared
+        .connect_delay_ms
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
     let mut buffer = Vec::new();
     while let Some(req) = read_request(&mut socket, &mut buffer).await? {
         let Some(response) = prepare(&shared, &req, id) else {
