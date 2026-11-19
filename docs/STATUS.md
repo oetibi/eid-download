@@ -164,6 +164,62 @@
 ## لم يُختبر على Windows الحقيقي
 - **B4 (hard link) و M1 (`LockFileEx` وقفل الملف على Windows):** مُنفَّذان ويُبنيان (`cargo check --target x86_64-pc-windows-gnu --all-targets`) لكن **لم يُشغَّلا على Windows**. تصحيح (M2): قفل الوظيفة (`flock`/`LockFileEx`) يُؤخذ على ملف `<name>.eid-lock` وليس على ملف البيانات، فلا يمنع قراءة الـpart عبر مقبض آخر؛ والـhash يجري عبر المقبض الذي تحققنا منه (`sha256_handle`) لإغلاق استبدال المسار، لا بسبب قفل إلزامي.
 كل شيء. الصندوق الحالي Linux بدون Windows/Wine. ما يتحقق منه هنا: بناء المحرك وCLI والاختبارات على Linux و`cargo check`/بناء متقاطع لـWindows (إن نجح). الاختبارات على Windows تنتظر CI على windows-latest (يحتاج مستودع GitHub — لا نربط حساباً) ثم P8 يدوياً.
+## إصلاح مشاكل Windows الحقيقية الخمس (فرع `fix/windows-real-usage`، بموافقة المالك 2026-11-19) — غير مدموج
+وجدها المالك على Windows حقيقي بنسخة ZIP، وقد شغّل البرنامج **من داخل ملف ZIP دون استخراج**.
+- **1 و2: «os error 2» عند فحص الفيديو وتنزيل الأدوات.**
+  - **السبب المثبت:** Explorer يُخرج الملف المنقور وحده (`EidDownload.exe`) إلى `%TEMP%\Temp1_<zip>.zip\`، والنافذة كانت تشغّل `eid.exe` المجاور لكل أمر فيديو.
+  - **الإصلاح:** البرنامج صار عامل الفيديو لنفسه (`EidDownload.exe --eid-video-worker video ...`، يقبل `video` فقط). ما زال عملية مستقلة، فالإيقاف يقتل شجرة yt-dlp/FFmpeg كما كان. `eid.exe` والمحرّك والاستكمال بلا تغيير.
+  - رسالة واضحة تسمّي الملف الناقص إن غاب العامل نفسه.
+  - شريط عند البدء إن فُتح البرنامج من داخل ZIP (`Temp1_*.zip` و`7zO*` و`Rar$EX*`) أو غاب `eid-native-host`.
+  - الاختبارات: `the_app_alone_installs_the_tools_and_downloads_a_video_as_its_own_worker`، `the_worker_flag_only_runs_video_commands`، `the_worker_runs_video_commands_only`، `the_startup_check_sees_a_zip_folder_and_a_missing_native_host`.
+- **خطأ ثانٍ كان مخفياً خلف os error 2، وجده اختبار النافذة الحقيقية:** «تثبيت الأدوات» كان **يغلق البرنامج**.
+  - `tools_install` كان أمر Tauri عادياً يعمل في خيط النافذة خارج runtime، فتشغيل العامل يسبب panic.
+  - **الإصلاح:** الأمر صار async.
+  - `VideoSetup::install` يرفض بخطأ خارج runtime ولا ينهار. اختبار `install_outside_the_runtime_is_an_error_not_a_crash` (red-first: فشل بـpanic قبل الإصلاح).
+- **3: رابط يوتيوب في «إضافة» حفظ صفحة HTML باسم `watch`.**
+  - **السبب:** كل رابط http كان يُقبل ملفاً.
+  - **الإصلاح:** `eid_engine::links::video_page` (وقاعدة مطابقة في `logic.js`). في نافذة الإضافة تُفتح نافذة «فيديو» بالرابط كاملاً. عبر IPC (المتصفح و`eid serve --add`) يصير مهمة فيديو.
+  - `Config::refuse_web_pages` (مفعّل في النافذة و`eid serve`، ومعطّل في `eid get`) يرفض رداً `text/html` لا يحمل اسم صفحة، قبل كتابة أي شيء، برسالة تقول ما العمل.
+  - **خطأ وجده اختبار النافذة الحقيقية:** الرابط وصل إلى نافذة الفيديو بلا `?v=` (التنقيح يحذف الاستعلام). أُصلح، والاختبار يتحقق من الرابط حرفياً.
+  - الاختبارات: `youtube_video_and_playlist_pages_are_recognized_and_nothing_else`، `web_pages_are_told_apart_from_files_and_page_names`، `a_web_page_is_refused_before_anything_is_written_and_files_still_download`، `a_queued_web_page_fails_once_with_the_message_and_leaves_nothing`، `video_pages_are_not_queued_as_files`، و`serve_video` (التوجيه عبر IPC حقيقي).
+- **4: Firefox وإضافة المتصفح.** الأسباب ثلاثة:
+  - الـartifact بلا إضافة.
+  - نسخة ZIP لا تسجّل Native Messaging؛ المثبّت وحده يفعل.
+  - Firefox العادي لا يقبل إضافة غير موقّعة إلا مؤقتاً.
+  
+  **الإصلاح:**
+  - الإعدادات ← سطح المكتب ← «إضافة المتصفح»: حالة كل متصفح، و«ربط المتصفحات بهذه النسخة» (HKCU، بلا مدير)، و«إلغاء الربط» (لما يشير إلى هذه النسخة فقط). يُرفض الربط من داخل ZIP.
+  - الـZIP والمثبّت يحملان `browser-extension\chrome-edge` و`browser-extension\firefox` مع `INSTALL-BROWSER-EXTENSION.txt`، والـartifact يحمل الحزم.
+  - الاختبارات: `connect_this_copy_see_another_and_never_remove_it` (تسجيل حقيقي)، `the_host_of_a_registered_manifest_is_resolved`، `the_built_in_ids_make_a_valid_manifest_for_every_browser`.
+  - **يحتاج المالك:** توقيع Firefox عبر AMO، ومتاجر Chrome وEdge.
+- **5: التحميل العادي.** لم يُحدَّد خطأ آخر غير ما سبق. المسار كله مختبر على النافذة الحقيقية: إضافة، حفظ، SHA-256، إيقاف واستكمال من شريط الأدوات.
+
+**اختبار النافذة الحقيقية على Windows (`scripts/windows/window_e2e.mjs`):**
+- ينقر أزرار نافذة WebView2 الحقيقية عبر منفذ DevTools.
+- المنفذ يُفتح بسياسة WebView2 `AdditionalBrowserArguments` في HKCU/HKLM للاختبار فقط ثم تُعاد. السبب: wry يمرر وسائطه فيتجاهل WebView2 المتغير `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`، كما ثبت في أول تشغيل.
+- يعمل في ci-windows بلا إنترنت، وفي `real-video.yml` (مهمة `window`) بـ`--online`.
+
+**أدلة CI على Windows:**
+- ci-windows run 44635361276 @ `1ea8219`: **نجح بالكامل**. يشمل clippy و`cargo test --workspace` و`check_required` وGUI smoke واختبار النافذة الحقيقية (9/9) وحزمة ZIP بالإضافة والمثبّت وفحص تثبيته وإزالته والقياسات وSHA-256.
+- real-video run 44637121343 @ `ac6a24e`، مهمة `window` بالإنترنت الحقيقي، والبرنامج وحده في مجلد `Temp1_*.zip`:
+  - **نجح:** تثبيت الأدوات من النافذة (yt-dlp وFFmpeg وffprobe وDeno في ~10 ث)، وفحص فيديو PeerTube حقيقي، وتحميله 360p (`What is PeerTube_.mp4`، 5,166,155 بايت).
+  - فشل فحص واحد في الاختبار نفسه: البحث عن الصف تم بينما النافذة تعرض مهام الفيديو. أُصلح في `96c3c36`.
+- مهمة `real (peertube)` نجحت في كل التشغيلات.
+- مهمة `real (youtube)` فشلت كما هو متوقع: يوتيوب طلب إثبات أنها ليست روبوتاً على مشغّل GitHub، وظهرت الرسالة الواضحة.
+
+**الأدلة على Linux (هذا الصندوق):**
+- `cargo test --workspace`: 495 نجح، 0 فشل، 9 متجاهَلة.
+- `check_required.py`: 408/408.
+- `ui_e2e.mjs`: كل الفحوص ناجحة.
+- `node --test`: الواجهة 13/13، والإضافة 23/23.
+- clippy (Linux وwindows-gnu) نظيف، و`cargo deny check` ok.
+
+**لم يُختبر يدوياً:**
+- تثبيت الإضافة فعلياً في Chrome وEdge وFirefox على Windows.
+- يوتيوب الحقيقي (يطلب إثبات أنه ليس روبوتاً على مشغّلات GitHub).
+- «فتح الملف» و«إظهار في المجلد» بنقرة حقيقية.
+- خطوات المالك: `docs/OWNER-TEST-windows-fixes.md`.
+
 </div>
 
 ## P3 — IPC وNative Messaging (فرع `feat/p3-ipc-native`، 7 commits، لم تُراجَع في جلسة منفصلة، لا طلب دمج)
@@ -499,5 +555,61 @@
 3. **استيراد/تصدير القوائم:** من قائمة التحميلات؛ txt/json/csv عبر `eid_engine::porting` (الملف غير موثوق: بلا تتبع روابط، ≤ 8 MiB، أسماء ومجلدات منظّفة، كلمات السر تُحذف).
 4. **الإعدادات:** تبويب جديد «سطح المكتب» (الأيقونة، الإغلاق إلى منطقة الإشعارات، الحافظة، أفعال الطاقة).
 - الأدلة على Linux: `category_folders_auto_fixed_and_none`، `import_and_export_lists_are_untrusted_bounded_and_round_trip`، `ui_e2e` 25/25 (فحص جديد)؛ لا تراجع في أرقام الاستجابة مع 3000 تحميل.
+
+## إصلاح مشاكل Windows الحقيقية الخمس (فرع `fix/windows-real-usage`، بموافقة المالك 2026-11-19) — غير مدموج
+وجدها المالك على Windows حقيقي بنسخة ZIP، وقد شغّل البرنامج **من داخل ملف ZIP دون استخراج**.
+- **1 و2: «os error 2» عند فحص الفيديو وتنزيل الأدوات.**
+  - **السبب المثبت:** Explorer يُخرج الملف المنقور وحده (`EidDownload.exe`) إلى `%TEMP%\Temp1_<zip>.zip\`، والنافذة كانت تشغّل `eid.exe` المجاور لكل أمر فيديو.
+  - **الإصلاح:** البرنامج صار عامل الفيديو لنفسه (`EidDownload.exe --eid-video-worker video ...`، يقبل `video` فقط). ما زال عملية مستقلة، فالإيقاف يقتل شجرة yt-dlp/FFmpeg كما كان. `eid.exe` والمحرّك والاستكمال بلا تغيير.
+  - رسالة واضحة تسمّي الملف الناقص إن غاب العامل نفسه.
+  - شريط عند البدء إن فُتح البرنامج من داخل ZIP (`Temp1_*.zip` و`7zO*` و`Rar$EX*`) أو غاب `eid-native-host`.
+  - الاختبارات: `the_app_alone_installs_the_tools_and_downloads_a_video_as_its_own_worker`، `the_worker_flag_only_runs_video_commands`، `the_worker_runs_video_commands_only`، `the_startup_check_sees_a_zip_folder_and_a_missing_native_host`.
+- **خطأ ثانٍ كان مخفياً خلف os error 2، وجده اختبار النافذة الحقيقية:** «تثبيت الأدوات» كان **يغلق البرنامج**.
+  - `tools_install` كان أمر Tauri عادياً يعمل في خيط النافذة خارج runtime، فتشغيل العامل يسبب panic.
+  - **الإصلاح:** الأمر صار async.
+  - `VideoSetup::install` يرفض بخطأ خارج runtime ولا ينهار. اختبار `install_outside_the_runtime_is_an_error_not_a_crash` (red-first: فشل بـpanic قبل الإصلاح).
+- **3: رابط يوتيوب في «إضافة» حفظ صفحة HTML باسم `watch`.**
+  - **السبب:** كل رابط http كان يُقبل ملفاً.
+  - **الإصلاح:** `eid_engine::links::video_page` (وقاعدة مطابقة في `logic.js`). في نافذة الإضافة تُفتح نافذة «فيديو» بالرابط كاملاً. عبر IPC (المتصفح و`eid serve --add`) يصير مهمة فيديو.
+  - `Config::refuse_web_pages` (مفعّل في النافذة و`eid serve`، ومعطّل في `eid get`) يرفض رداً `text/html` لا يحمل اسم صفحة، قبل كتابة أي شيء، برسالة تقول ما العمل.
+  - **خطأ وجده اختبار النافذة الحقيقية:** الرابط وصل إلى نافذة الفيديو بلا `?v=` (التنقيح يحذف الاستعلام). أُصلح، والاختبار يتحقق من الرابط حرفياً.
+  - الاختبارات: `youtube_video_and_playlist_pages_are_recognized_and_nothing_else`، `web_pages_are_told_apart_from_files_and_page_names`، `a_web_page_is_refused_before_anything_is_written_and_files_still_download`، `a_queued_web_page_fails_once_with_the_message_and_leaves_nothing`، `video_pages_are_not_queued_as_files`، و`serve_video` (التوجيه عبر IPC حقيقي).
+- **4: Firefox وإضافة المتصفح.** الأسباب ثلاثة:
+  - الـartifact بلا إضافة.
+  - نسخة ZIP لا تسجّل Native Messaging؛ المثبّت وحده يفعل.
+  - Firefox العادي لا يقبل إضافة غير موقّعة إلا مؤقتاً.
+  
+  **الإصلاح:**
+  - الإعدادات ← سطح المكتب ← «إضافة المتصفح»: حالة كل متصفح، و«ربط المتصفحات بهذه النسخة» (HKCU، بلا مدير)، و«إلغاء الربط» (لما يشير إلى هذه النسخة فقط). يُرفض الربط من داخل ZIP.
+  - الـZIP والمثبّت يحملان `browser-extension\chrome-edge` و`browser-extension\firefox` مع `INSTALL-BROWSER-EXTENSION.txt`، والـartifact يحمل الحزم.
+  - الاختبارات: `connect_this_copy_see_another_and_never_remove_it` (تسجيل حقيقي)، `the_host_of_a_registered_manifest_is_resolved`، `the_built_in_ids_make_a_valid_manifest_for_every_browser`.
+  - **يحتاج المالك:** توقيع Firefox عبر AMO، ومتاجر Chrome وEdge.
+- **5: التحميل العادي.** لم يُحدَّد خطأ آخر غير ما سبق. المسار كله مختبر على النافذة الحقيقية: إضافة، حفظ، SHA-256، إيقاف واستكمال من شريط الأدوات.
+
+**اختبار النافذة الحقيقية على Windows (`scripts/windows/window_e2e.mjs`):**
+- ينقر أزرار نافذة WebView2 الحقيقية عبر منفذ DevTools.
+- المنفذ يُفتح بسياسة WebView2 `AdditionalBrowserArguments` في HKCU/HKLM للاختبار فقط ثم تُعاد. السبب: wry يمرر وسائطه فيتجاهل WebView2 المتغير `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`، كما ثبت في أول تشغيل.
+- يعمل في ci-windows بلا إنترنت، وفي `real-video.yml` (مهمة `window`) بـ`--online`.
+
+**أدلة CI على Windows:**
+- ci-windows run 44635361276 @ `1ea8219`: **نجح بالكامل**. يشمل clippy و`cargo test --workspace` و`check_required` وGUI smoke واختبار النافذة الحقيقية (9/9) وحزمة ZIP بالإضافة والمثبّت وفحص تثبيته وإزالته والقياسات وSHA-256.
+- real-video run 44637121343 @ `ac6a24e`، مهمة `window` بالإنترنت الحقيقي، والبرنامج وحده في مجلد `Temp1_*.zip`:
+  - **نجح:** تثبيت الأدوات من النافذة (yt-dlp وFFmpeg وffprobe وDeno في ~10 ث)، وفحص فيديو PeerTube حقيقي، وتحميله 360p (`What is PeerTube_.mp4`، 5,166,155 بايت).
+  - فشل فحص واحد في الاختبار نفسه: البحث عن الصف تم بينما النافذة تعرض مهام الفيديو. أُصلح في `96c3c36`.
+- مهمة `real (peertube)` نجحت في كل التشغيلات.
+- مهمة `real (youtube)` فشلت كما هو متوقع: يوتيوب طلب إثبات أنها ليست روبوتاً على مشغّل GitHub، وظهرت الرسالة الواضحة.
+
+**الأدلة على Linux (هذا الصندوق):**
+- `cargo test --workspace`: 495 نجح، 0 فشل، 9 متجاهَلة.
+- `check_required.py`: 408/408.
+- `ui_e2e.mjs`: كل الفحوص ناجحة.
+- `node --test`: الواجهة 13/13، والإضافة 23/23.
+- clippy (Linux وwindows-gnu) نظيف، و`cargo deny check` ok.
+
+**لم يُختبر يدوياً:**
+- تثبيت الإضافة فعلياً في Chrome وEdge وFirefox على Windows.
+- يوتيوب الحقيقي (يطلب إثبات أنه ليس روبوتاً على مشغّلات GitHub).
+- «فتح الملف» و«إظهار في المجلد» بنقرة حقيقية.
+- خطوات المالك: `docs/OWNER-TEST-windows-fixes.md`.
 
 </div>
