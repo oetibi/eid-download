@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { packageAll } from "../../scripts/ext/package.mjs";
+import { VERSION } from "../../scripts/ext/build.mjs";
 
 function readZip(buf) {
   const end = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
@@ -34,8 +35,8 @@ test("store packages are valid, deterministic and store-ready", () => {
   try {
     const s1 = packageAll(a), s2 = packageAll(b);
     assert.deepEqual(s1, s2, "same source, same bytes");
-    const chrome = readZip(fs.readFileSync(path.join(a, "eid-download-chrome-0.1.0.zip")));
-    const firefox = readZip(fs.readFileSync(path.join(a, "eid-download-firefox-0.1.0.zip")));
+    const chrome = readZip(fs.readFileSync(path.join(a, `eid-download-chrome-${VERSION}.zip`)));
+    const firefox = readZip(fs.readFileSync(path.join(a, `eid-download-firefox-${VERSION}.zip`)));
     for (const z of [chrome, firefox]) {
       for (const f of ["manifest.json", "background.js", "content.js", "lib/core.js", "icons/128.png", "_locales/ar/messages.json", "_locales/en/messages.json"]) assert.ok(z.has(f), f);
       for (const name of z.keys()) assert.ok(!name.startsWith("/") && !name.includes(".."), name);
@@ -45,7 +46,7 @@ test("store packages are valid, deterministic and store-ready", () => {
     assert.equal(mc.key, undefined, "stores refuse the key field");
     assert.equal(mf.browser_specific_settings.gecko.id, "eid-download@eid-download");
     assert.deepEqual(mc.permissions.sort(), ["nativeMessaging", "storage"]);
-    const side = readZip(fs.readFileSync(path.join(a, "eid-download-chrome-sideload-0.1.0.zip")));
+    const side = readZip(fs.readFileSync(path.join(a, `eid-download-chrome-sideload-${VERSION}.zip`)));
     assert.ok(JSON.parse(side.get("manifest.json")).key, "sideload build keeps the pinned key");
   } finally {
     fs.rmSync(a, { recursive: true, force: true });
