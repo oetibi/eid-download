@@ -269,6 +269,8 @@ try {
     await addLink(w, `${base}/slow.bin`, "w-slow.bin");
     const it = await until(() => { const i = item("/slow.bin"); return i && i.status === "running" ? i : null; }, 60000, "slow.bin running");
     await sleep(3000);
+    // the downloads list (after a video the window shows its video jobs)
+    await w.ev(click("[data-view=all]"));
     await until(() => w.ev(`!!document.querySelector('.tr[data-id="${it.id}"]')`), 10000, "its row");
     await w.ev(`document.querySelector('.tr[data-id="${it.id}"]').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
     await until(() => w.ev("!document.querySelector('.tool[data-cmd=pause]').disabled"), 5000, "Pause enabled for the selection");
