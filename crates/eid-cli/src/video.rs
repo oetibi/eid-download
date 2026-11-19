@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 pub const HELP: &str = "eid video - video and audio through yt-dlp (after your consent)\n\n\
 USAGE:\n  eid video info <page-url> [--yes-i-agree] [--lang ar|en]\n\
-  eid video get <page-url> [-d DIR] [--quality best|audio|720p] [--limit RATE] [--yes-i-agree] [--lang ar|en] [-q]\n\
+  eid video get <page-url> [-d DIR] [--quality 360p|480p|720p|1080p|1440p|2160p|best|audio] [--limit RATE] [--yes-i-agree] [--lang ar|en] [-q]\n\
   eid video playlist <playlist-url> [-d DIR] [--quality Q] [--limit RATE] [--skip 2,5] [--retry-failed 3,7|all] [--list] [--yes-i-agree] [-q]
 \n                                     every item, numbered 01 - ... in a folder named after the playlist;
 \n                                     an item that failed 3 runs in a row, or that the site refused
@@ -92,19 +92,16 @@ fn parse_numbers(s: &str) -> Result<Vec<u32>, String> {
         .collect()
 }
 
+/// The fixed v0.1 policy (`360p` ... `2160p`, `best` = best up to 4K, `audio`); `mp3` is kept
+/// as an alias of `audio`. Anything taller than 2160 is refused (owner: no 8K).
 fn parse_quality(s: &str) -> Result<Quality, String> {
-    match s {
-        "best" => Ok(Quality::Best),
-        "audio" | "mp3" => Ok(Quality::AudioMp3),
-        _ => {
-            let n = s.strip_suffix('p').unwrap_or(s);
-            n.parse::<u32>()
-                .ok()
-                .filter(|h| (1..=eid_media::args::MAX_HEIGHT).contains(h))
-                .map(Quality::MaxHeight)
-                .ok_or_else(|| format!("bad quality '{s}' (best, audio, or a height like 720p)"))
-        }
-    }
+    let s = if s == "mp3" { "audio" } else { s };
+    Quality::from_policy(s).map_err(|_| {
+        format!(
+            "bad quality '{s}' (one of {}; nothing above 2160p)",
+            eid_media::args::QUALITY_CHOICES.join(", ")
+        )
+    })
 }
 
 /// `argv` without the leading `video`.

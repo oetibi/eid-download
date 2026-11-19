@@ -13,6 +13,12 @@
 //! * `/video/ID?title=T`   `--dump-single-json`: print video info; otherwise "download":
 //!   write the fixture clip (mp4, or mp3 with `--extract-audio`) as `ID.EXT` in the working
 //!   directory, printing progress lines in our progress template
+//! * `&heights=360,1080,4320` (video and playlist URLs): the video formats the item offers
+//!   (one video-only format per height, plus audio). `--format` is evaluated against them with
+//!   the subset of yt-dlp's selection language eid emits (`/` alternatives, `+` merges,
+//!   `bv*` `wv*` `b` `w` `ba`, a format id, `[height<=N]` and `[height<=?N]`), and the chosen
+//!   video height is printed as the last progress field (`%(info.height)s`). No match is
+//!   "Requested format is not available", exit 1, like yt-dlp.
 //!
 //! It refuses (exit 9) to run without the flags eid must always pass, and it only understands
 //! the constant output template `%(id)s.%(ext)s`, so a regression in the argument builder fails
@@ -88,7 +94,116 @@ fn error_text(kind: &str) -> String {
     }
 }
 
-fn info_json(id: &str, title: &str) -> String {
+/// One format the fake offers.
+#[derive(Clone, Debug)]
+struct Fmt {
+    id: String,
+    height: Option<u32>,
+    video: bool,
+    audio: bool,
+}
+
+/// The formats of a fake item: the fixed fixture list, or `heights=` (see the module doc).
+fn formats(heights: Option<&str>) -> Vec<Fmt> {
+    let f = |id: &str, height, video, audio| Fmt {
+        id: id.into(),
+        height,
+        video,
+        audio,
+    };
+    match heights {
+        None => vec![
+            f("140", None, false, true),
+            f("134", Some(360), true, false),
+            f("18", Some(90), true, true),
+        ],
+        Some(list) => {
+            let mut v = vec![f("140", None, false, true)];
+            for h in list.split(',').filter(|h| !h.is_empty()) {
+                let h: u32 = h
+                    .parse()
+                    .unwrap_or_else(|_| die(9, "fake-yt-dlp: bad heights"));
+                v.push(f(&format!("v{h}"), Some(h), true, false));
+            }
+            v
+        }
+    }
+}
+
+/// `[height<=N]` / `[height<=?N]` filters of one selector atom.
+fn passes(f: &Fmt, filters: &str) -> bool {
+    filters.split(']').filter(|x| !x.is_empty()).all(|flt| {
+        let flt = flt.trim_start_matches('[');
+        let (lenient, n) = match flt.strip_prefix("height<=?") {
+            Some(n) => (true, n),
+            None => (
+                false,
+                flt.strip_prefix("height<=")
+                    .unwrap_or_else(|| die(9, &format!("fake-yt-dlp: filter {flt}"))),
+            ),
+        };
+        let n: u32 = n
+            .parse()
+            .unwrap_or_else(|_| die(9, "fake-yt-dlp: filter number"));
+        match f.height {
+            Some(h) => h <= n,
+            None => lenient,
+        }
+    })
+}
+
+fn pick<'a>(fs: &'a [Fmt], atom: &str) -> Option<&'a Fmt> {
+    let (name, filters) = match atom.find('[') {
+        Some(i) => atom.split_at(i),
+        None => (atom, ""),
+    };
+    let ok: Vec<&Fmt> = fs.iter().filter(|f| passes(f, filters)).collect();
+    let key = |f: &&Fmt| f.height.unwrap_or(0);
+    match name {
+        "bv*" => ok.into_iter().filter(|f| f.video).max_by_key(key),
+        "wv*" => ok.into_iter().filter(|f| f.video).min_by_key(key),
+        "b" => ok
+            .into_iter()
+            .filter(|f| f.video && f.audio)
+            .max_by_key(key),
+        "w" => ok
+            .into_iter()
+            .filter(|f| f.video && f.audio)
+            .min_by_key(key),
+        "ba" => ok.into_iter().find(|f| f.audio && !f.video),
+        id => ok.into_iter().find(|f| f.id == id),
+    }
+}
+
+/// The video height `--format` selects from `fs` (`Some(None)`: a selection without a known
+/// height); `None` when nothing matches.
+fn select(fs: &[Fmt], spec: &str) -> Option<Option<u32>> {
+    spec.split('/').find_map(|alt| {
+        let parts: Option<Vec<&Fmt>> = alt.split('+').map(|a| pick(fs, a)).collect();
+        parts.map(|p| p.iter().filter(|f| f.video).filter_map(|f| f.height).max())
+    })
+}
+
+fn info_json(id: &str, title: &str, heights: Option<&str>) -> String {
+    if heights.is_some() {
+        let fs: Vec<serde_json::Value> = formats(heights)
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "format_id": f.id, "ext": if f.video { "mp4" } else { "m4a" },
+                    "height": f.height,
+                    "vcodec": if f.video { "avc1" } else { "none" },
+                    "acodec": if f.audio { "mp4a.40.2" } else { "none" },
+                })
+            })
+            .collect();
+        return serde_json::json!({
+            "_type": "video", "id": id, "title": title, "duration": 2.0,
+            "uploader": "Fake uploader", "is_live": false,
+            "webpage_url": format!("https://fake.test/video/{id}"), "formats": fs,
+        })
+        .to_string();
+    }
     serde_json::json!({
         "_type": "video",
         "id": id,
@@ -171,7 +286,13 @@ fn remux_to_mp4(flags: &[String], id: &str, source: &str, r: &Remux) {
 /// existing `.part` from its length (resume), optionally stall half-way while `stall_flag`
 /// exists (cancellation tests), then rename to `<id>.<ext>` (and remux, see [`Remux`]).
 /// Returns the resume offset.
-fn download(flags: &[String], id: &str, stall_flag: Option<&str>, remux: &Remux) -> u64 {
+fn download(
+    flags: &[String],
+    id: &str,
+    stall_flag: Option<&str>,
+    remux: &Remux,
+    heights: Option<&str>,
+) -> u64 {
     match value(flags, "--output") {
         Some("%(id)s.%(ext)s") => {}
         other => die(
@@ -189,6 +310,24 @@ fn download(flags: &[String], id: &str, stall_flag: Option<&str>, remux: &Remux)
         (CLIP_MP4, "mp4")
     };
     let progress = value(flags, "--progress-template").is_some();
+    // `%(info.height)s` in the template: the selected video height as the last field
+    let with_height =
+        value(flags, "--progress-template").is_some_and(|t| t.contains("info.height"));
+    let chosen = match value(flags, "--format") {
+        Some(spec) if !audio => match select(&formats(heights), spec) {
+            Some(h) => h,
+            None => die(
+                1,
+                &format!("ERROR: [fake] {id}: Requested format is not available"),
+            ),
+        },
+        _ => None,
+    };
+    let hfield = if with_height {
+        format!(" {}", chosen.map_or("NA".to_string(), |h| h.to_string()))
+    } else {
+        String::new()
+    };
     let total = data.len();
     let name = format!("{id}.{ext}");
     let part = format!("{name}.part");
@@ -227,7 +366,7 @@ fn download(flags: &[String], id: &str, stall_flag: Option<&str>, remux: &Remux)
         if let Some(flag) = stall_flag {
             if done >= total / 2 && std::path::Path::new(flag).exists() {
                 f.sync_all().unwrap();
-                out(&format!("[eid-progress] {done} {total} NA 0 NA"));
+                out(&format!("[eid-progress] {done} {total} NA 0 NA{hfield}"));
                 std::thread::sleep(Duration::from_secs(600));
             }
         }
@@ -241,7 +380,9 @@ fn download(flags: &[String], id: &str, stall_flag: Option<&str>, remux: &Remux)
         f.write_all(&data[done..done + n]).unwrap();
         done += n;
         if progress {
-            out(&format!("[eid-progress] {done} {total} NA 1000.0 0"));
+            out(&format!(
+                "[eid-progress] {done} {total} NA 1000.0 0{hfield}"
+            ));
         }
     }
     f.sync_all().unwrap();
@@ -303,6 +444,20 @@ fn playlist_json(name: &str, url: &url::Url) -> String {
             if it["nourl"].as_bool() == Some(true) {
                 return serde_json::json!({"_type": "url", "id": id, "title": it["title"]});
             }
+            // `"heights": "360,720"`: this item's formats (overrides the playlist's)
+            let rest = match it["heights"].as_str() {
+                Some(h) => {
+                    let mut r = url::form_urlencoded::Serializer::new(String::new());
+                    for (k, v) in url::form_urlencoded::parse(rest.as_bytes()) {
+                        if k != "heights" {
+                            r.append_pair(&k, &v);
+                        }
+                    }
+                    r.append_pair("heights", h);
+                    r.finish()
+                }
+                None => rest.clone(),
+            };
             serde_json::json!({
                 "_type": "url", "id": id, "title": it["title"],
                 "url": format!("https://fake.test/{path}?{rest}"),
@@ -446,7 +601,7 @@ fn main() {
                     }
                 }
                 let title = query("title").unwrap_or_else(|| "Fake video".into());
-                out(&info_json(&id, &title));
+                out(&info_json(&id, &title, query("heights").as_deref()));
             } else {
                 // log first (with the resume offset), so a test can see this process even if
                 // it is killed while it stalls
@@ -469,7 +624,13 @@ fn main() {
                     fail_flag: query("remux_fail"),
                     stall: query("remux_stall"),
                 };
-                download(flags, &id, stall.as_deref(), &remux);
+                download(
+                    flags,
+                    &id,
+                    stall.as_deref(),
+                    &remux,
+                    query("heights").as_deref(),
+                );
             }
         }
         _ => die(9, &format!("fake-yt-dlp: unknown fake URL {}", url.path())),
