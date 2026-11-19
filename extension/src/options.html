@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title data-i18n="optTitle">Eid Download</title>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<main>
+  <h1 data-i18n="optTitle"></h1>
+  <form id="f" autocomplete="off">
+    <label class="check"><input type="checkbox" name="enabled"> <span data-i18n="optEnabled"></span></label>
+
+    <fieldset><legend data-i18n="optVisibility"></legend>
+      <label><input type="radio" name="visibility" value="hover"> <span data-i18n="optHover"></span></label>
+      <label><input type="radio" name="visibility" value="always"> <span data-i18n="optAlways"></span></label>
+    </fieldset>
+
+    <fieldset><legend data-i18n="optPosition"></legend>
+      <label><input type="radio" name="position" value="top-left"> <span data-i18n="optTopLeft"></span></label>
+      <label><input type="radio" name="position" value="top-right"> <span data-i18n="optTopRight"></span></label>
+    </fieldset>
+
+    <fieldset><legend data-i18n="optSize"></legend>
+      <label><input type="radio" name="size" value="small"> <span data-i18n="optSmall"></span></label>
+      <label><input type="radio" name="size" value="medium"> <span data-i18n="optMedium"></span></label>
+      <label><input type="radio" name="size" value="large"> <span data-i18n="optLarge"></span></label>
+      <label><input type="radio" name="size" value="custom"> <span data-i18n="optCustom"></span></label>
+      <label class="sub"><span data-i18n="optCustomSize"></span> <input type="number" name="customSize" min="20" max="64" step="1"></label>
+    </fieldset>
+
+    <fieldset><legend data-i18n="optColor"></legend>
+      <div id="colors" class="swatches"></div>
+      <label class="sub"><input type="radio" name="color" value="custom"> <span data-i18n="optCustomColor"></span> <input type="color" name="customColor"></label>
+    </fieldset>
+
+    <fieldset><legend data-i18n="optShape"></legend>
+      <label><input type="radio" name="shape" value="rounded"> <span data-i18n="optRounded"></span></label>
+      <label><input type="radio" name="shape" value="square"> <span data-i18n="optSquare"></span></label>
+      <label><input type="radio" name="shape" value="pill"> <span data-i18n="optPill"></span></label>
+    </fieldset>
+
+    <fieldset><legend data-i18n="optLabel"></legend>
+      <label><input type="radio" name="label" value="icon-text"> <span data-i18n="optIconText"></span></label>
+      <label><input type="radio" name="label" value="icon"> <span data-i18n="optIcon"></span></label>
+    </fieldset>
+
+    <fieldset><legend data-i18n="optOpacity"></legend>
+      <input type="range" name="opacity" min="0.3" max="1" step="0.01"> <output id="opv"></output>
+    </fieldset>
+
+    <fieldset><legend data-i18n="optPreview"></legend>
+      <div class="preview"><button type="button" id="pv" class="pv"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0l-4.5-4.5M12 14l4.5-4.5M4.5 17.5v2h15v-2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="pvt" data-i18n="btnLabel"></span></button></div>
+    </fieldset>
+
+    <fieldset><legend data-i18n="optExcluded"></legend>
+      <textarea name="excludedSites" rows="5" spellcheck="false" dir="ltr" placeholder="example.com"></textarea>
+    </fieldset>
+
+    <div class="actions">
+      <button type="submit" class="primary" data-i18n="optSave"></button>
+      <button type="button" id="reset" data-i18n="optReset"></button>
+      <span id="msg" role="status"></span>
+    </div>
+  </form>
+
+  <section>
+    <h2 data-i18n="optConnection"></h2>
+    <button type="button" id="test" data-i18n="optTest"></button> <span id="testmsg" role="status"></span>
+    <p class="note" data-i18n="optPrivacy"></p>
+  </section>
+</main>
+<script src="lib/core.js"></script>
+<script src="options.js"></script>
+</body>
+</html>
