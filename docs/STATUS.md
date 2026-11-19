@@ -433,3 +433,4 @@
 - التالي: CI أخضر على PR #3 ← تعبئة `ARTIFACT_NUMBERS` في `docs/BENCHMARKS.md` من artifacts (`perf-windows`، `engine-windows`) ← وصف PR ← دمج ← وسم `v0.1.0` (إصدار تجريبي) ← فحص الأصول والبصمات.
 - 14:35 ci-windows أخضر على `f61e174` (run 44510265157)؛ أرقام Windows أُضيفت إلى `docs/BENCHMARKS.md` §4. وصف PR #3 كُتب. بانتظار ci-linux (apt بطيء على المشغّل ~17 د).
 - 15:30 نشر `v0.1.0` فشل في خطوة release (ملف البصمات من Windows بنهايات CRLF فلم يطابق `grep ...exe$`؛ كل اختبارات Windows نجحت، run 44518461406). الإصلاح في فرع `fix/release-v0.1.1`: تطبيع CRLF + رفع الرقم إلى 0.1.1 (الوسم v0.1.0 يبقى بلا حذف). التالي: PR ← CI ← دمج ← وسم `v0.1.1`.
+- 15:55 ci-windows على PR #4 علق 25+ د في `video_jobs_end_to_end_with_the_fake_tool` (run 44522531035، أُلغي). السبب المرجح: فشل/انتظار ثم انتظار وقت إيقاف tokio لخيوط قراءة أنابيب على Windows. الإصلاح: الاختبار يفشل بمكانه بعد 300 ث ويحدّ إيقاف الـruntime بـ20 ث؛ و`drive` لا ينتظر stderr أكثر من 5 ث بعد خروج العملية.
