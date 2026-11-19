@@ -69,6 +69,10 @@ pub struct Job {
     pub kind: Kind,
     pub url: String,
     pub quality: String,
+    /// v0.2: what to do when the chosen height is missing (`lower` | `higher` | `skip`).
+    /// Jobs saved by v0.1 have none: `lower`, the v0.1 behaviour.
+    #[serde(default = "default_fallback")]
+    pub fallback: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items_sel: Option<Vec<u32>>,
     pub dir: PathBuf,
@@ -167,6 +171,22 @@ struct OnDisk {
 
 fn lock(m: &Mutex<Inner>) -> std::sync::MutexGuard<'_, Inner> {
     m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn default_fallback() -> String {
+    "lower".into()
+}
+
+/// v0.2 "if the quality is missing" values: [`eid_ipc::VIDEO_FALLBACKS`] only.
+pub fn check_fallback(f: &str) -> Result<(), String> {
+    if eid_ipc::VIDEO_FALLBACKS.contains(&f) {
+        Ok(())
+    } else {
+        Err(format!(
+            "if_missing must be one of {}",
+            eid_ipc::VIDEO_FALLBACKS.join(", ")
+        ))
+    }
 }
 
 /// Quality strings accepted everywhere (no 8K): [`eid_ipc::VIDEO_QUALITIES`].
@@ -275,8 +295,23 @@ impl VideoJobs {
         items: Option<Vec<u32>>,
         dir: Option<&Path>,
     ) -> Result<u64, String> {
+        self.add_with(kind, url, quality, "lower", items, dir)
+    }
+
+    /// [`Self::add`] with the v0.2 "if the quality is missing" choice (`lower` | `higher` |
+    /// `skip`, [`eid_ipc::VIDEO_FALLBACKS`]; the child `eid video` parses it again).
+    pub fn add_with(
+        &self,
+        kind: Kind,
+        url: &str,
+        quality: &str,
+        fallback: &str,
+        items: Option<Vec<u32>>,
+        dir: Option<&Path>,
+    ) -> Result<u64, String> {
         check_url(url)?;
         check_quality(quality)?;
+        check_fallback(fallback)?;
         if kind == Kind::Video && items.is_some() {
             return Err("items only apply to a playlist".into());
         }
@@ -300,6 +335,7 @@ impl VideoJobs {
             kind,
             url: url.to_owned(),
             quality: quality.to_owned(),
+            fallback: fallback.to_owned(),
             items_sel: items,
             dir,
             title: eid_engine::urlsafe::redact_text(url),
@@ -683,6 +719,10 @@ pub fn job_args(j: &Job) -> Vec<OsString> {
     a.push(j.dir.clone().into_os_string());
     a.push("--quality".into());
     a.push(j.quality.clone().into());
+    if j.fallback != "lower" {
+        a.push("--if-missing".into());
+        a.push(j.fallback.clone().into());
+    }
     if let Some(items) = &j.items_sel {
         let s: Vec<String> = items.iter().map(u32::to_string).collect();
         a.push("--items".into());
@@ -750,6 +790,7 @@ mod tests {
             kind,
             url: "https://www.youtube.com/playlist?list=PL1".into(),
             quality: "720p".into(),
+            fallback: "lower".into(),
             items_sel: Some(vec![1, 3]),
             dir: PathBuf::from("/d"),
             title: String::new(),
@@ -777,11 +818,34 @@ mod tests {
         assert!(a.windows(2).any(|w| w == ["--items", "1,3"]));
         assert!(a.windows(2).any(|w| w == ["--retry-failed", "all"]));
         assert!(a.windows(2).any(|w| w == ["--quality", "720p"]));
+        // "lower" is the default: not passed (v0.1 children understand the same arguments)
+        assert!(!a.iter().any(|x| x == "--if-missing"));
+        let mut j = job(Kind::Video);
+        j.fallback = "skip".into();
+        let a: Vec<String> = job_args(&j)
+            .into_iter()
+            .map(|s| s.into_string().unwrap())
+            .collect();
+        assert!(a.windows(2).any(|w| w == ["--if-missing", "skip"]));
         assert_eq!(a[a.len() - 2], "--");
         assert_eq!(
             a.last().unwrap(),
             "https://www.youtube.com/playlist?list=PL1"
         );
+    }
+
+    #[test]
+    fn a_v01_saved_job_without_a_fallback_loads_as_lower_and_bad_fallbacks_are_refused() {
+        let mut v = serde_json::to_value(job(Kind::Video)).unwrap();
+        v.as_object_mut().unwrap().remove("fallback");
+        let j: Job = serde_json::from_value(v).unwrap();
+        assert_eq!(j.fallback, "lower");
+        for ok in ["lower", "higher", "skip"] {
+            assert!(check_fallback(ok).is_ok());
+        }
+        for bad in ["", "any", "--exec", "Lower"] {
+            assert!(check_fallback(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

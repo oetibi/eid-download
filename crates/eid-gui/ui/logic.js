@@ -113,9 +113,9 @@ export function comparator(key, dir) {
 }
 
 /** Items of `store` shown for `view`, sorted. */
-export function buildView(store, view, key, dir) {
+export function buildView(store, view, key, dir, query = "") {
   const out = [];
-  for (const it of store.values()) if (inView(it, view)) out.push(it);
+  for (const it of store.values()) if (inView(it, view) && matchesQuery(it, query)) out.push(it);
   return out.sort(comparator(key, dir));
 }
 
@@ -188,4 +188,132 @@ export function jobFraction(job) {
 /** Parse a TOOLS_MISSING error from video_probe. */
 export function isToolsMissing(err) {
   return /^TOOLS_MISSING:/.test(String(err?.message ?? err ?? ""));
+}
+
+/**
+ * Segment map answer (`segments({ id })`, see segmap.rs) -> what the details window draws.
+ * Never trusts the shape: bad or missing fields give an empty map. `cells` are clamped to
+ * 0..100 and capped at 1000 entries; `rows` to 64.
+ */
+export function segmentView(m) {
+  const out = { source: "none", cells: [], rows: [], segments: 0, done: 0, total: null };
+  if (!m || typeof m !== "object") return out;
+  const src = ["checkpoint", "stream", "finished", "none"].includes(m.source) ? m.source : "none";
+  const num = (x) => (Number.isFinite(x) && x >= 0 ? x : 0);
+  out.source = src;
+  out.segments = num(m.segments);
+  out.done = num(m.done);
+  out.total = Number.isFinite(m.total) && m.total > 0 ? m.total : null;
+  if (src === "none") return out;
+  out.cells = (Array.isArray(m.cells) ? m.cells : []).slice(0, 1000).map((c) => Math.min(100, Math.max(0, Math.round(num(c)))));
+  out.rows = (Array.isArray(m.rows) ? m.rows : []).slice(0, 64).map((r, i) => {
+    const start = num(r?.start), end = Math.max(start, num(r?.end)), done = Math.min(num(r?.done), end - start);
+    return { n: i + 1, start, end, done, pct: end > start ? Math.floor((done / (end - start)) * 100) : 100 };
+  });
+  return out;
+}
+
+// ---------------------------------------------------------------- v0.2: search, columns, toolbar, drop, notices
+
+/** Search box: every word of `q` must appear in the name or the link (case-insensitive). */
+export function matchesQuery(it, q) {
+  const words = String(q ?? "").toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
+  if (!words.length) return true;
+  const hay = `${it.name ?? ""}\n${it.url ?? ""}`.toLowerCase();
+  return words.every((w) => hay.includes(w));
+}
+
+/** Table columns, in their default order. `min`/`def` widths in px; `name` is flexible by default. */
+export const COLUMNS = [
+  { key: "name", min: 120, def: null, fixed: true },
+  { key: "size", min: 60, def: 84 },
+  { key: "prog", min: 90, def: 140 },
+  { key: "status", min: 70, def: 108 },
+  { key: "speed", min: 60, def: 92 },
+  { key: "eta", min: 56, def: 74 },
+  { key: "url", min: 80, def: null },
+];
+const COL_MAX_W = 1200;
+
+/**
+ * Saved column layout (anything, e.g. JSON from localStorage) -> a complete, valid layout:
+ * every known column exactly once, unknown keys dropped, widths clamped, the name column
+ * always shown. Returns [{ key, on, w }] (w = null: default width).
+ */
+export function normalizeCols(saved) {
+  const byKey = new Map(COLUMNS.map((c) => [c.key, c]));
+  const out = [];
+  const seen = new Set();
+  for (const s of Array.isArray(saved) ? saved.slice(0, 32) : []) {
+    const c = byKey.get(s?.key);
+    if (!c || seen.has(c.key)) continue;
+    seen.add(c.key);
+    const w = Number.isFinite(s.w) ? Math.round(Math.min(COL_MAX_W, Math.max(c.min, s.w))) : null;
+    out.push({ key: c.key, on: c.fixed ? true : s.on !== false, w });
+  }
+  for (const c of COLUMNS) if (!seen.has(c.key)) out.push({ key: c.key, on: true, w: null });
+  return out;
+}
+
+/** CSS grid track list for the shown columns, in order. */
+export function gridTemplate(cols) {
+  const byKey = new Map(COLUMNS.map((c) => [c.key, c]));
+  return cols.filter((c) => c.on).map((c) => {
+    const d = byKey.get(c.key);
+    if (c.w != null) return `${c.w}px`;
+    if (d.def != null) return `${d.def}px`;
+    return c.key === "name" ? "minmax(160px, 3fr)" : "minmax(120px, 2fr)";
+  }).join(" ");
+}
+
+/** Move column `key` to the position of column `before` (or to the end if `before` is null). */
+export function moveCol(cols, key, before) {
+  const c = cols.find((x) => x.key === key);
+  if (!c || key === before) return cols;
+  const rest = cols.filter((x) => x.key !== key);
+  const i = before == null ? rest.length : rest.findIndex((x) => x.key === before);
+  rest.splice(i < 0 ? rest.length : i, 0, c);
+  return rest;
+}
+
+/** Toolbar buttons that can be hidden (the "Add" button always stays). */
+export const TOOLS = ["add_video", "resume", "pause", "pause_all", "remove", "clear_finished", "scheduler", "settings"];
+/** Saved toolbar choice -> { hidden: Set, labels: bool }. */
+export function normalizeToolbar(saved) {
+  const hidden = new Set((Array.isArray(saved?.hidden) ? saved.hidden : []).filter((k) => TOOLS.includes(k)));
+  return { hidden, labels: saved?.labels !== false };
+}
+
+/**
+ * Links in dropped or pasted text (text/uri-list or plain text): http(s) only, without
+ * duplicates, at most `max`. Comment lines of a uri-list (#...) are skipped.
+ */
+export function linksFromText(text, max = 200) {
+  const out = [];
+  const seen = new Set();
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    if (line.startsWith("#")) continue;
+    for (const m of line.matchAll(/https?:\/\/[^\s"'<>]+/gi)) {
+      const u = m[0].replace(/[),.;\]]+$/, "");
+      if (u.length > 4096 || seen.has(u)) continue;
+      seen.add(u);
+      out.push(u);
+      if (out.length >= max) return out;
+    }
+  }
+  return out;
+}
+
+/**
+ * Items that just finished or failed: compare the store BEFORE merging a `list` answer with the
+ * answer. Only items already known before (never the first list after start) are reported.
+ */
+export function finishedNow(store, resp) {
+  const out = [];
+  for (const it of Array.isArray(resp?.items) ? resp.items : []) {
+    const old = store.get(it.id);
+    if (!old || old.status === it.status) continue;
+    if (it.status === "done" || it.status === "failed") out.push({ id: it.id, name: it.name, status: it.status });
+  }
+  return out;
 }

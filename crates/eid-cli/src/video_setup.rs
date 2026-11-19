@@ -134,5 +134,6 @@ mod tests {
     #[test]
     fn ipc_and_media_quality_lists_are_the_same() {
         assert_eq!(eid_ipc::VIDEO_QUALITIES, eid_media::args::QUALITY_CHOICES);
+        assert_eq!(eid_ipc::VIDEO_FALLBACKS, eid_media::args::FALLBACK_CHOICES);
     }
 }

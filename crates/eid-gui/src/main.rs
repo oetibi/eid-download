@@ -4,7 +4,7 @@
 use eid_gui::app::{self, AppState, Boot};
 use eid_gui::video;
 use eid_platform::ui::{fatal_message, fatal_text};
-use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const TITLE: &str = "Eid Download";
 
@@ -50,6 +50,15 @@ fn main() {
             app::pick_folder,
             app::reveal,
             app::open_file,
+            app::segments,
+            app::tray_texts,
+            app::queues,
+            app::queue_set,
+            app::item_limit,
+            app::cancel_countdown,
+            app::categories,
+            app::import_list,
+            app::export_list,
             app::settings_get,
             app::settings_set,
             video::video_probe,
@@ -72,9 +81,26 @@ fn main() {
                 .title("Eid Download — عيد للتحميل")
                 .inner_size(1040.0, 680.0)
                 .min_inner_size(720.0, 460.0)
+                // links dragged onto the window reach the page as HTML drag-and-drop events
+                // (the page reads only http/https text; dropped files are refused there)
+                .disable_drag_drop_handler()
                 .build();
             match window {
-                Ok(_) => app::focus_on_show(&h),
+                Ok(_) => {
+                    app::focus_on_show(&h);
+                    // v0.2: "quit when finished" needs the app handle
+                    let _ = h.state::<AppState>().power.app.set(h.clone());
+                    // v0.2: tray icon (if on) and the clipboard watcher (idle unless on)
+                    let tray_on = h
+                        .state::<AppState>()
+                        .settings
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .tray;
+                    // an icon that cannot be created is not fatal: the window works without it
+                    let _ = eid_gui::desktop::set_tray(&h, tray_on);
+                    eid_gui::desktop::watch_clipboard(&h);
+                }
                 // e.g. WebView2 missing: say so, then exit through RunEvent::Exit, which stops
                 // the downloads cleanly and writes the queue
                 Err(e) => {
@@ -83,6 +109,15 @@ fn main() {
                 }
             }
             Ok(())
+        })
+        .on_window_event(|w, ev| {
+            // v0.2 close to tray: hide instead of quitting (only while the icon is there)
+            if let WindowEvent::CloseRequested { api, .. } = ev {
+                if w.label() == "main" && eid_gui::desktop::hide_on_close(w.app_handle()) {
+                    api.prevent_close();
+                    let _ = w.hide();
+                }
+            }
         })
         .build(tauri::generate_context!());
     let built = match built {

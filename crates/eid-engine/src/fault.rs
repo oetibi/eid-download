@@ -92,17 +92,29 @@ mod imp {
     /// Test hook: after `skip` successful calls of [`fail`] with this `name`, the next `times`
     /// calls return a `PermissionDenied` error (an antivirus/indexer holding a file).
     /// Process-global.
+    /// Arm ONE fail point (any previously armed points are disarmed).
     pub fn set_fail_point(name: &str, skip: u32, times: u32) {
-        *FAIL_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some((name.to_string(), skip, times));
+        *FAIL_AT.lock().unwrap_or_else(|e| e.into_inner()) = vec![(name.to_string(), skip, times)];
     }
-    static FAIL_AT: std::sync::Mutex<Option<(String, u32, u32)>> = std::sync::Mutex::new(None);
+    /// v0.2: arm one more fail point next to those already armed (two failures in one run).
+    pub fn add_fail_point(name: &str, skip: u32, times: u32) {
+        FAIL_AT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((name.to_string(), skip, times));
+    }
+    #[allow(clippy::type_complexity)]
+    static FAIL_AT: std::sync::Mutex<Vec<(String, u32, u32)>> = std::sync::Mutex::new(Vec::new());
     /// An injectable I/O error at a named point (`Ok` unless a test armed it).
     pub fn fail(name: &str) -> std::io::Result<()> {
         let mut g = FAIL_AT.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((n, skip, times)) = g.as_mut() {
-            if n == name && *skip > 0 {
+        for (n, skip, times) in g.iter_mut() {
+            if n != name {
+                continue;
+            }
+            if *skip > 0 {
                 *skip -= 1;
-            } else if n == name && *times > 0 {
+            } else if *times > 0 {
                 *times -= 1;
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -151,6 +163,8 @@ mod imp {
     #[inline(always)]
     pub fn set_fail_point(_name: &str, _skip: u32, _times: u32) {}
     #[inline(always)]
+    pub fn add_fail_point(_name: &str, _skip: u32, _times: u32) {}
+    #[inline(always)]
     pub fn fail(_name: &str) -> std::io::Result<()> {
         Ok(())
     }
@@ -166,6 +180,6 @@ mod imp {
 }
 
 pub use imp::{
-    coordinator_iteration, drain_iterations, fail, hit, jitter, set_fail_point, set_jitter,
-    set_panic_point, set_pause_point,
+    add_fail_point, coordinator_iteration, drain_iterations, fail, hit, jitter, set_fail_point,
+    set_jitter, set_panic_point, set_pause_point,
 };

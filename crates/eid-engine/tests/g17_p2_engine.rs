@@ -430,3 +430,106 @@ async fn stopping_the_queue_mid_download_and_reopening_resumes_from_the_frontier
         vec!["big.bin".to_string(), "small.bin".to_string()]
     );
 }
+
+/// v0.2 per-download limit: the limited item takes about size/limit; an unlimited one next to
+/// it does not; a bad limit in the file is refused on load. Both files are bit-exact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_per_download_speed_limit_slows_only_that_download() {
+    let srv = TestServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let len: u64 = 768 << 10; // 768 KiB
+    for p in ["/lim.bin", "/free.bin"] {
+        srv.add(
+            p,
+            Content::Generated { seed: 77, len },
+            Behavior::well_behaved(),
+        );
+    }
+    let qpath = dir.path().join("queues.json");
+    let mut qs = QueueSet::default();
+    let mut q = Queue::new("main", dir.path().join("dl").to_str().unwrap());
+    q.max_parallel = 2;
+    qs.queues.push(q);
+    let lim = qs
+        .add_item(
+            "main",
+            &format!("{}/lim.bin", srv.base_url()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let free = qs
+        .add_item(
+            "main",
+            &format!("{}/free.bin", srv.base_url()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let it = qs.queues[0].items.iter_mut().find(|i| i.id == lim).unwrap();
+    it.limit_kib = Some(256); // 768 KiB at 256 KiB/s = 3 s
+    save_queues(&qpath, &qs).unwrap();
+    let starts: Arc<Mutex<Vec<(u64, std::time::Instant)>>> = Arc::default();
+    let ends: Arc<Mutex<Vec<(u64, std::time::Instant)>>> = Arc::default();
+    let (st, en) = (starts.clone(), ends.clone());
+    let s = Scheduler::open(
+        SchedulerConfig::new(&qpath),
+        Arc::new(EngineRunner::new(real_cfg())),
+        Arc::new(SystemClock),
+        Arc::new(NoPower),
+        Arc::new(move |e| match e {
+            QueueEvent::ItemStarted { item, .. } => {
+                st.lock().unwrap().push((item, std::time::Instant::now()))
+            }
+            QueueEvent::ItemDone { item, .. } => {
+                en.lock().unwrap().push((item, std::time::Instant::now()))
+            }
+            _ => {}
+        }),
+    )
+    .unwrap();
+    s.run(CancellationToken::new(), true).await.unwrap();
+    let took = |id: u64| {
+        let a = starts.lock().unwrap().iter().find(|x| x.0 == id).unwrap().1;
+        let b = ends.lock().unwrap().iter().find(|x| x.0 == id).unwrap().1;
+        b - a
+    };
+    assert!(
+        took(lim) >= Duration::from_millis(2200),
+        "limited took {:?}",
+        took(lim)
+    );
+    assert!(
+        took(free) < Duration::from_millis(1500),
+        "unlimited took {:?}",
+        took(free)
+    );
+    let done = load_queues(&qpath).unwrap();
+    let want = Content::Generated { seed: 77, len }.sha256_hex();
+    for it in &done.queues[0].items {
+        assert_eq!(it.status, Status::Done);
+        let name = it.file_name.as_ref().unwrap();
+        assert_eq!(
+            sha_of_file(&dir.path().join("dl").join(name)),
+            want,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        done.queues[0]
+            .items
+            .iter()
+            .find(|i| i.id == lim)
+            .unwrap()
+            .limit_kib,
+        Some(256)
+    );
+    // a limit of 0 or above the cap in the file is refused (never "unlimited by accident")
+    for bad in [0, eid_engine::queue::MAX_ITEM_LIMIT_KIB + 1] {
+        let mut q2 = done.clone();
+        q2.queues[0].items[0].limit_kib = Some(bad);
+        assert!(q2.validate().is_err(), "{bad}");
+    }
+}

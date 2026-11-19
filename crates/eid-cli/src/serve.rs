@@ -186,18 +186,25 @@ pub fn handler_with_video(
             let rt = tokio::runtime::Handle::try_current().map_err(|e| e.to_string())?;
             rt.block_on(v.probe(&url))
         }
-        Command::AddVideo { url, quality } => {
+        Command::AddVideo {
+            url,
+            quality,
+            if_missing,
+        } => {
             let v = video.as_ref().ok_or("video is not available here")?;
-            let job = v.add(Kind::Video, &url, &quality, None, None)?;
+            let f = if_missing.as_deref().unwrap_or("lower");
+            let job = v.add_with(Kind::Video, &url, &quality, f, None, None)?;
             Ok(json!({"job": job}))
         }
         Command::AddPlaylist {
             url,
             quality,
             items,
+            if_missing,
         } => {
             let v = video.as_ref().ok_or("video is not available here")?;
-            let job = v.add(Kind::Playlist, &url, &quality, items, None)?;
+            let f = if_missing.as_deref().unwrap_or("lower");
+            let job = v.add_with(Kind::Playlist, &url, &quality, f, items, None)?;
             Ok(json!({"job": job}))
         }
         Command::Ping {} => {

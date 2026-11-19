@@ -645,3 +645,54 @@ async fn header_delay_withholds_headers_then_serves_only_the_selected_requests()
         t.elapsed()
     );
 }
+
+#[tokio::test]
+async fn connect_delay_applies_once_per_new_connection() {
+    let s = fixture(Behavior::default()).await;
+    // off by default
+    let t = Instant::now();
+    body(&request(&s, "GET", "").await, DATA);
+    assert!(
+        t.elapsed() < Duration::from_millis(250),
+        "{:?}",
+        t.elapsed()
+    );
+    s.set_connect_delay(Duration::from_millis(300));
+    // a new connection waits before its first request is answered
+    let t = Instant::now();
+    body(&request(&s, "GET", "").await, DATA);
+    assert!(
+        t.elapsed() >= Duration::from_millis(280),
+        "{:?}",
+        t.elapsed()
+    );
+    // a second request on the same (keep-alive) connection does not wait again
+    let mut socket = connect(&s).await;
+    let get = b"GET /f HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    let mut buf = vec![0u8; 4096];
+    socket.write_all(get).await.unwrap();
+    let mut got = 0;
+    while !String::from_utf8_lossy(&buf[..got]).contains("\r\n\r\n") || got < DATA.len() {
+        let n = timeout(Duration::from_secs(5), socket.read(&mut buf[got..]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n > 0, "closed early");
+        got += n;
+        if got > DATA.len() + 200 {
+            break;
+        }
+    }
+    let t = Instant::now();
+    socket.write_all(get).await.unwrap();
+    let n = timeout(Duration::from_secs(5), socket.read(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(n > 0);
+    assert!(
+        t.elapsed() < Duration::from_millis(250),
+        "reused connection waited {:?}",
+        t.elapsed()
+    );
+}

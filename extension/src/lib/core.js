@@ -258,6 +258,12 @@
         if (!validHttpUrl(action.url)) throw new Error("bad_url");
         if (!isPolicyQuality(action.quality)) throw new Error("bad_quality");
         command = { cmd: "add_playlist", url: action.url, quality: action.quality };
+        // v0.2: sent only when not the default, so an older app (which knows no such field)
+        // still accepts the usual request
+        if (action.if_missing !== undefined && action.if_missing !== null) {
+          if (IF_MISSING.indexOf(action.if_missing) === -1) throw new Error("bad_if_missing");
+          if (action.if_missing !== "lower" && /^\d+p$/.test(action.quality)) command.if_missing = action.if_missing;
+        }
         if (action.items !== undefined && action.items !== null) {
           const it = action.items;
           if (!Array.isArray(it) || it.length === 0 || it.length > MAX_ITEMS) {
@@ -352,7 +358,9 @@
     opacity: 0.92, // 0.3..1
     visibility: "hover", // "hover" | "always"
     excludedSites: [], // host names; "example.com" also excludes sub-domains
+    ifMissing: "lower", // v0.2, playlists: "lower" | "higher" | "skip" when an item lacks the quality
   });
+  const IF_MISSING = ["lower", "higher", "skip"];
 
   function clamp(n, lo, hi, dflt) {
     if (typeof n !== "number" || !Number.isFinite(n)) return dflt;
@@ -405,6 +413,7 @@
       opacity: Math.round(clamp(o.opacity, 0.3, 1, d.opacity) * 100) / 100,
       visibility: oneOf(o.visibility, ["hover", "always"], d.visibility),
       excludedSites: hosts,
+      ifMissing: oneOf(o.ifMissing, IF_MISSING, d.ifMissing),
     };
   }
 

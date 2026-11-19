@@ -36,6 +36,7 @@ fn main() {
                 attempts: 0,
                 not_before: None,
                 last_error: None,
+                limit_kib: None,
             });
         }
         let qs = QueueSet {

@@ -29,6 +29,7 @@
     <symbol id="i-doc" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM9 12h6M9 16h6"/></symbol>
     <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="16" r="2"/></symbol>
     <symbol id="i-app" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></symbol>
     <symbol id="i-image" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 16l5-5 4 4 2-2 5 5"/></symbol>
   </svg>
 
@@ -61,10 +62,17 @@
       <button type="button" role="menuitem" data-cmd="select_all"><span data-t="c_select_all"></span><kbd>Ctrl+A</kbd></button>
       <button type="button" role="menuitem" data-cmd="properties"><span data-t="c_properties"></span><kbd>Enter</kbd></button>
       <button type="button" role="menuitem" data-cmd="scheduler"><span data-t="c_scheduler"></span></button>
+      <button type="button" role="menuitem" data-cmd="queues"><span data-t="c_queues"></span></button>
+      <hr>
+      <button type="button" role="menuitem" data-cmd="import_list"><span data-t="c_import"></span></button>
+      <button type="button" role="menuitem" data-cmd="export_list"><span data-t="c_export"></span></button>
     </div>
     <div class="menu" id="menu-view" role="menu" hidden>
       <button type="button" role="menuitem" data-cmd="toggle_sidebar"><span data-t="c_toggle_sidebar"></span></button>
       <button type="button" role="menuitem" data-cmd="view_jobs"><span data-t="c_view_jobs"></span></button>
+      <button type="button" role="menuitem" data-cmd="columns"><span data-t="c_columns"></span></button>
+      <button type="button" role="menuitem" data-cmd="customize_toolbar"><span data-t="c_customize_toolbar"></span></button>
+      <button type="button" role="menuitem" data-cmd="find"><span data-t="c_find"></span><kbd>Ctrl+F</kbd></button>
       <hr>
       <button type="button" role="menuitemradio" data-cmd="theme_system"><span data-t="c_theme_system"></span></button>
       <button type="button" role="menuitemradio" data-cmd="theme_light"><span data-t="c_theme_light"></span></button>
@@ -90,6 +98,8 @@
       <span class="sep"></span>
       <button type="button" class="tool" data-cmd="scheduler"><svg class="ic"><use href="#i-clock"/></svg><span data-t="t_scheduler"></span></button>
       <button type="button" class="tool" data-cmd="settings"><svg class="ic"><use href="#i-gear"/></svg><span data-t="t_settings"></span></button>
+      <span class="grow"></span>
+      <div class="search"><svg class="ic"><use href="#i-search"/></svg><input id="search" type="search" dir="auto" autocomplete="off" spellcheck="false" maxlength="200"></div>
     </div>
 
     <div class="body">
@@ -148,6 +158,16 @@
       </main>
     </div>
 
+    <div id="powerbar" class="powerbar" role="alert" hidden>
+      <span id="power-text"></span>
+      <button type="button" id="power-cancel" class="primary small" data-t="cancel"></button>
+    </div>
+    <div id="clipbar" class="clipbar" role="status" hidden>
+      <span data-t="clip_found"></span>
+      <bdi id="clip-url" dir="ltr"></bdi>
+      <button type="button" id="clip-add" class="primary small" data-t="clip_add"></button>
+      <button type="button" id="clip-ignore" class="ghost small" data-t="clip_ignore"></button>
+    </div>
     <footer class="statusbar" id="statusbar">
       <span id="sb-active"></span>
       <span id="sb-speed"></span>
@@ -170,7 +190,43 @@
     <button type="button" role="menuitem" data-cmd="properties"><span data-t="c_properties"></span><kbd>Enter</kbd></button>
   </div>
 
+  <div class="menu" id="menu-cols" role="menu" hidden></div>
+  <div id="drop" class="drop" hidden><p data-t="drop_hint"></p></div>
   <div id="toast" class="toast" role="status" hidden></div>
+
+  <dialog id="dlg-queues">
+    <form method="dialog" class="queues">
+      <h2 data-t="c_queues"></h2>
+      <p class="note" data-t="q_lead"></p>
+      <div id="q-list" class="q-list"></div>
+      <p id="q-error" class="error" hidden></p>
+      <template id="q-row">
+        <div class="q-row">
+          <div class="q-head"><strong class="q-name"></strong><bdi class="q-dir" dir="ltr"></bdi><span class="q-counts note"></span></div>
+          <div class="row">
+            <label data-t="s_parallel"></label><input class="q-par" type="number" min="1" max="8" step="1">
+            <label data-t="q_after"></label><select class="q-after"><option value="none" data-t="ad_none"></option><option value="exit" data-t="ad_exit"></option><option value="sleep" data-t="ad_sleep"></option><option value="hibernate" data-t="ad_hibernate"></option><option value="shutdown" data-t="ad_shutdown"></option></select>
+            <button type="button" class="q-save small" data-t="save"></button>
+            <button type="button" class="q-toggle small"></button>
+          </div>
+        </div>
+      </template>
+      <div class="buttons"><button type="submit" class="primary" data-t="close"></button></div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-toolbar">
+    <form method="dialog">
+      <h2 data-t="c_customize_toolbar"></h2>
+      <p class="note" data-t="tb_lead"></p>
+      <div id="tb-list" class="checks"></div>
+      <label class="check"><input id="tb-labels" type="checkbox"><span data-t="tb_labels"></span></label>
+      <div class="buttons">
+        <button type="button" id="tb-reset" class="ghost" data-t="reset"></button>
+        <button type="submit" class="primary" data-t="close"></button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="dlg-add">
     <form id="form-add" method="dialog">
@@ -187,6 +243,10 @@
       </div>
       <label for="in-name" data-t="name_label"></label>
       <input id="in-name" type="text" dir="auto" maxlength="200" autocomplete="off">
+      <div class="row two">
+        <label><span data-t="add_queue"></span><select id="in-queue"></select></label>
+        <label><span data-t="add_cat"></span><select id="in-cat"></select></label>
+      </div>
       <p id="add-error" class="error" hidden></p>
       <div class="buttons">
         <button type="button" id="btn-cancel" class="ghost" data-t="cancel"></button>
@@ -209,7 +269,23 @@
         <dt data-t="folder_label"></dt><dd><bdi id="p-folder" dir="ltr" class="wrap"></bdi></dd>
       </dl>
       <p id="p-error" class="error" hidden></p>
-      <p class="note" data-t="p_segments_note"></p>
+      <div class="row limit-row">
+        <label for="p-limit" data-t="p_limit"></label>
+        <input id="p-limit" type="number" min="0" max="12500000" step="1" dir="ltr">
+        <button type="button" id="p-limit-set" class="small" data-t="apply"></button>
+      </div>
+      <p class="note" data-t="p_limit_note"></p>
+      <section class="segmap" aria-labelledby="p-map-title">
+        <h3 id="p-map-title" data-t="p_map"></h3>
+        <canvas id="p-map" class="map" width="480" height="22" dir="ltr" role="img"></canvas>
+        <p id="p-map-info" class="note"></p>
+        <div class="segs-wrap" id="p-segs-wrap" hidden>
+          <table class="segs" id="p-segs" dir="ltr">
+            <thead><tr><th>#</th><th data-t="seg_from"></th><th data-t="seg_to"></th><th data-t="seg_saved"></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
       <div class="buttons">
         <button type="button" id="p-copy" class="ghost" data-t="c_copy_link"></button>
         <button type="button" id="p-reveal" data-t="c_reveal"></button>
@@ -226,6 +302,7 @@
         <button type="button" role="tab" data-tab="general" class="on" data-t="s_general"></button>
         <button type="button" role="tab" data-tab="downloads" data-t="s_downloads"></button>
         <button type="button" role="tab" data-tab="video" data-t="s_video"></button>
+        <button type="button" role="tab" data-tab="desktop" data-t="s_desktop"></button>
       </div>
       <div class="tab" data-pane="general">
         <label for="set-lang" data-t="s_language"></label>
@@ -236,6 +313,7 @@
           <option value="light" data-t="c_theme_light"></option>
           <option value="dark" data-t="c_theme_dark"></option>
         </select>
+        <label class="check"><input id="set-notify" type="checkbox"><span data-t="s_notify"></span></label>
       </div>
       <div class="tab" data-pane="downloads" hidden>
         <label data-t="s_default_folder"></label>
@@ -245,6 +323,7 @@
           <button type="button" id="set-folder-reset" class="ghost" data-t="reset_folder"></button>
         </div>
         <p class="note" data-t="s_default_folder_note"></p>
+        <label class="check"><input id="set-autocat" type="checkbox"><span data-t="s_autocat"></span></label>
         <fieldset id="set-engine">
           <legend data-t="s_engine"></legend>
           <label for="set-parallel" data-t="s_parallel"></label>
@@ -258,9 +337,23 @@
           <button type="button" id="set-engine-save" data-t="save"></button>
         </fieldset>
       </div>
+      <div class="tab" data-pane="desktop" hidden>
+        <fieldset id="set-desktop">
+          <legend data-t="s_desktop"></legend>
+          <label class="check"><input id="set-tray" type="checkbox"><span data-t="s_tray"></span></label>
+          <label class="check"><input id="set-close-tray" type="checkbox"><span data-t="s_close_tray"></span></label>
+          <label class="check"><input id="set-clipboard" type="checkbox"><span data-t="s_clipboard"></span></label>
+          <p class="note" data-t="s_clipboard_note"></p>
+          <label class="check"><input id="set-power" type="checkbox"><span data-t="s_power"></span></label>
+          <p class="note" data-t="s_power_note"></p>
+          <p id="set-desktop-error" class="error" hidden></p>
+        </fieldset>
+      </div>
       <div class="tab" data-pane="video" hidden>
         <label for="set-quality" data-t="s_default_quality"></label>
         <select id="set-quality"></select>
+        <label for="set-missing" data-t="vd_missing"></label>
+        <select id="set-missing"><option value="lower" data-t="fb_lower"></option><option value="higher" data-t="fb_higher"></option><option value="skip" data-t="fb_skip"></option></select>
         <label data-t="s_tools"></label>
         <p id="set-tools" class="note"></p>
         <button type="button" id="set-tools-install" hidden data-t="v_install"></button>
@@ -290,6 +383,10 @@
         <label for="v-quality" data-t="vd_quality"></label>
         <select id="v-quality"></select>
         <p id="v-got-note" class="note" data-t="vd_quality_note"></p>
+        <div id="v-missing-row" hidden>
+          <label for="v-missing" data-t="vd_missing"></label>
+          <select id="v-missing"><option value="lower" data-t="fb_lower"></option><option value="higher" data-t="fb_higher"></option><option value="skip" data-t="fb_skip"></option></select>
+        </div>
         <div id="v-playlist" hidden>
           <div class="row between">
             <strong id="v-count"></strong>

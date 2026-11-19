@@ -81,9 +81,16 @@ export function mockApi(params = new URLSearchParams()) {
   const jobs = [];
   let nextJob = 1;
   let toolsInstalled = params.get("notools") !== "1";
-  let engineSettings = { max_parallel: 3, connections: 8, speed_limit_kib: 0, schedule: null };
+  let engineSettings = { max_parallel: 3, connections: 8, speed_limit_kib: 0, schedule: null, tray: true, close_to_tray: false, clipboard: false, power_actions: false };
+  // events the Rust side would emit (tray menu, clipboard); tests trigger them
+  const listeners = new Map();
+  window.__eidMockEmit = (name, payload) => { for (const f of listeners.get(name) ?? []) f(payload); };
+  let trayTexts = null;
+  window.__eidMockTrayTexts = () => trayTexts;
   const opened = [];
   window.__eidMockOpened = opened;
+  // test hook (mock only): change an item as if the engine did, e.g. finish or fail it
+  window.__eidMockSet = (id, patch) => touch({ ...find(id), ...patch });
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   function jobTick() {
     for (const j of jobs) {
@@ -105,6 +112,14 @@ export function mockApi(params = new URLSearchParams()) {
   setInterval(jobTick, 500);
   const job = (id) => { const j = jobs.find((x) => x.job === id); if (!j) throw "no_such_job"; return j; };
 
+  // v0.2 queues + "when finished" (a stand-in; the real countdown is the engine's)
+  const queues = [{ name: "main", dir: DIR, max_parallel: 3, paused: false, after_done: "none" }, { name: "folder-1", dir: "D:\\Apps", max_parallel: 2, paused: false, after_done: "none" }];
+  const power = { countdown: null, last: null };
+  window.__eidMockCountdown = (secs, action) => { power.countdown = secs ? [secs, action] : null; };
+  const limits = new Map();
+  const warnings = [];
+  window.__eidMockWarn = (id, text) => warnings.push([id, text]);
+  window.__eidMockLimit = (id) => limits.get(id);
   const handlers = {
     list: ({ since }) => {
       tick();
@@ -113,9 +128,16 @@ export function mockApi(params = new URLSearchParams()) {
       const tooOld = since == null || since < rev - 100000 || (removed.length && since < removed[0][0] - 1 && removed.length >= 2000);
       if (tooOld) return { rev, full: true, items: sorted(), removed: [], default_dir: DIR };
       const changed = [...items.values()].filter((e) => e.rev > since).map((e) => e.item);
-      return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR };
+      const pw = { ...power }; power.last = null;
+      const ws = warnings.splice(0);
+      return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR, power: pw, warnings: ws };
     },
-    add: ({ links, name, folder }) => {
+    categories: () => ["Compressed", "Documents", "Music", "Video", "Pictures", "Programs"],
+    import_list: () => { const r = window.__eidMockImport ?? null; if (r) for (const u of r.urls) touch(mk({ name: u.split("/").pop(), url: u })); return r && { added: r.urls.length, refused: r.refused ?? 0, duplicates: 0, credentials_dropped: 0 }; },
+    export_list: () => (window.__eidMockExportCancel ? null : items.size),
+    add: ({ links, name, folder, category }) => {
+      if (category != null && !["none", "auto", "Compressed", "Documents", "Music", "Video", "Pictures", "Programs"].includes(category)) throw "bad_category";
+      window.__eidMockLastAdd = { folder, category };
       const ls = String(links).split(/\s+/).filter(Boolean);
       if (!ls.length) throw "no_links";
       if (ls.length > 200) throw "too_many_links";
@@ -148,9 +170,49 @@ export function mockApi(params = new URLSearchParams()) {
       if (/\.(exe|msi|bat|cmd|ps1|js|vbs|scr|lnk)$/i.test(it.name ?? "")) throw "refused_executable";
       opened.push(id);
     },
+    segments: ({ id }) => {
+      const it = find(id);
+      const r = it.rate;
+      if (it.status === "done") return { source: "finished", total: r?.total ?? null, done: r?.total ?? 0, segments: 0, cells: Array(120).fill(100), rows: [] };
+      if (!r || !r.total) return { source: "none", total: null, done: 0, segments: 0, cells: [], rows: [] };
+      // 8 equal segments, each saved from its start up to the item's fraction (a stand-in)
+      const S = 8, seg = Math.floor(r.total / S), f = r.done / r.total;
+      const rows = Array.from({ length: S }, (_, k) => {
+        const start = k * seg, end = k === S - 1 ? r.total : (k + 1) * seg;
+        return { start, end, done: Math.floor((end - start) * Math.min(1, f * (1 + (k % 3) * 0.2))) };
+      });
+      const cells = Array.from({ length: 120 }, (_, c) => {
+        const k = Math.min(S - 1, Math.floor((c / 120) * S)), row = rows[k];
+        const pos = (c / 120) * r.total;
+        const savedEnd = row.start + row.done;
+        return pos + r.total / 120 <= savedEnd ? 100 : pos >= savedEnd ? 0 : 50;
+      });
+      return { source: "checkpoint", total: r.total, done: rows.reduce((a, x) => a + x.done, 0), segments: S, cells, rows };
+    },
+    queues: () => queues.map((q) => {
+      const its = [...items.values()].map((e) => e.item).filter((i) => (q.name === "main" ? i.folder !== "D:\\Apps" : i.folder === "D:\\Apps"));
+      return { ...q, total: its.length, done: its.filter((i) => i.status === "done").length, running: its.filter((i) => i.status === "running").length, failed: its.filter((i) => i.status === "failed").length };
+    }),
+    queue_set: ({ patch }) => {
+      const keys = ["name", "max_parallel", "paused", "after_done"];
+      if (!patch || Object.keys(patch).some((k) => !keys.includes(k))) throw "invalid input: unknown field";
+      const q = queues.find((x) => x.name === patch.name);
+      if (!q) throw "no_such_queue";
+      if (patch.max_parallel != null && !(patch.max_parallel >= 1 && patch.max_parallel <= 8)) throw "invalid input: max_parallel";
+      if (patch.after_done != null && !["none", "exit", "sleep", "hibernate", "shutdown"].includes(patch.after_done)) throw "invalid input: after_done";
+      if (["sleep", "hibernate", "shutdown"].includes(patch.after_done) && !engineSettings.power_actions) throw "power_actions_off";
+      Object.assign(q, Object.fromEntries(Object.entries(patch).filter(([k, v]) => k !== "name" && v != null)));
+    },
+    item_limit: ({ id, limit_kib }) => {
+      find(id);
+      if (limit_kib != null && !(Number.isInteger(limit_kib) && limit_kib >= 1 && limit_kib <= 12500000)) throw "invalid input: speed limit";
+      limits.set(id, limit_kib);
+      touch({ ...find(id), limit_kib });
+    },
+    cancel_countdown: () => { const had = !!power.countdown; power.countdown = null; if (had) { power.last = "cancelled"; for (const q of queues) q.after_done = "none"; } return had; },
     settings_get: () => ({ ...engineSettings }),
     settings_set: ({ settings: s }) => {
-      const keys = ["max_parallel", "connections", "speed_limit_kib", "schedule"];
+      const keys = ["max_parallel", "connections", "speed_limit_kib", "schedule", "tray", "close_to_tray", "clipboard", "power_actions"];
       if (Object.keys(s).some((k) => !keys.includes(k))) throw "invalid input: unknown field";
       if (!(s.max_parallel >= 1 && s.max_parallel <= 8)) throw "invalid input: max_parallel 1..8";
       if (!(s.connections >= 1 && s.connections <= 32)) throw "invalid input: connections 1..32";
@@ -183,8 +245,10 @@ export function mockApi(params = new URLSearchParams()) {
       jobs.unshift(j);
       return { job: j.job };
     },
-    playlist_add: ({ url, quality, items: pick }) => {
+    playlist_add: ({ url, quality, items: pick, if_missing }) => {
       if (!["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"].includes(quality)) throw "bad_quality";
+      if (if_missing != null && !["lower", "higher", "skip"].includes(if_missing)) throw "invalid input: if_missing";
+      window.__eidMockLastPlaylist = { url, quality, if_missing };
       const count = /big/.test(url) ? 300 : 12;
       const idx = pick ?? Array.from({ length: count }, (_, i) => i + 1);
       const its = idx.map((i) => ({ index: i, title: i === 5 ? "الدرس 5 (will fail once)" : `Lesson ${i}`, state: "queued", progress: 0 }));
@@ -202,7 +266,13 @@ export function mockApi(params = new URLSearchParams()) {
     },
     video_remove: ({ job: id }) => { const j = job(id); if (j.state === "running") throw "pause_first"; jobs.splice(jobs.indexOf(j), 1); },
   };
+  handlers.tray_texts = ({ texts }) => {
+    const k = ["show", "pause_all", "resume_all", "quit"];
+    if (!texts || Object.keys(texts).some((x) => !k.includes(x)) || k.some((x) => !texts[x])) throw "invalid input: texts";
+    trayTexts = { ...texts };
+  };
   return {
+    on: (name, f) => { if (!listeners.has(name)) listeners.set(name, []); listeners.get(name).push(f); },
     call: async (cmd, args) => {
       const h = handlers[cmd];
       if (!h) throw `Command ${cmd} not found`;

@@ -25,6 +25,26 @@ pub struct GuiSettings {
     /// Scheduler: only start/run downloads inside this daily window (`None` = any time).
     #[serde(default)]
     pub schedule: Option<Window>,
+    /// v0.2: an icon in the Windows notification area (show, pause/resume all, quit).
+    #[serde(default = "on")]
+    pub tray: bool,
+    /// v0.2: closing the window hides it to the notification area instead of quitting
+    /// (only while the icon is shown).
+    #[serde(default)]
+    pub close_to_tray: bool,
+    /// v0.2: offer to download a link copied to the clipboard (off by default, REQUIREMENTS
+    /// F9). The clipboard text is never stored or logged.
+    #[serde(default)]
+    pub clipboard: bool,
+    /// v0.2 (owner decision 2026-11-19): sleep / hibernate / shut down after the downloads are
+    /// OFF unless the user turns them on here; while off they are refused everywhere (quitting
+    /// the app is always allowed).
+    #[serde(default)]
+    pub power_actions: bool,
+}
+
+fn on() -> bool {
+    true
 }
 
 impl Default for GuiSettings {
@@ -34,6 +54,10 @@ impl Default for GuiSettings {
             connections: 8,
             speed_limit_kib: 0,
             schedule: None,
+            tray: true,
+            close_to_tray: false,
+            clipboard: false,
+            power_actions: false,
         }
     }
 }
@@ -104,6 +128,21 @@ mod tests {
     use eid_engine::queue::Queue;
 
     #[test]
+    fn a_v01_settings_file_loads_with_tray_on_and_clipboard_off() {
+        let v01 = r#"{"max_parallel":2,"connections":16,"speed_limit_kib":0,"schedule":null}"#;
+        let s: GuiSettings = serde_json::from_str(v01).unwrap();
+        assert_eq!((s.max_parallel, s.connections), (2, 16));
+        assert!(s.tray && !s.close_to_tray && !s.clipboard && !s.power_actions);
+        let d = GuiSettings::default();
+        assert!(d.tray && !d.close_to_tray && !d.clipboard && !d.power_actions);
+        // still strict about unknown fields
+        assert!(serde_json::from_str::<GuiSettings>(
+            r#"{"max_parallel":2,"connections":16,"speed_limit_kib":0,"evil":1}"#
+        )
+        .is_err());
+    }
+
+    #[test]
     fn defaults_are_valid_and_bounds_are_enforced() {
         let d = GuiSettings::default();
         assert!(d.validate().is_ok());
@@ -171,6 +210,10 @@ mod tests {
                 end_min: 7 * 60,
                 weekdays: Window::ALL_DAYS,
             }),
+            tray: false,
+            close_to_tray: true,
+            clipboard: true,
+            power_actions: true,
         };
         save(&p, &s).unwrap();
         assert_eq!(load(&p), s);

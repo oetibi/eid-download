@@ -8,13 +8,14 @@
 import { TEXT } from "./i18n.js";
 import {
   ACTIVE, BUSY, CATEGORIES, mergeList, buildView, inView, categoryOf, fraction, clickSelect,
-  pollDelay, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing,
+  pollDelay, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
+  COLUMNS, TOOLS, normalizeCols, gridTemplate, moveCol, normalizeToolbar, linksFromText, finishedNow,
 } from "./logic.js";
 
 const tauri = window.__TAURI__;
 const usingMock = !tauri;
 const api = tauri
-  ? { call: (cmd, args) => tauri.core.invoke(cmd, args) }
+  ? { call: (cmd, args) => tauri.core.invoke(cmd, args), on: (name, f) => tauri.event.listen(name, (e) => f(e.payload)) }
   : (await import("./mock.js")).mockApi(new URLSearchParams(location.search));
 
 const $ = (s) => document.querySelector(s);
@@ -29,6 +30,8 @@ const settings = {
   folder: localStorage.getItem("folder") || null,
   quality: localStorage.getItem("quality") || "best",
   sidebar: localStorage.getItem("sidebar") !== "off",
+  notify: localStorage.getItem("notify") !== "off",
+  missing: ["lower", "higher", "skip"].includes(localStorage.getItem("missing")) ? localStorage.getItem("missing") : "lower",
 };
 function saveSetting(k, v) {
   settings[k] = v;
@@ -56,6 +59,7 @@ let anchor = null;
 let cursor = null; // keyboard focus row id
 let propsId = null;
 let pickedFolder = null;
+let query = "";
 let jobs = [];
 let jobsAvailable = true;
 let jobsRetryAt = 0;
@@ -103,9 +107,12 @@ function applyLang() {
   d.lang = settings.lang;
   d.dir = settings.lang === "ar" ? "rtl" : "ltr";
   document.title = t("app_title");
+  sendTrayTexts();
   for (const n of $$("[data-t]")) n.textContent = t(n.dataset.t);
   $("#in-links").placeholder = t("links_ph");
   $("#in-vurl").placeholder = "https://www.youtube.com/watch?v=…";
+  $("#search").placeholder = t("search_ph");
+  $("#search").setAttribute("aria-label", t("search_ph"));
   for (const n of $$("fieldset.soon, fieldset.soon *")) n.title = t("soon_tip");
   for (const row of pool) row.reset();
   folderKey = "";
@@ -122,7 +129,9 @@ let pollAgain = false;
 let pollCount = 0;
 let gotList = false;
 
+let powerActive = false;
 function anyBusy() {
+  if (powerActive) return true;
   for (const it of store.values()) if (BUSY.has(it.status)) return true;
   return jobs.some((j) => j.state === "queued" || j.state === "running");
 }
@@ -153,7 +162,14 @@ async function refresh() {
   try {
     const s = await api.call("list", rev != null ? { since: rev } : {});
     if (s?.default_dir) defaultDir = s.default_dir;
+    const fin = gotList && settings.notify ? finishedNow(store, s) : [];
     const r = mergeList(store, s);
+    if (fin.length) notify(fin);
+    if (s && "power" in s) applyPower(s.power);
+    // engine warnings (e.g. a resume point that could not be saved): shown once each
+    if (Array.isArray(s?.warnings)) for (const w of s.warnings.slice(0, 5)) {
+      if (Array.isArray(w) && typeof w[1] === "string") toast(t("w_checkpoint", store.get(w[0])?.name ?? `#${w[0]}`, w[1].slice(0, 300)));
+    }
     rev = r.rev;
     if (r.changed || !gotList) invalidate(true);
     gotList = true;
@@ -203,7 +219,7 @@ function frame() {
 }
 
 function recomputeView() {
-  viewItems = view === "jobs" ? [] : buildView(store, view, sortKey, sortDir);
+  viewItems = view === "jobs" ? [] : buildView(store, view, sortKey, sortDir, query);
   order = viewItems.map((i) => i.id);
   for (const id of selected) if (!store.has(id)) selected.delete(id);
   $("#spacer").style.height = `${viewItems.length * ROW_H}px`;
@@ -436,6 +452,19 @@ async function each(list, cmd) {
 const commands = {
   add: { run: () => openAdd() },
   add_video: { run: () => openVideo() },
+  columns: { run: () => { const r = $("#thead").getBoundingClientRect(); showColsMenu(document.documentElement.dir === "rtl" ? r.right - 20 : r.left + 20, r.bottom); } },
+  customize_toolbar: { run: () => openToolbarDialog() },
+  queues: { run: () => openQueues() },
+  import_list: { run: async () => {
+    try {
+      const r = await api.call("import_list", { folder: settings.folder ?? null });
+      if (r) { toast(t("imp_done", r.added, r.refused, r.duplicates)); kick(); }
+    } catch (e) { failure(e); }
+  } },
+  export_list: { run: async () => {
+    try { const n = await api.call("export_list"); if (n != null) toast(t("exp_done", n)); } catch (e) { failure(e); }
+  } },
+  find: { run: () => { $("#search").focus(); $("#search").select(); } },
   settings: { run: () => openSettings() },
   resume: {
     on: () => selItems().some((i) => i.status === "paused" || i.status === "failed"),
@@ -617,6 +646,7 @@ document.addEventListener("keydown", (e) => {
   if (ctrl && e.shiftKey && (e.key === "N" || e.key === "n")) { e.preventDefault(); run("add_video"); return; }
   if (ctrl && (e.key === "n" || e.key === "N")) { e.preventDefault(); run("add"); return; }
   if (ctrl && e.key === ",") { e.preventDefault(); run("settings"); return; }
+  if (ctrl && (e.key === "f" || e.key === "F")) { e.preventDefault(); run("find"); return; }
   if (e.key === "F1") { e.preventDefault(); run("shortcuts"); return; }
   if (inField(e) || view === "jobs") return;
   const onButton = e.target.closest?.("button");
@@ -676,9 +706,33 @@ function openAdd(prefill) {
   $("#in-name").value = "";
   pickedFolder = null;
   showFolder();
+  fillAddChoices();
   $("#dlg-add").showModal();
   $("#in-links").focus();
 }
+
+// v0.2: queue + "folder by type" choices of the add dialog (lists fetched when it opens)
+const CAT_KEY = { Compressed: "v_compressed", Documents: "v_documents", Music: "v_music", Video: "v_video", Pictures: "v_pictures", Programs: "v_programs" };
+let addQueues = [];
+async function fillAddChoices() {
+  const cat = $("#in-cat");
+  let cats = [];
+  try { cats = await api.call("categories"); } catch { cats = []; }
+  const opt = (v, text) => { const o = el("option", null, text); o.value = v; return o; };
+  cat.replaceChildren(opt("none", t("cat_none")), opt("auto", t("cat_auto")),
+    ...cats.filter((c) => typeof c === "string").map((c) => opt(c, CAT_KEY[c] ? t(CAT_KEY[c]) : c)));
+  cat.value = localStorage.getItem("autocat") === "on" ? "auto" : "none";
+  const q = $("#in-queue");
+  try { addQueues = await api.call("queues"); } catch { addQueues = []; }
+  q.replaceChildren(...addQueues.map((x, i) => opt(String(i), x.name === "main" ? t("q_main") : queueLabel(x))));
+  q.value = "0";
+  q.disabled = addQueues.length < 2;
+}
+$("#in-queue").addEventListener("change", () => {
+  const x = addQueues[Number($("#in-queue").value)];
+  pickedFolder = x && x.name !== "main" ? x.dir : null;
+  showFolder();
+});
 
 async function submitAdd(ev) {
   ev.preventDefault();
@@ -688,9 +742,9 @@ async function submitAdd(ev) {
   start.disabled = true;
   try {
     const name = $("#in-name").value.trim();
-    const r = await api.call("add", { links: $("#in-links").value, folder: effectiveFolder(), name: name || null });
+    const r = await api.call("add", { links: $("#in-links").value, folder: effectiveFolder(), name: name || null, category: $("#in-cat").value || "none" });
     if (r.refused.length) {
-      const lines = r.refused.map(([u, k]) => `• ⁨${u}⁩ —${errText(k) ?? k}`);
+      const lines = r.refused.map(([u, k]) => `• ⁨${u}⁩ — ${errText(k) ?? k}`);
       errEl.textContent = `${r.added.length ? t("added_n", r.added.length) + "\n" : ""}${t("refused_n", r.refused.length)}\n${lines.join("\n")}`;
       errEl.hidden = false;
       $("#in-links").value = r.refused.map(([u]) => u).join("\n");
@@ -723,7 +777,84 @@ function openProps(id) {
   if (id == null || !store.has(id)) return;
   propsId = id;
   renderProps();
+  const lim = store.get(id)?.limit_kib;
+  $("#p-limit").value = lim ? String(lim) : "0";
   $("#dlg-props").showModal();
+  drawMap(segmentView(null));
+  refreshMap();
+}
+
+// ---------------------------------------------------------------- segment map (details window)
+// Asked for only while the details window is open: every second for a moving download, every
+// 4 s otherwise. One request at a time; an answer for an item that is no longer shown is dropped.
+let mapTimer = null;
+let mapBusy = false;
+async function refreshMap() {
+  clearTimeout(mapTimer);
+  mapTimer = null;
+  const dlg = $("#dlg-props");
+  if (propsId == null || !dlg.open || mapBusy) return;
+  const id = propsId;
+  mapBusy = true;
+  let v;
+  try { v = segmentView(await api.call("segments", { id })); } catch { v = segmentView(null); }
+  mapBusy = false;
+  if (propsId !== id || !dlg.open) return;
+  drawMap(v);
+  mapTimer = setTimeout(refreshMap, BUSY.has(store.get(id)?.status) ? 1000 : 4000);
+}
+function drawMap(v) {
+  const c = $("#p-map");
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, c.clientWidth || 480), h = Math.max(1, c.clientHeight || 22);
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+  }
+  const ctx = c.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const css = getComputedStyle(document.documentElement);
+  const col = (k) => css.getPropertyValue(k).trim() || "#888";
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = col("--bar");
+  ctx.fillRect(0, 0, w, h);
+  // bytes always run left to right (an offset scale), in both languages
+  const n = v.cells.length;
+  if (n) {
+    const fill = col(v.source === "finished" ? "--ok" : "--run");
+    const cw = w / n;
+    for (let k = 0; k < n; k++) {
+      const p = v.cells[k];
+      if (!p) continue;
+      ctx.globalAlpha = p >= 100 ? 1 : 0.25 + 0.6 * (p / 100);
+      ctx.fillStyle = fill;
+      ctx.fillRect(Math.floor(k * cw), 0, Math.ceil(cw), h);
+    }
+    ctx.globalAlpha = 1;
+    // segment borders
+    if (v.total && v.rows.length > 1) {
+      ctx.fillStyle = col("--panel");
+      for (const r of v.rows.slice(1)) ctx.fillRect(Math.round((r.start / v.total) * w), 0, 1, h);
+    }
+  }
+  let info;
+  if (v.source === "checkpoint") info = t("p_map_checkpoint", v.segments, size(v.done), size(v.total));
+  else if (v.source === "stream") info = t("p_map_stream", size(v.done), size(v.total));
+  else if (v.source === "finished") info = t("p_map_finished");
+  else info = t("p_map_none");
+  if (v.source === "checkpoint" && v.segments > v.rows.length) info += ` ${t("p_map_more", v.rows.length, v.segments)}`;
+  setText($("#p-map-info"), info);
+  setAttr(c, "aria-label", info);
+  const wrap = $("#p-segs-wrap");
+  wrap.hidden = v.rows.length === 0;
+  const tb = $("#p-segs tbody");
+  const rows = v.rows.map((r) => {
+    const tr = el("tr");
+    for (const x of [String(r.n), size(r.start), size(r.end), `${r.pct}%`]) { const td = el("td", null, x); td.dir = "auto"; tr.append(td); }
+    if (r.pct >= 100) tr.className = "full";
+    return tr;
+  });
+  tb.replaceChildren(...rows);
 }
 function renderProps() {
   const dlg = $("#dlg-props");
@@ -762,7 +893,7 @@ $("#p-reveal").addEventListener("click", async () => {
   try { await api.call("reveal", { id: propsId }); } catch (e) { failure(e); }
 });
 $("#p-copy").addEventListener("click", () => { const it = store.get(propsId); if (it) copyText(it.url); });
-$("#dlg-props").addEventListener("close", () => { propsId = null; viewport.focus(); });
+$("#dlg-props").addEventListener("close", () => { propsId = null; clearTimeout(mapTimer); mapTimer = null; viewport.focus(); });
 
 // ---------------------------------------------------------------- info dialog
 function openInfo(title, body) {
@@ -809,12 +940,14 @@ async function showTools(target, button) {
   }
 }
 function openSettings() {
+  $("#set-missing").value = settings.missing;
   $("#set-lang").value = settings.lang;
   $("#set-theme").value = settings.theme;
   fillQualitySelect($("#set-quality"), ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"], settings.quality);
   showSettingsFolder();
   showTools($("#set-tools"), $("#set-tools-install"));
   fillEngineFields();
+  fillDesktopFields();
   $("#dlg-settings").showModal();
 }
 for (const b of $$("#dlg-settings [data-tab]")) {
@@ -835,6 +968,7 @@ function openSettingsTexts() {
 }
 $("#set-theme").addEventListener("change", (e) => { saveSetting("theme", e.target.value); applyTheme(); updateCommands(); });
 $("#set-quality").addEventListener("change", (e) => saveSetting("quality", e.target.value));
+$("#set-missing").addEventListener("change", (e) => saveSetting("missing", e.target.value));
 $("#set-folder-pick").addEventListener("click", async () => {
   try {
     const p = await api.call("pick_folder");
@@ -954,6 +1088,8 @@ function renderProbe() {
   if (r.kind === "playlist") meta.push(t("vd_items", r.items?.length ?? 0));
   $("#v-meta").textContent = meta.join(" · ");
   fillQualitySelect($("#v-quality"), safeQualities(r.qualities), settings.quality);
+  $("#v-missing").value = settings.missing;
+  showMissingRow();
   const isList = r.kind === "playlist";
   $("#v-playlist").hidden = !isList;
   if (isList) {
@@ -1018,7 +1154,9 @@ $("#form-video").addEventListener("submit", async (e) => {
       const idx = pickedIndices();
       if (!idx.length) { vError(t("vd_none_selected")); return; }
       const all = idx.length === (probe.result.items?.length ?? 0);
-      await api.call("playlist_add", all ? { url: probe.url, quality, dir } : { url: probe.url, quality, items: idx, dir });
+      // a playlist offers every fixed height: some items may not have the chosen one
+      const if_missing = /^\d+p$/.test(quality) ? $("#v-missing").value : undefined;
+      await api.call("playlist_add", all ? { url: probe.url, quality, dir, if_missing } : { url: probe.url, quality, items: idx, dir, if_missing });
     } else {
       await api.call("video_add", { url: probe.url, quality, dir });
     }
@@ -1254,3 +1392,293 @@ $("#sch-save").addEventListener("click", async () => {
 if (usingMock) window.__eid = { stats, store, refresh, poll, invalidate, viewport, select: (ids) => { selected = new Set(ids); invalidate(true); updateCommands(); } };
 await poll();
 
+
+// ---------------------------------------------------------------- v0.2: notices
+function notify(list) {
+  const done = list.filter((x) => x.status === "done"), failed = list.filter((x) => x.status === "failed");
+  if (list.length === 1) toast(done.length ? t("n_done", list[0].name) : t("n_failed", list[0].name));
+  else toast(t("n_many", done.length, failed.length));
+}
+
+// ---------------------------------------------------------------- v0.2: search
+let searchTimer;
+$("#search").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { query = $("#search").value; invalidate(true); }, 120);
+});
+$("#search").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); $("#search").value = ""; query = ""; invalidate(true); viewport.focus(); }
+  else if (e.key === "Enter" || e.key === "ArrowDown") { e.preventDefault(); viewport.focus(); }
+});
+
+// ---------------------------------------------------------------- v0.2: columns (show/hide, order, width)
+const COL_LABEL = { name: "col_name", size: "col_size", prog: "col_progress", status: "col_status", speed: "col_speed", eta: "col_eta", url: "col_url" };
+let cols = normalizeCols(readJson("cols"));
+function readJson(k) { try { return JSON.parse(localStorage.getItem(k) ?? "null"); } catch { return null; } }
+const colStyle = document.head.appendChild(el("style"));
+function applyCols() {
+  const rules = cols.map((c, i) => `.thead > .c-${c.key}, .tr > .c-${c.key} { order: ${i};${c.on ? "" : " display: none;"} }`);
+  colStyle.textContent = `${rules.join("\n")}\n.thead, .tr { grid-template-columns: ${gridTemplate(cols)}; }`;
+}
+function saveCols() { localStorage.setItem("cols", JSON.stringify(cols)); applyCols(); }
+applyCols();
+
+function showColsMenu(x, y) {
+  const m = $("#menu-cols");
+  const items = cols.map((c) => {
+    const b = el("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitemcheckbox");
+    b.setAttribute("aria-checked", c.on ? "true" : "false");
+    b.disabled = c.key === "name";
+    b.append(el("span", "chk", c.on ? "✓" : ""), el("span", null, t(COL_LABEL[c.key])));
+    b.addEventListener("click", () => { c.on = !c.on; saveCols(); closeMenus(); });
+    return b;
+  });
+  const reset = el("button", null, t("cols_reset"));
+  reset.type = "button";
+  reset.setAttribute("role", "menuitem");
+  reset.addEventListener("click", () => { cols = normalizeCols(null); saveCols(); closeMenus(); });
+  const hint = el("p", "note", t("cols_hint"));
+  m.replaceChildren(...items, el("hr"), reset, hint);
+  showMenu(m, x, y);
+}
+$("#thead").addEventListener("contextmenu", (e) => { e.preventDefault(); showColsMenu(e.clientX, e.clientY); });
+
+const COL_DND = "application/x-eid-column";
+for (const b of $$("#thead > button")) {
+  const key = [...b.classList].find((c) => c.startsWith("c-"))?.slice(2);
+  if (!key) continue;
+  b.dataset.col = key;
+  b.draggable = true;
+  b.addEventListener("dragstart", (e) => { e.dataTransfer.setData(COL_DND, key); e.dataTransfer.effectAllowed = "move"; });
+  b.addEventListener("dragover", (e) => { if (e.dataTransfer.types.includes(COL_DND)) { e.preventDefault(); b.classList.add("dropto"); } });
+  b.addEventListener("dragleave", () => b.classList.remove("dropto"));
+  b.addEventListener("drop", (e) => {
+    b.classList.remove("dropto");
+    const from = e.dataTransfer.getData(COL_DND);
+    if (!from) return;
+    e.preventDefault();
+    e.stopPropagation();
+    cols = moveCol(cols, from, key);
+    saveCols();
+  });
+  const h = el("span", "rz");
+  h.setAttribute("aria-hidden", "true");
+  b.append(h);
+  h.addEventListener("click", (e) => e.stopPropagation());
+  h.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const c = cols.find((x) => x.key === key);
+    const x0 = e.clientX, w0 = b.getBoundingClientRect().width;
+    const sign = document.documentElement.dir === "rtl" ? -1 : 1;
+    h.setPointerCapture(e.pointerId);
+    const move = (ev) => { c.w = Math.round(w0 + sign * (ev.clientX - x0)); cols = normalizeCols(cols); applyCols(); };
+    const up = () => { h.removeEventListener("pointermove", move); saveCols(); };
+    h.addEventListener("pointermove", move);
+    h.addEventListener("pointerup", up, { once: true });
+    h.addEventListener("pointercancel", up, { once: true });
+  });
+  h.addEventListener("dblclick", (e) => { e.stopPropagation(); const c = cols.find((x) => x.key === key); c.w = null; saveCols(); });
+}
+
+// ---------------------------------------------------------------- v0.2: toolbar customization
+let toolbar = normalizeToolbar(readJson("toolbar"));
+function applyToolbar() {
+  for (const b of $$("#toolbar .tool[data-cmd]")) b.hidden = toolbar.hidden.has(b.dataset.cmd);
+  $("#toolbar").classList.toggle("icons-only", !toolbar.labels);
+  // a separator with no visible button on one side is hidden too
+  const kids = [...$("#toolbar").children];
+  for (const [i, k] of kids.entries()) {
+    if (!k.classList.contains("sep")) continue;
+    const prev = kids.slice(0, i).reverse().find((x) => !x.classList.contains("sep"));
+    const next = kids.slice(i + 1).find((x) => !x.classList.contains("sep"));
+    k.hidden = !(prev && !prev.hidden && prev.classList.contains("tool")) || !(next && !next.hidden && next.classList.contains("tool"));
+  }
+}
+function saveToolbar() { localStorage.setItem("toolbar", JSON.stringify({ hidden: [...toolbar.hidden], labels: toolbar.labels })); applyToolbar(); }
+function openToolbarDialog() {
+  const list = $("#tb-list");
+  list.replaceChildren(...TOOLS.map((k) => {
+    const src = $(`#toolbar .tool[data-cmd="${k}"] span`);
+    const lab = el("label", "check");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.checked = !toolbar.hidden.has(k);
+    cb.addEventListener("change", () => { if (cb.checked) toolbar.hidden.delete(k); else toolbar.hidden.add(k); saveToolbar(); });
+    lab.append(cb, el("span", null, src?.textContent ?? k));
+    return lab;
+  }));
+  $("#tb-labels").checked = toolbar.labels;
+  $("#dlg-toolbar").showModal();
+}
+$("#tb-labels").addEventListener("change", (e) => { toolbar.labels = e.target.checked; saveToolbar(); });
+$("#tb-reset").addEventListener("click", () => { toolbar = normalizeToolbar(null); saveToolbar(); openToolbarDialog(); });
+$("#toolbar").addEventListener("contextmenu", (e) => { e.preventDefault(); openToolbarDialog(); });
+applyToolbar();
+
+// ---------------------------------------------------------------- v0.2: notify setting
+$("#set-notify").checked = settings.notify;
+$("#set-notify").addEventListener("change", (e) => { settings.notify = e.target.checked; saveSetting("notify", e.target.checked); });
+
+// ---------------------------------------------------------------- v0.2: drag and drop of links
+let dragDepth = 0;
+const isLinkDrag = (e) => {
+  const ty = [...(e.dataTransfer?.types ?? [])];
+  return !ty.includes(COL_DND) && (ty.includes("text/uri-list") || ty.includes("text/plain") || ty.includes("Files"));
+};
+document.addEventListener("dragenter", (e) => {
+  if (!isLinkDrag(e) || anyDialog()) return;
+  e.preventDefault();
+  dragDepth++;
+  $("#drop").hidden = false;
+});
+document.addEventListener("dragover", (e) => { if (isLinkDrag(e) && !anyDialog()) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } });
+document.addEventListener("dragleave", () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $("#drop").hidden = true; });
+document.addEventListener("drop", (e) => {
+  if (!isLinkDrag(e) || anyDialog()) return;
+  e.preventDefault();
+  dragDepth = 0;
+  $("#drop").hidden = true;
+  const dt = e.dataTransfer;
+  const links = linksFromText(dt.getData("text/uri-list") || dt.getData("text/plain"));
+  if (!links.length) { toast(dt.types.includes("Files") ? t("drop_files") : t("drop_none")); return; }
+  if (links.length === 1 && /^https?:\/\/([a-z0-9-]+\.)*(youtube\.com|youtu\.be)\//i.test(links[0])) openVideo(links[0]);
+  else openAdd(links.join("\n"));
+});
+// tooltips carry the button text (needed when only icons are shown), in the current language
+$("#toolbar").addEventListener("mouseover", (e) => {
+  const b = e.target.closest?.(".tool");
+  if (b) setAttr(b, "title", b.querySelector("span")?.textContent ?? null);
+});
+
+// v0.2: "if this quality is missing" is asked for playlists and a fixed height only (a single
+// video offers only the qualities it really has)
+function showMissingRow() {
+  const q = $("#v-quality").value;
+  $("#v-missing-row").hidden = !(probe?.result?.kind === "playlist" && /^\d+p$/.test(q));
+}
+$("#v-quality").addEventListener("change", showMissingRow);
+
+// ---------------------------------------------------------------- v0.2: tray, close to tray, clipboard
+function sendTrayTexts() {
+  api.call("tray_texts", { texts: { show: t("tray_show"), pause_all: t("c_pause_all"), resume_all: t("c_resume_all"), quit: t("tray_quit") } })
+    .catch(() => {}); // an older backend without a tray: nothing to name
+}
+api.on?.("tray", (action) => { if (action === "pause_all" || action === "resume_all") run(action); });
+
+async function fillDesktopFields() {
+  const s = await loadEngine();
+  if (!s) return;
+  $("#set-tray").checked = s.tray !== false;
+  $("#set-close-tray").checked = !!s.close_to_tray;
+  $("#set-close-tray").disabled = s.tray === false;
+  $("#set-clipboard").checked = !!s.clipboard;
+  $("#set-power").checked = !!s.power_actions;
+  $("#set-desktop-error").hidden = true;
+}
+for (const id of ["#set-tray", "#set-close-tray", "#set-clipboard", "#set-power"]) {
+  $(id).addEventListener("change", async () => {
+    const base = engine ?? (await loadEngine());
+    if (!base) return;
+    const tray = $("#set-tray").checked;
+    const ok = await saveEngine({ ...base, tray, close_to_tray: tray && $("#set-close-tray").checked, clipboard: $("#set-clipboard").checked, power_actions: $("#set-power").checked }, $("#set-desktop-error"));
+    if (!ok) await fillDesktopFields();
+    $("#set-close-tray").disabled = !tray;
+  });
+}
+
+let clipLink = null;
+api.on?.("clipboard-link", (p) => {
+  const url = typeof p?.url === "string" && p.url.length <= 2048 && /^https?:\/\//i.test(p.url) ? p.url : null;
+  if (!url) return;
+  clipLink = { url, kind: p.kind === "video" ? "video" : "file" };
+  setText($("#clip-url"), url);
+  setAttr($("#clip-url"), "title", url);
+  $("#clipbar").hidden = false;
+});
+$("#clip-ignore").addEventListener("click", () => { $("#clipbar").hidden = true; clipLink = null; });
+$("#clip-add").addEventListener("click", () => {
+  if (!clipLink) return;
+  const { url, kind } = clipLink;
+  $("#clipbar").hidden = true;
+  clipLink = null;
+  if (kind === "video") openVideo(url); else openAdd(url);
+});
+sendTrayTexts();
+
+// ---------------------------------------------------------------- v0.2: per-download speed limit
+$("#p-limit-set").addEventListener("click", async () => {
+  const id = propsId;
+  const v = Number($("#p-limit").value);
+  if (!Number.isInteger(v) || v < 0 || v > 12500000) { toast(`${t("p_limit")} 0–12500000`); return; }
+  try { await api.call("item_limit", { id, limit_kib: v === 0 ? null : v }); toast(t("saved")); kick(); } catch (e) { failure(e); }
+});
+
+// ---------------------------------------------------------------- v0.2: "when finished" countdown
+const AD_KEY = { none: "ad_none", exit: "ad_exit", sleep: "ad_sleep", hibernate: "ad_hibernate", shutdown: "ad_shutdown" };
+function applyPower(p) {
+  const c = Array.isArray(p?.countdown) && Number.isFinite(p.countdown[0]) && AD_KEY[p.countdown[1]] ? p.countdown : null;
+  powerActive = !!c;
+  const bar = $("#powerbar");
+  if (c) {
+    setText($("#power-text"), t("pw_count", t(AD_KEY[c[1]]), Math.max(0, Math.round(c[0]))));
+    if (bar.hidden) { bar.hidden = false; $("#power-cancel").focus(); }
+  } else if (!bar.hidden) bar.hidden = true;
+  const last = typeof p?.last === "string" ? p.last : null;
+  if (last === "cancelled") toast(t("pw_cancelled"));
+  else if (last === "aborted") toast(t("pw_aborted"));
+  else if (last?.startsWith("failed:") && AD_KEY[last.slice(7)]) toast(t("pw_failed", t(AD_KEY[last.slice(7)])));
+}
+$("#power-cancel").addEventListener("click", async () => {
+  try { await api.call("cancel_countdown"); } catch (e) { failure(e); }
+  $("#powerbar").hidden = true;
+  powerActive = false;
+  kick();
+});
+
+// ---------------------------------------------------------------- v0.2: queues dialog
+const queueLabel = (q) => (q.name === "main" ? t("q_main") : q.dir.split(/[\\/]/).filter(Boolean).pop() || q.name);
+async function openQueues() {
+  await fillQueues();
+  $("#dlg-queues").showModal();
+}
+async function fillQueues() {
+  let list;
+  try { list = await api.call("queues"); } catch (e) { failure(e); return; }
+  const machineOk = !!(engine ?? (await loadEngine()))?.power_actions;
+  $("#q-error").hidden = true;
+  const tpl = $("#q-row");
+  $("#q-list").replaceChildren(...list.map((q) => {
+    const row = tpl.content.firstElementChild.cloneNode(true);
+    for (const n of row.querySelectorAll("[data-t]")) n.textContent = t(n.dataset.t);
+    row.dataset.queue = q.name;
+    row.querySelector(".q-name").textContent = `${queueLabel(q)}${q.paused ? ` ${t("q_stopped")}` : ""}`;
+    row.querySelector(".q-dir").textContent = q.dir;
+    row.querySelector(".q-counts").textContent = t("q_counts", q.total, q.done, q.running, q.failed);
+    row.querySelector(".q-par").value = q.max_parallel;
+    // owner decision: computer actions only when allowed in Settings (off by default)
+    for (const o of row.querySelectorAll(".q-after option")) {
+      if (["sleep", "hibernate", "shutdown"].includes(o.value) && !machineOk) { o.disabled = true; o.textContent += ` ${t("q_power_off")}`; }
+    }
+    row.querySelector(".q-after").value = AD_KEY[q.after_done] ? q.after_done : "none";
+    const tg = row.querySelector(".q-toggle");
+    tg.textContent = q.paused ? t("q_start") : t("q_stop");
+    const send = async (patch) => {
+      try { await api.call("queue_set", { patch: { name: q.name, ...patch } }); await fillQueues(); kick(); }
+      catch (e) { $("#q-error").textContent = errMessage(e); $("#q-error").hidden = false; }
+    };
+    row.querySelector(".q-save").addEventListener("click", () => {
+      const n = Number(row.querySelector(".q-par").value);
+      if (!Number.isInteger(n) || n < 1 || n > 8) { $("#q-error").textContent = `${t("s_parallel")}: 1–8`; $("#q-error").hidden = false; return; }
+      send({ max_parallel: n, after_done: row.querySelector(".q-after").value });
+    });
+    tg.addEventListener("click", () => send({ paused: !q.paused }));
+    return row;
+  }));
+}
+
+// v0.2: default "folder by type" for new downloads
+$("#set-autocat").checked = localStorage.getItem("autocat") === "on";
+$("#set-autocat").addEventListener("change", (e) => localStorage.setItem("autocat", e.target.checked ? "on" : "off"));

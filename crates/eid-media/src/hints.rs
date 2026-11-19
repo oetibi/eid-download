@@ -39,6 +39,9 @@ pub enum Hint {
     MissingJsRuntime,
     /// The site is not supported by yt-dlp.
     Unsupported,
+    /// v0.2: the chosen quality is not available and the user chose "skip" for that case
+    /// (or nothing at all matches). Retrying the same choice cannot help.
+    QualityMissing,
 }
 
 impl Hint {
@@ -48,7 +51,12 @@ impl Hint {
     pub fn blocks_auto_retry(self) -> bool {
         matches!(
             self,
-            Hint::Drm | Hint::Private | Hint::Removed | Hint::SignInRequired | Hint::Geo
+            Hint::Drm
+                | Hint::Private
+                | Hint::Removed
+                | Hint::SignInRequired
+                | Hint::Geo
+                | Hint::QualityMissing
         )
     }
 }
@@ -60,8 +68,13 @@ pub fn classify(text: &str) -> Option<Hint> {
         .lines()
         .filter(|l| l.trim_start().starts_with("ERROR:"))
         .collect();
+    let no_runtime = text
+        .to_lowercase()
+        .contains("no supported javascript runtime");
     if let Some(h) = errors.iter().rev().find_map(|l| classify_error_line(l)) {
-        return Some(h);
+        if !(h == Hint::QualityMissing && no_runtime) {
+            return Some(h);
+        }
     }
     // informational only: never stops a retry
     if text
@@ -129,6 +142,11 @@ fn classify_error_line(line: &str) -> Option<Hint> {
     }
     if has(&["unsupported url"]) {
         return Some(Hint::Unsupported);
+    }
+    // yt-dlp's own text when no format matches the selector. Not when the JavaScript runtime
+    // is missing (then formats are missing for that reason): see `classify`.
+    if has(&["requested format is not available"]) {
+        return Some(Hint::QualityMissing);
     }
     if has(&["no supported javascript runtime"]) {
         return Some(Hint::MissingJsRuntime);
@@ -199,5 +217,12 @@ mod tests {
             assert_eq!(classify(line), hint, "{line}");
             assert!(!hint.is_some_and(Hint::blocks_auto_retry), "{line}");
         }
+        // v0.2 "skip": the same choice cannot succeed by retrying
+        let q = "ERROR: [youtube] abc: Requested format is not available. Use --list-formats for a list of available formats";
+        assert_eq!(classify(q), Some(Hint::QualityMissing));
+        assert!(Hint::QualityMissing.blocks_auto_retry());
+        // ... unless the formats are missing because yt-dlp had no JavaScript runtime
+        let js = "WARNING: No supported JavaScript runtime could be found.\nERROR: Requested format is not available";
+        assert_eq!(classify(js), Some(Hint::MissingJsRuntime));
     }
 }

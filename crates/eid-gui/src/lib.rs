@@ -3,5 +3,8 @@
 
 pub mod app;
 pub mod core;
+pub mod desktop;
 pub mod listdiff;
+pub mod power;
+pub mod segmap;
 pub mod video;

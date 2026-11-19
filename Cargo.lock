@@ -990,6 +990,7 @@ dependencies = [
  "eid-engine",
  "eid-ipc",
  "eid-platform",
+ "futures-util",
  "percent-encoding",
  "serde",
  "serde_json",

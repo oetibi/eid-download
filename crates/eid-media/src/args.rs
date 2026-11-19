@@ -235,6 +235,49 @@ pub enum Quality {
     AudioMp3,
     /// A `format_id` taken from the tool's own `-J` output.
     Format(String),
+    /// v0.2 fallback "higher": this height class (taller than the previous fixed height, not
+    /// taller than this one); if missing, the nearest taller format up to [`MAX_HEIGHT`]; if
+    /// none, the nearest shorter one.
+    AtLeast(u32),
+    /// v0.2 fallback "skip": this height class only; nothing else is downloaded (the item
+    /// fails with "requested format is not available").
+    Exactly(u32),
+}
+
+/// What to do when the chosen height is not available (v0.2, chosen by the user).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Fallback {
+    /// The tallest format below it, else the shortest one (the v0.1 behaviour).
+    #[default]
+    Lower,
+    /// The nearest taller format up to 4K, else the nearest shorter one.
+    Higher,
+    /// Do not download that item.
+    Skip,
+}
+
+/// The fallback names accepted from users, the window, the CLI and the browser.
+pub const FALLBACK_CHOICES: &[&str] = &["lower", "higher", "skip"];
+
+impl Fallback {
+    pub fn from_name(s: &str) -> Result<Fallback, MediaError> {
+        match s {
+            "lower" => Ok(Fallback::Lower),
+            "higher" => Ok(Fallback::Higher),
+            "skip" => Ok(Fallback::Skip),
+            _ => Err(MediaError::BadChoice(format!(
+                "if the quality is missing: one of {}",
+                FALLBACK_CHOICES.join(", ")
+            ))),
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Fallback::Lower => "lower",
+            Fallback::Higher => "higher",
+            Fallback::Skip => "skip",
+        }
+    }
 }
 
 impl Quality {
@@ -258,13 +301,27 @@ impl Quality {
         }
     }
 
+    /// This quality with `fb` applied: only a fixed height changes (`best`, `audio` and raw
+    /// format ids have nothing to fall back from).
+    pub fn with_fallback(self, fb: Fallback) -> Quality {
+        match (self, fb) {
+            (Quality::MaxHeight(h), Fallback::Higher) => Quality::AtLeast(h),
+            (Quality::MaxHeight(h), Fallback::Skip) => Quality::Exactly(h),
+            (q, _) => q,
+        }
+    }
+
     /// The policy string of this quality (`720p`, `best`, `audio`); `None` for a raw
     /// format id or a height outside the fixed list.
     pub fn policy_name(&self) -> Option<String> {
         match self {
             Quality::Best => Some("best".into()),
             Quality::AudioMp3 => Some("audio".into()),
-            Quality::MaxHeight(h) if POLICY_HEIGHTS.contains(h) => Some(format!("{h}p")),
+            Quality::MaxHeight(h) | Quality::AtLeast(h) | Quality::Exactly(h)
+                if POLICY_HEIGHTS.contains(h) =>
+            {
+                Some(format!("{h}p"))
+            }
             _ => None,
         }
     }
@@ -290,6 +347,33 @@ impl Quality {
 pub fn height_selector(h: u32) -> String {
     let m = MAX_HEIGHT;
     format!("bv*[height<={h}]+ba/b[height<={h}]/wv*[height<={m}]+ba/w[height<={m}]/b[height<=?{m}]")
+}
+
+/// The fixed height just below `h` (0 below the smallest): the lower edge of `h`'s class, so a
+/// 1012-pixel "1080p" crop still counts as 1080p.
+fn class_floor(h: u32) -> u32 {
+    POLICY_HEIGHTS
+        .iter()
+        .copied()
+        .filter(|x| *x < h)
+        .max()
+        .unwrap_or(0)
+}
+
+/// v0.2 "higher": `h`'s class, else the nearest taller format (the *worst* of the taller ones)
+/// up to [`MAX_HEIGHT`], else the v0.1 "lower" chain.
+pub fn higher_selector(h: u32) -> String {
+    let (p, m) = (class_floor(h), MAX_HEIGHT);
+    format!(
+        "bv*[height<={h}][height>{p}]+ba/b[height<={h}][height>{p}]/wv*[height>{h}][height<={m}]+ba/w[height>{h}][height<={m}]/{}",
+        height_selector(h)
+    )
+}
+
+/// v0.2 "skip": `h`'s class only (an unknown height is not accepted either).
+pub fn exact_selector(h: u32) -> String {
+    let p = class_floor(h);
+    format!("bv*[height<={h}][height>{p}]+ba/b[height<={h}][height>{p}]")
 }
 
 /// Which of the fixed heights to offer for a video, from the heights of its formats: a choice
@@ -398,13 +482,18 @@ pub fn build(
                     a.push(kv("--merge-output-format", "mp4"));
                     a.push(kv("--remux-video", REMUX_VIDEO));
                 }
-                Quality::MaxHeight(h) => {
+                Quality::MaxHeight(h) | Quality::AtLeast(h) | Quality::Exactly(h) => {
                     if *h == 0 || *h > MAX_HEIGHT {
                         return Err(MediaError::BadChoice(format!(
                             "height must be 1..={MAX_HEIGHT}"
                         )));
                     }
-                    a.push(kv("--format", &height_selector(*h)));
+                    let sel = match quality {
+                        Quality::AtLeast(_) => higher_selector(*h),
+                        Quality::Exactly(_) => exact_selector(*h),
+                        _ => height_selector(*h),
+                    };
+                    a.push(kv("--format", &sel));
                     a.push(kv("--merge-output-format", "mp4"));
                     a.push(kv("--remux-video", REMUX_VIDEO));
                 }
@@ -484,6 +573,69 @@ pub fn emitted_flags(args: &[OsString]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_names_and_selectors_never_go_above_4k() {
+        for (n, f) in [
+            ("lower", Fallback::Lower),
+            ("higher", Fallback::Higher),
+            ("skip", Fallback::Skip),
+        ] {
+            assert_eq!(Fallback::from_name(n).unwrap(), f);
+            assert_eq!(f.name(), n);
+        }
+        for bad in ["", "Lower", "best", "any", "lower ", "-f"] {
+            assert!(Fallback::from_name(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(Fallback::default(), Fallback::Lower);
+        // only a fixed height changes
+        let q = Quality::MaxHeight(720);
+        assert_eq!(q.clone().with_fallback(Fallback::Lower), q);
+        assert_eq!(
+            q.clone().with_fallback(Fallback::Higher),
+            Quality::AtLeast(720)
+        );
+        assert_eq!(q.with_fallback(Fallback::Skip), Quality::Exactly(720));
+        for q in [
+            Quality::Best,
+            Quality::AudioMp3,
+            Quality::Format("18".into()),
+        ] {
+            for f in [Fallback::Higher, Fallback::Skip] {
+                assert_eq!(q.clone().with_fallback(f), q);
+            }
+        }
+        assert_eq!(
+            Quality::AtLeast(1080).policy_name().as_deref(),
+            Some("1080p")
+        );
+        assert_eq!(Quality::Exactly(360).policy_name().as_deref(), Some("360p"));
+        assert_eq!(
+            higher_selector(720),
+            "bv*[height<=720][height>480]+ba/b[height<=720][height>480]/wv*[height>720][height<=2160]+ba/w[height>720][height<=2160]/bv*[height<=720]+ba/b[height<=720]/wv*[height<=2160]+ba/w[height<=2160]/b[height<=?2160]"
+        );
+        assert_eq!(
+            exact_selector(360),
+            "bv*[height<=360][height>0]+ba/b[height<=360][height>0]"
+        );
+        // every height bound in every selector is <= 2160 (no 8K through any fallback)
+        for h in POLICY_HEIGHTS {
+            for sel in [height_selector(*h), higher_selector(*h), exact_selector(*h)] {
+                for part in sel.split(['[', ']']) {
+                    if let Some(v) = part
+                        .strip_prefix("height<=")
+                        .map(|v| v.trim_start_matches('?'))
+                    {
+                        assert!(v.parse::<u32>().unwrap() <= MAX_HEIGHT, "{sel}");
+                    }
+                }
+                assert!(
+                    !sel.contains("height>=") && !sel.contains("bv*+") && !sel.contains("/b/"),
+                    "{sel}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn quality_policy_accepts_only_the_fixed_list_and_never_above_4k() {

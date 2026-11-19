@@ -156,7 +156,14 @@ pub struct Item {
     /// Last error, already redacted.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// v0.2: this download's own speed limit in KiB/s, under the global one (`None` = only the
+    /// global limit). Takes effect when the download (re)starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_kib: Option<u64>,
 }
+
+/// Largest per-download limit accepted (the same nonsense cap as the global one).
+pub const MAX_ITEM_LIMIT_KIB: u64 = 12_500_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Queue {
@@ -267,6 +274,12 @@ impl QueueSet {
                 if it.not_before.is_some_and(|t| t < 0) {
                     return Err("negative start time".into());
                 }
+                if it
+                    .limit_kib
+                    .is_some_and(|l| l == 0 || l > MAX_ITEM_LIMIT_KIB)
+                {
+                    return Err("item speed limit out of range".into());
+                }
             }
         }
         Ok(())
@@ -300,6 +313,7 @@ impl QueueSet {
             attempts: 0,
             not_before,
             last_error: None,
+            limit_kib: None,
         };
         let q = self.queue_mut(queue).ok_or("no such queue")?;
         q.items.push(item);

@@ -148,6 +148,12 @@ pub enum Event {
     ResponseClosed {
         seg: usize,
     },
+    /// v0.2 (PLAN P1 open item (c)): the LAST checkpoint of a run (at completion, cancel or
+    /// error) could not be saved. Nothing is lost or corrupted: the previous checkpoint stays,
+    /// so a resume repeats at most the bytes since then. The run's own outcome is unchanged.
+    CheckpointFailed {
+        message: String,
+    },
 }
 
 pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
@@ -1275,8 +1281,19 @@ async fn run_ranged(
     if let Ok(e) = ckpt_err.try_recv() {
         fatal.get_or_insert(e);
     }
-    // final durable checkpoint (also on cancel/error) so resume loses as little as possible
-    let _ = persist_checkpoint(&ctx, info, state_path).await;
+    // final durable checkpoint (also on cancel/error) so resume loses as little as possible.
+    // PLAN P1 open item (c): a failure here never replaces the run's own outcome (a complete,
+    // verified download stays a success; a cancel or an earlier error stays exactly that), but it
+    // is no longer silent: Event::CheckpointFailed carries the (redacted) reason.
+    let last = match fault::fail("final_checkpoint") {
+        Ok(()) => persist_checkpoint(&ctx, info, state_path).await,
+        Err(e) => Err(Error::io("final checkpoint")(e)),
+    };
+    if let Err(e) = last {
+        ctx.emit(Event::CheckpointFailed {
+            message: crate::urlsafe::redact_text(&e.to_string()),
+        });
+    }
     if let Some(e) = fatal {
         return Err(e);
     }

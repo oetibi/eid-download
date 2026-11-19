@@ -81,6 +81,12 @@ async function open(q) {
   return Date.now() - t0;
 }
 
+async function shot(name) {
+  const { data } = await S("Page.captureScreenshot", { format: "png" });
+  const dir = arg("--shots");
+  await (await import("node:fs/promises")).mkdir(dir, { recursive: true });
+  await (await import("node:fs/promises")).writeFile(join(dir, name), Buffer.from(data, "base64"));
+}
 const results = { checks: [], bench: [] };
 let failed = 0;
 async function check(name, fn) {
@@ -146,8 +152,16 @@ try {
     await ev("document.querySelector('#v-none').click()");
     await ev("const b = document.querySelectorAll('#v-items input'); b[0].checked = true; b[3].checked = true; b[0].dispatchEvent(new Event('change', {bubbles:true}))");
     assert(!(await ev("document.querySelector('#v-start').disabled")), "start disabled with 2 items");
+    // v0.2: "if this quality is missing": shown for a fixed height, hidden for best/audio
+    await ev("(() => { const q = document.querySelector('#v-quality'); q.value = 'best'; q.dispatchEvent(new Event('change')); })()");
+    assert(await ev("document.querySelector('#v-missing-row').hidden"), "fallback shown for best");
+    await ev("(() => { const q = document.querySelector('#v-quality'); q.value = '1080p'; q.dispatchEvent(new Event('change')); })()");
+    assert(!(await ev("document.querySelector('#v-missing-row').hidden")), "fallback hidden for 1080p");
+    await ev("document.querySelector('#v-missing').value = 'skip'");
     await ev("document.querySelector('#v-start').click()");
     await until("!document.querySelector('#dlg-video').open", 5000, "dialog closes on start");
+    const sent = await ev("window.__eidMockLastPlaylist");
+    assert(sent.quality === "1080p" && sent.if_missing === "skip", `sent ${JSON.stringify(sent)}`);
   });
 
   await check("settings: engine limits load, validate and save", async () => {
@@ -200,6 +214,273 @@ try {
     await ev("document.querySelector('[data-cmd=open_file]').click()");
     await until("!document.querySelector('#toast').hidden && document.querySelector('#toast').textContent.length > 20", 3000, "refusal message");
     assert(!(await ev(`(window.__eidMockOpened || []).includes(${prog[0]})`)), "program was opened");
+  });
+
+  await check("details window: segment map from the backend, per-segment table, ar/en, closes cleanly", async () => {
+    await open("");
+    const pick = (st) => ev(`[...window.__eid.store.values()].find(i => ${st})?.id ?? null`);
+    const openP = async (id) => {
+      await ev(`window.__eid.select([${id}])`);
+      await ev("document.querySelector('#menu-downloads [data-cmd=properties]').click()");
+      await until("document.querySelector('#dlg-props').open", 3000, "details open");
+    };
+    const paused = await pick("i.status === 'paused' && i.rate?.total");
+    assert(paused != null, "mock has a paused item with a size");
+    await openP(paused);
+    await until("document.querySelectorAll('#p-segs tbody tr').length === 8", 4000, "8 segment rows");
+    const info = await ev("document.querySelector('#p-map-info').textContent");
+    assert(/الأجزاء: 8/.test(info), `info: ${info}`);
+    // the canvas really has drawn pixels of the 'saved' colour, not only the empty bar
+    const painted = await ev(`(() => { const c = document.querySelector('#p-map'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      const px = new Set(); for (let i = 0; i < d.length; i += 4 * 7) px.add(d[i] + ',' + d[i+1] + ',' + d[i+2]); return px.size; })()`);
+    assert(painted >= 2, `canvas looks empty (${painted} colours)`);
+    if (arg("--shots")) await shot("details-ar.png");
+    await ev("document.querySelector('#dlg-props').close()");
+    // English, and an item without a known size: no map, no table
+    await ev("document.querySelector('#btn-lang').click()");
+    const unknown = await pick("i.status === 'running' && i.rate && i.rate.total == null");
+    await openP(unknown);
+    await until("/No map yet/.test(document.querySelector('#p-map-info').textContent)", 4000, "no-map text");
+    assert(await ev("document.querySelector('#p-segs-wrap').hidden"), "table must be hidden");
+    await ev("document.querySelector('#dlg-props').close()");
+    const done = await pick("i.status === 'done'");
+    await openP(done);
+    await until("/complete/.test(document.querySelector('#p-map-info').textContent)", 4000, "finished text");
+    if (arg("--shots")) await shot("details-en-finished.png");
+    await ev("document.querySelector('#dlg-props').close()");
+    await ev("document.querySelector('#btn-lang').click()");
+    await until("document.documentElement.dir === 'rtl'", 3000, "rtl again");
+  });
+
+  await check("search filters by name or link; Esc clears", async () => {
+    await open("");
+    await ev("localStorage.removeItem('cols'); localStorage.removeItem('toolbar')");
+    await open("");
+    const total = await ev("window.__eid.store.size");
+    await ev("(() => { const s = document.querySelector('#search'); s.value = 'ubuntu'; s.dispatchEvent(new Event('input')); })()");
+    await until("[...document.querySelectorAll('.tr:not([hidden]) .c-name')].length === 1", 3000, "one row for 'ubuntu'");
+    assert(/ubuntu/i.test(await ev("document.querySelector('.tr:not([hidden]) .c-name').textContent")), "wrong row");
+    await ev("(() => { const s = document.querySelector('#search'); s.value = 'zzzz-none'; s.dispatchEvent(new Event('input')); })()");
+    await until("!document.querySelector('#empty').hidden", 3000, "empty message");
+    await ev("document.querySelector('#search').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+    await until(`[...document.querySelectorAll('.tr:not([hidden])')].length === ${total}`, 3000, "all rows back");
+  });
+
+  await check("columns: hide, move and resize from the header; saved and restored after reload", async () => {
+    // hide the link column through the header menu
+    await ev("document.querySelector('#thead').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 300, clientY: 100 }))");
+    await until("!document.querySelector('#menu-cols').hidden", 2000, "column menu");
+    const urlItem = await ev("[...document.querySelectorAll('#menu-cols [role=menuitemcheckbox]')].findIndex(b => /link|الرابط/i.test(b.textContent))");
+    assert(urlItem >= 0, "no link column item");
+    await ev(`document.querySelectorAll('#menu-cols [role=menuitemcheckbox]')[${urlItem}].click()`);
+    await until("getComputedStyle(document.querySelector('#thead .c-url')).display === 'none'", 2000, "link header hidden");
+    assert(await ev("getComputedStyle(document.querySelector('.tr .c-url')).display === 'none'"), "link cells still shown");
+    // move 'status' before 'name' by drag and drop of the header
+    await ev(`(() => { const dt = new DataTransfer(); const a = document.querySelector('#thead .c-status'), b = document.querySelector('#thead .c-name');
+      a.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+      b.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      b.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt })); })()`);
+    const order = await ev("JSON.parse(localStorage.getItem('cols')).map(c => c.key)");
+    assert(order[0] === "status" && order[1] === "name", `order ${order}`);
+    // resize the size column with the pointer
+    const w0 = await ev("document.querySelector('#thead .c-size').getBoundingClientRect().width");
+    await ev(`(() => { const h = document.querySelector('#thead .c-size .rz'); const r = h.getBoundingClientRect(); const x = r.left + 3, y = r.top + 5;
+      const opt = (cx) => ({ bubbles: true, pointerId: 1, clientX: cx, clientY: y, isPrimary: true });
+      h.setPointerCapture = () => {};
+      h.dispatchEvent(new PointerEvent('pointerdown', opt(x)));
+      h.dispatchEvent(new PointerEvent('pointermove', opt(x + (document.documentElement.dir === 'rtl' ? -60 : 60))));
+      h.dispatchEvent(new PointerEvent('pointerup', opt(x))); })()`);
+    const w1 = await ev("document.querySelector('#thead .c-size').getBoundingClientRect().width");
+    assert(w1 > w0 + 40, `width ${w0} -> ${w1}`);
+    // rows follow the header grid
+    const rw = await ev("document.querySelector('.tr:not([hidden]) .c-size').getBoundingClientRect().width");
+    assert(Math.abs(rw - w1) < 2, `row cell ${rw} vs header ${w1}`);
+    await open("");
+    assert(await ev("getComputedStyle(document.querySelector('#thead .c-url')).display === 'none'"), "hidden column came back after reload");
+    const w2 = await ev("document.querySelector('#thead .c-size').getBoundingClientRect().width");
+    assert(Math.abs(w2 - w1) < 2, `width not restored ${w1} vs ${w2}`);
+    if (arg("--shots")) await shot("columns-ar.png");
+    await ev("localStorage.removeItem('cols')");
+  });
+
+  await check("toolbar: hide buttons and show icons only; 'Add' always stays", async () => {
+    await open("");
+    await ev("document.querySelector('#toolbar').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))");
+    await until("document.querySelector('#dlg-toolbar').open", 2000, "toolbar dialog");
+    await ev("document.querySelector('#tb-list input').click()"); // first = add_video
+    await ev("document.querySelector('#tb-labels').click()");
+    assert(await ev("document.querySelector('#toolbar [data-cmd=add_video]').hidden"), "video button not hidden");
+    assert(!(await ev("document.querySelector('#toolbar [data-cmd=add]').hidden")), "add hidden");
+    assert(await ev("getComputedStyle(document.querySelector('#toolbar [data-cmd=add] span')).display === 'none'"), "labels still shown");
+    await ev("document.querySelector('#dlg-toolbar').close()");
+    await open("");
+    assert(await ev("document.querySelector('#toolbar [data-cmd=add_video]').hidden"), "choice not saved");
+    await ev("localStorage.removeItem('toolbar')");
+    await open("");
+  });
+
+  await check("drag and drop: dropped links open the add dialog; files and non-links are refused", async () => {
+    const drop = (type, data) => ev(`(() => { const dt = new DataTransfer(); dt.setData(${JSON.stringify(type)}, ${JSON.stringify(data)});
+      document.body.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const shown = !document.querySelector('#drop').hidden;
+      document.body.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt })); return shown; })()`);
+    assert(await drop("text/uri-list", "# c\r\nhttps://a.example/x.zip\r\nhttps://b.example/y.iso"), "drop overlay not shown");
+    await until("document.querySelector('#dlg-add').open", 2000, "add dialog");
+    const v = await ev("document.querySelector('#in-links').value");
+    assert(v === "https://a.example/x.zip\nhttps://b.example/y.iso", `links ${JSON.stringify(v)}`);
+    await ev("document.querySelector('#dlg-add').close()");
+    await drop("text/plain", "just words, javascript:alert(1)");
+    await until("!document.querySelector('#toast').hidden", 2000, "refusal toast");
+    assert(!(await ev("document.querySelector('#dlg-add').open")), "dialog opened for a non-link");
+    assert(await ev("document.querySelector('#drop').hidden"), "overlay left on screen");
+  });
+
+  await check("notices: a download that finishes or fails shows a message (and none when turned off)", async () => {
+    await open("");
+    const id = await ev("[...window.__eid.store.values()].find(i => i.status === 'pending' || i.status === 'paused').id");
+    await ev("document.querySelector('#toast').hidden = true");
+    await ev(`window.__eidMockSet(${id}, { status: 'failed', error_kind: 'not_found' })`);
+    await ev("window.__eid.poll()");
+    await until("!document.querySelector('#toast').hidden && /فشل/.test(document.querySelector('#toast').textContent)", 4000, "failure notice");
+    await ev("localStorage.setItem('notify', 'off')");
+    await open("");
+    await ev("document.querySelector('#toast').hidden = true");
+    const id2 = await ev("[...window.__eid.store.values()].find(i => i.status === 'pending' || i.status === 'paused').id");
+    await ev(`window.__eidMockSet(${id2}, { status: 'done' })`);
+    await ev("window.__eid.poll()");
+    await sleep(300);
+    assert(await ev("document.querySelector('#toast').hidden"), "notice shown while turned off");
+    await ev("localStorage.removeItem('notify')");
+  });
+
+  await check("desktop: tray/close-to-tray/clipboard switches save; tray menu texts follow the language; tray actions and copied links work", async () => {
+    await open("");
+    // tray menu texts were sent in Arabic, then in English after switching
+    await until("window.__eidMockTrayTexts()?.quit === 'خروج'", 3000, "arabic tray texts");
+    await ev("document.querySelector('#btn-lang').click()");
+    await until("window.__eidMockTrayTexts()?.quit === 'Quit'", 3000, "english tray texts");
+    await ev("document.querySelector('#btn-lang').click()");
+    // switches (default: tray on, close-to-tray off, clipboard off)
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await until("document.querySelector('#dlg-settings').open && document.querySelector('#set-tray').checked", 3000, "settings with tray on");
+    assert(!(await ev("document.querySelector('#set-clipboard').checked")), "clipboard must be off by default");
+    await ev("document.querySelector('#set-clipboard').click()");
+    await sleep(200);
+    await ev("document.querySelector('#set-tray').click()"); // off: close-to-tray is disabled
+    await sleep(200);
+    assert(await ev("document.querySelector('#set-close-tray').disabled"), "close-to-tray enabled without the icon");
+    await ev("document.querySelector('#dlg-settings').close()");
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await until("document.querySelector('#dlg-settings').open && document.querySelector('#set-clipboard').checked && !document.querySelector('#set-tray').checked", 3000, "saved switches read back");
+    await ev("document.querySelector('#set-tray').click()");
+    await sleep(200);
+    await ev("document.querySelector('#dlg-settings').close()");
+    // tray "pause all" runs the page's own command
+    const busy = await ev("[...window.__eid.store.values()].filter(i => ['running','pending'].includes(i.status)).length");
+    assert(busy > 0, "need a busy item");
+    await ev("window.__eidMockEmit('tray', 'pause_all')");
+    await until("[...window.__eid.store.values()].filter(i => i.status === 'running').length === 0", 4000, "paused from the tray");
+    // a copied file link: bar, then the add dialog with that link
+    await ev("window.__eidMockEmit('clipboard-link', { url: 'https://example.com/a/setup.zip', kind: 'file' })");
+    await until("!document.querySelector('#clipbar').hidden", 2000, "clipboard bar");
+    await ev("document.querySelector('#clip-add').click()");
+    await until("document.querySelector('#dlg-add').open && document.querySelector('#in-links').value === 'https://example.com/a/setup.zip'", 2000, "add dialog with the link");
+    await ev("document.querySelector('#dlg-add').close()");
+    // a bad payload never shows the bar
+    await ev("window.__eidMockEmit('clipboard-link', { url: 'javascript:alert(1)', kind: 'file' })");
+    await sleep(100);
+    assert(await ev("document.querySelector('#clipbar').hidden"), "bar shown for a non-http link");
+    // a YouTube link opens the video dialog
+    await ev("window.__eidMockEmit('clipboard-link', { url: 'https://www.youtube.com/watch?v=abc', kind: 'video' })");
+    await ev("document.querySelector('#clip-add').click()");
+    await until("document.querySelector('#dlg-video').open", 2000, "video dialog");
+    await ev("document.querySelector('#dlg-video').close()");
+    if (arg("--shots")) { await ev("document.querySelector('[data-cmd=settings]').click()"); await sleep(300); await shot("settings-desktop-ar.png"); await ev("document.querySelector('#dlg-settings').close()"); }
+  });
+
+  await check("queues, per-download limit and the 'when finished' countdown with Cancel", async () => {
+    await open("");
+    // queues dialog from the Downloads menu
+    await ev("document.querySelector('#menu-downloads [data-cmd=queues]').click()");
+    await until("document.querySelector('#dlg-queues').open && document.querySelectorAll('.q-row').length === 2", 3000, "two queues");
+    assert(/الرئيسية/.test(await ev("document.querySelector('.q-row .q-name').textContent")), "main queue first, named");
+    // off by default: computer actions cannot be chosen
+    assert(await ev("document.querySelector('.q-row .q-after option[value=shutdown]').disabled"), "shutdown offered while turned off");
+    await ev("document.querySelector('#dlg-queues').close()");
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await until("document.querySelector('#dlg-settings').open", 2000, "settings");
+    assert(!(await ev("document.querySelector('#set-power').checked")), "power actions must be off by default");
+    await ev("document.querySelector('#set-power').click()");
+    await sleep(200);
+    await ev("document.querySelector('#dlg-settings').close()");
+    await ev("document.querySelector('#menu-downloads [data-cmd=queues]').click()");
+    await until("document.querySelector('#dlg-queues').open && document.querySelectorAll('.q-row').length === 2 && !document.querySelector('.q-row .q-after option[value=shutdown]').disabled", 3000, "shutdown allowed after turning it on");
+    await ev("(() => { const r = document.querySelectorAll('.q-row')[1]; r.querySelector('.q-par').value = '4'; r.querySelector('.q-after').value = 'shutdown'; r.querySelector('.q-save').click(); })()");
+    await until("document.querySelectorAll('.q-row')[1]?.querySelector('.q-after').value === 'shutdown' && document.querySelectorAll('.q-row')[1].querySelector('.q-par').value === '4'", 3000, "saved and read back");
+    await ev("document.querySelectorAll('.q-row')[1].querySelector('.q-toggle').click()");
+    await until("/متوقفة/.test(document.querySelectorAll('.q-row')[1]?.querySelector('.q-name').textContent ?? '')", 3000, "queue stopped");
+    // a bad value is refused in the window
+    await ev("(() => { const r = document.querySelectorAll('.q-row')[0]; r.querySelector('.q-par').value = '99'; r.querySelector('.q-save').click(); })()");
+    assert(!(await ev("document.querySelector('#q-error').hidden")), "99 accepted");
+    if (arg("--shots")) await shot("queues-ar.png");
+    await ev("document.querySelector('#dlg-queues').close()");
+    // per-download limit from the details window
+    const id = await ev("[...window.__eid.store.values()].find(i => i.status === 'paused').id");
+    await ev(`window.__eid.select([${id}])`);
+    await ev("document.querySelector('#menu-downloads [data-cmd=properties]').click()");
+    await until("document.querySelector('#dlg-props').open", 2000, "details");
+    await ev("document.querySelector('#p-limit').value = '500'; document.querySelector('#p-limit-set').click()");
+    await until(`window.__eidMockLimit(${id}) === 500`, 2000, "limit 500 sent");
+    await ev("document.querySelector('#p-limit').value = '0'; document.querySelector('#p-limit-set').click()");
+    await until(`window.__eidMockLimit(${id}) === null`, 2000, "0 = no limit");
+    await ev("document.querySelector('#dlg-props').close()");
+    // the countdown: bar with the action and seconds, Cancel stops it and resets the choice
+    await ev("window.__eidMockCountdown(42, 'shutdown'); window.__eid.poll()");
+    await until("!document.querySelector('#powerbar').hidden && /42/.test(document.querySelector('#power-text').textContent) && /إيقاف تشغيل الجهاز/.test(document.querySelector('#power-text').textContent)", 4000, "countdown bar");
+    if (arg("--shots")) await shot("countdown-ar.png");
+    await ev("document.querySelector('#power-cancel').click()");
+    await until("document.querySelector('#powerbar').hidden", 2000, "bar hidden");
+    await until("/أُلغي/.test(document.querySelector('#toast').textContent)", 4000, "cancelled message");
+  });
+
+  await check("an engine warning (resume point not saved) is shown once", async () => {
+    await open("");
+    const it = await ev("[...window.__eid.store.values()][0]");
+    await ev("document.querySelector('#toast').hidden = true");
+    await ev(`window.__eidMockWarn(${it.id}, 'final checkpoint: injected'); window.__eid.poll()`);
+    await until("!document.querySelector('#toast').hidden && /نقطة الاستكمال/.test(document.querySelector('#toast').textContent)", 4000, "warning shown");
+    assert((await ev("document.querySelector('#toast').textContent")).includes(it.name), "names the download");
+  });
+
+  await check("add dialog: queue and 'folder by type'; import/export from the menu; Desktop settings tab", async () => {
+    await open("");
+    await ev("document.querySelector('#btn-add').click()");
+    await until("document.querySelector('#dlg-add').open && document.querySelectorAll('#in-cat option').length === 8 && document.querySelectorAll('#in-queue option').length === 2", 3000, "choices filled");
+    assert((await ev("document.querySelector('#in-cat').value")) === "none", "default must be no sub-folder");
+    await ev("(() => { const q = document.querySelector('#in-queue'); q.value = '1'; q.dispatchEvent(new Event('change')); document.querySelector('#in-cat').value = 'auto'; document.querySelector('#in-links').value = 'https://example.com/z.zip'; })()");
+    assert(/Apps/.test(await ev("document.querySelector('#folder-show').textContent")), "queue choice sets the folder");
+    await ev("document.querySelector('#btn-start').click()");
+    await until("window.__eidMockLastAdd?.category === 'auto'", 3000, "category sent");
+    assert(/Apps/.test(await ev("window.__eidMockLastAdd.folder")), "queue folder sent");
+    // the default follows the setting
+    await ev("document.querySelector('#set-autocat').click()");
+    await ev("document.querySelector('#btn-add').click()");
+    await until("document.querySelector('#dlg-add').open && document.querySelector('#in-cat').value === 'auto'", 3000, "auto by default after the setting");
+    await ev("document.querySelector('#dlg-add').close(); document.querySelector('#set-autocat').click()");
+    // import / export
+    await ev("window.__eidMockImport = { urls: ['https://example.com/i1.zip', 'https://example.com/i2.iso'], refused: 1 }");
+    const before = await ev("window.__eid.store.size");
+    await ev("document.querySelector('#menu-downloads [data-cmd=import_list]').click()");
+    await until(`window.__eid.store.size === ${before} + 2`, 4000, "imported items listed");
+    await until("/أُضيف 2/.test(document.querySelector('#toast').textContent) && /رُفض 1/.test(document.querySelector('#toast').textContent)", 3000, "import report");
+    await ev("document.querySelector('#menu-downloads [data-cmd=export_list]').click()");
+    await until("/صُدّر/.test(document.querySelector('#toast').textContent)", 3000, "export report");
+    // Desktop tab holds the desktop switches
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await ev("document.querySelector('#dlg-settings [data-tab=desktop]').click()");
+    assert(!(await ev("document.querySelector('[data-pane=desktop]').hidden")) && await ev("document.querySelector('[data-pane=desktop]').contains(document.querySelector('#set-tray'))"), "desktop tab");
+    if (arg("--shots")) await shot("settings-desktop-tab-ar.png");
+    await ev("document.querySelector('#dlg-settings').close()");
   });
 
   for (const n of [100, 1000, 3000]) {

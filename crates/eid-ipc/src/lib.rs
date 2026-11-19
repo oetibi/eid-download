@@ -14,7 +14,7 @@ pub mod proto;
 pub mod server;
 
 pub use client::{Client, ClientError, Endpoint};
-pub use proto::{Command, Request, Response, VERSION, VIDEO_QUALITIES};
+pub use proto::{Command, Request, Response, VERSION, VIDEO_FALLBACKS, VIDEO_QUALITIES};
 pub use server::{serve, Handler, ServeOptions};
 
 use eid_platform::ipc as plat;

@@ -37,7 +37,7 @@
 
   function fill(s) {
     f.enabled.checked = s.enabled;
-    for (const k of ["visibility", "position", "size", "color", "shape", "label"]) setRadio(k, s[k]);
+    for (const k of ["visibility", "position", "size", "color", "shape", "label", "ifMissing"]) setRadio(k, s[k]);
     f.customSize.value = s.customSize;
     f.customColor.value = s.customColor;
     f.opacity.value = s.opacity;
@@ -63,6 +63,7 @@
       label: radio("label"),
       opacity: Number(f.opacity.value),
       excludedSites: f.excludedSites.value.split(/[\n,]+/),
+      ifMissing: radio("ifMissing"),
     });
   }
 
