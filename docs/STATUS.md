@@ -431,3 +431,4 @@
 - 13:35 سكربت مقارنة IDM + خطوة قياس المحرّك على Windows في CI (`778ef73`).
 - 13:45 حزم الإضافة للمتاجر (`ef2719b`)، الوثائق وملاحظات الإصدار (`1958ef6`).
 - التالي: CI أخضر على PR #3 ← تعبئة `ARTIFACT_NUMBERS` في `docs/BENCHMARKS.md` من artifacts (`perf-windows`، `engine-windows`) ← وصف PR ← دمج ← وسم `v0.1.0` (إصدار تجريبي) ← فحص الأصول والبصمات.
+- 14:35 ci-windows أخضر على `f61e174` (run 44510265157)؛ أرقام Windows أُضيفت إلى `docs/BENCHMARKS.md` §4. وصف PR #3 كُتب. بانتظار ci-linux (apt بطيء على المشغّل ~17 د).
