@@ -237,7 +237,7 @@ jobs:
         with: { node-version: '24' }
       - name: Browser extension packages (store + sideload), added to SHA256SUMS
         run: |
-          node --test extension/test/
+          (cd extension && node --test)
           node scripts/ext/package.mjs --out ext-pkg
           cp ext-pkg/*.zip rel/
           cat ext-pkg/SHA256SUMS.txt >> rel/SHA256SUMS.txt

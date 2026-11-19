@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const SRC = path.join(ROOT, "extension", "src");
-export const VERSION = "0.1.1";
+export const VERSION = "0.1.2";
 
 /**
  * Public key that pins the Chrome/Edge extension id for unpacked installs (the native host

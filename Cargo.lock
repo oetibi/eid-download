@@ -934,7 +934,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "eid-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eid-cli",
  "eid-engine",
@@ -952,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "eid-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eid-engine",
  "eid-platform",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "eid-fake-ytdlp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde_json",
  "sha2 0.10.9",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "eid-gui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eid-cli",
  "eid-engine",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "eid-ipc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eid-platform",
  "serde",
@@ -1016,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "eid-media"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eid-engine",
  "eid-platform",
@@ -1033,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "eid-native-host"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eid-ipc",
  "eid-platform",
@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "eid-platform"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "getrandom 0.2.17",
  "libc",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "eid-testserver"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "sha2 0.10.9",
  "tokio",
