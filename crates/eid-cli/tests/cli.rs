@@ -29,6 +29,8 @@ fn kill_window_slow() -> Behavior {
     }
 }
 
+/// Used only by the Unix Ctrl-C test below (the kill/resume test has its own, slower server).
+#[cfg(unix)]
 fn slow() -> Behavior {
     Behavior {
         throttle_bps: Some(2_500_000),
