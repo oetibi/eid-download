@@ -1,8 +1,14 @@
 {
-  "_comment": "Browser extension IDs allowed to start the native host com.eid.download. Read by scripts/windows/native_host_manifests.py when the Windows installer is built (crates/eid-gui/installer/README.md). PLACEHOLDER VALUES: the extension IDs are not final yet. Set the real IDs and \"placeholder\": false before a release; a tag build refuses placeholder IDs. An empty list means that browser is not registered by the installer.",
-  "placeholder": true,
+  "_comment": "Browser extension IDs allowed to start the native host com.eid.download. Read by scripts/windows/native_host_manifests.py when the Windows installer is built (crates/eid-gui/installer/README.md). chrome/edge: the id pinned by the public key in scripts/ext/build.mjs (CHROME_KEY), used by the unpacked/sideloaded build in Chrome and Edge. firefox: the gecko id in the same file. Store listings (Chrome Web Store, Edge Add-ons) get their own ids: add them here when they exist (docs/OWNER-ACTIONS.md). An empty list means that browser is not registered.",
+  "placeholder": false,
   "host_name": "com.eid.download",
-  "chrome": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
-  "edge": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
-  "firefox": ["eid-download@placeholder.invalid"]
+  "chrome": [
+    "ambokeecedpgicighhcpdfjphdnphgaa"
+  ],
+  "edge": [
+    "ambokeecedpgicighhcpdfjphdnphgaa"
+  ],
+  "firefox": [
+    "eid-download@eid-download"
+  ]
 }
