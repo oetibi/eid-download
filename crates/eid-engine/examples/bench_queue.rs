@@ -23,16 +23,25 @@ fn main() {
         for id in 1..=n {
             q.items.push(Item {
                 id,
-                url: format!("https://downloads.example.com/releases/v{id}/package-{id}-x86_64.tar.zst"),
+                url: format!(
+                    "https://downloads.example.com/releases/v{id}/package-{id}-x86_64.tar.zst"
+                ),
                 subdir: None,
                 file_name: Some(format!("package-{id}-x86_64.tar.zst")),
-                status: if id % 3 == 0 { Status::Done } else { Status::Pending },
+                status: if id % 3 == 0 {
+                    Status::Done
+                } else {
+                    Status::Pending
+                },
                 attempts: 0,
                 not_before: None,
                 last_error: None,
             });
         }
-        let qs = QueueSet { queues: vec![q], next_id: n + 1 };
+        let qs = QueueSet {
+            queues: vec![q],
+            next_id: n + 1,
+        };
         let path = dir.join(format!("queues-{n}.json"));
         let (mut c, mut j, mut s) = (vec![], vec![], vec![]);
         let mut size = 0;
