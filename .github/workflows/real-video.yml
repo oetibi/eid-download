@@ -4,6 +4,9 @@
 # a failure here is reported as such, not hidden).
 name: real-video
 on:
+  # a push to a `real-video/*` branch runs it too (workflow_dispatch needs the file on main)
+  push:
+    branches: ['real-video/**']
   workflow_dispatch:
     inputs:
       playlist:
