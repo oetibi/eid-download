@@ -1,0 +1,40 @@
+# REAL video test on Windows (owner request 2026-11-19: "test the real functions on Windows;
+# mocks are not proof"). Manual only: real internet, real YouTube (Creative Commons content),
+# ~230 MB of pinned tools. Never on push/PR (YouTube may rate-limit or bot-check CI addresses;
+# a failure here is reported as such, not hidden).
+name: real-video
+on:
+  workflow_dispatch:
+    inputs:
+      playlist:
+        description: 'playlist URL (default: Blender Open Movies, CC BY)'
+        required: false
+      items:
+        description: 'item numbers, e.g. 1,4'
+        required: false
+permissions:
+  contents: read
+jobs:
+  real:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Real yt-dlp / FFmpeg / Deno + real YouTube through the app's job layer
+        env:
+          EID_REAL_PLAYLIST: ${{ inputs.playlist }}
+          EID_REAL_ITEMS: ${{ inputs.items }}
+        shell: pwsh
+        run: |
+          if (-not $env:EID_REAL_PLAYLIST) { Remove-Item Env:EID_REAL_PLAYLIST }
+          if (-not $env:EID_REAL_ITEMS) { Remove-Item Env:EID_REAL_ITEMS }
+          cargo test -p eid-cli --test real_jobs -- --ignored --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath real-video.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: real-video-log
+          retention-days: 30
+          path: real-video.log
