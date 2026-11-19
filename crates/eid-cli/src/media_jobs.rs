@@ -1,12 +1,17 @@
 //! v0.1 video and playlist jobs for the desktop app and the browser (docs/V0.1-CONTRACT.md).
 //!
 //! A job is one run of `eid video get|playlist ... --events --stop-on-stdin-eof` as a child
-//! process (the tested CLI does consent, tools, staging, numbering, the archive and publishing;
+//! process (the tested CLI does the checks, tools, staging, numbering, the archive and publishing;
 //! this layer only schedules, reads its JSON events and keeps a small persistent list). Pause
 //! closes the child's standard input, which cancels it like Ctrl-C (partial data is kept; the
 //! next run continues); a child that does not stop within [`STOP_GRACE`] is killed (its tool tree
 //! goes with it: job object / process group). At most [`VideoJobs::max_running`] jobs run at
 //! once; nothing polls: the scheduler sleeps until something changes.
+//!
+//! This module is reachable from IPC / Native Messaging (`eid serve`, the browser): it never
+//! passes the agreement flag to the child and never writes the agreement record, so a child it
+//! starts before the user agreed in the window or the CLI stops with exit code 3 and installs
+//! or starts nothing (crates/eid-media/tests/g2_tools.rs scans this file for that).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -139,17 +144,9 @@ pub struct JobsConfig {
     pub env: Vec<(OsString, OsString)>,
 }
 
-#[derive(Default)]
-struct Setup {
-    running: bool,
-    error: Option<String>,
-    ctl: Option<Ctl>,
-}
-
 struct Inner {
     jobs: Vec<Job>,
     next: u64,
-    setup: Setup,
 }
 
 /// The job list. Cheap to clone (shared).
@@ -171,22 +168,25 @@ fn lock(m: &Mutex<Inner>) -> std::sync::MutexGuard<'_, Inner> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Quality strings accepted everywhere (no 8K).
+/// Quality strings accepted everywhere (no 8K): [`eid_ipc::VIDEO_QUALITIES`].
 pub fn check_quality(q: &str) -> Result<(), String> {
-    if eid_media::args::QUALITY_CHOICES.contains(&q) {
+    if eid_ipc::VIDEO_QUALITIES.contains(&q) {
         Ok(())
     } else {
         Err(format!(
             "quality must be one of {}",
-            eid_media::args::QUALITY_CHOICES.join(", ")
+            eid_ipc::VIDEO_QUALITIES.join(", ")
         ))
     }
 }
 
+/// A web page address (the child checks it fully again before running any tool).
 fn check_url(url: &str) -> Result<(), String> {
-    eid_media::args::MediaUrl::parse(url)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    if !web || url.len() > eid_ipc::proto::MAX_URL_LEN || url.chars().any(char::is_control) {
+        return Err("invalid page address".into());
+    }
+    Ok(())
 }
 
 impl VideoJobs {
@@ -196,11 +196,7 @@ impl VideoJobs {
         let (jobs, next) = load(&cfg.state_file);
         let v = VideoJobs {
             cfg: Arc::new(cfg),
-            inner: Arc::new(Mutex::new(Inner {
-                jobs,
-                next,
-                setup: Setup::default(),
-            })),
+            inner: Arc::new(Mutex::new(Inner { jobs, next })),
             wake: Arc::new(Notify::new()),
         };
         let me = v.clone();
@@ -226,7 +222,7 @@ impl VideoJobs {
         }
     }
 
-    fn command(&self, args: &[OsString]) -> tokio::process::Command {
+    pub(crate) fn command(&self, args: &[OsString]) -> tokio::process::Command {
         let mut c = tokio::process::Command::new(&self.cfg.eid_exe);
         c.args(args);
         for (k, v) in &self.cfg.env {
@@ -241,85 +237,10 @@ impl VideoJobs {
         c
     }
 
-    // ------------------------------------------------------------ tools
-
-    /// `{installed, consent, installing, error}`.
-    pub fn tools_status(&self) -> Value {
-        let (consent, installed) = match (crate::video::manifest(), crate::video::stores()) {
-            (Ok(m), Ok((s, t))) => (
-                eid_media::consent::is_granted(&s, &m).unwrap_or(false),
-                t.current(&m).is_ok(),
-            ),
-            _ => (false, false),
-        };
-        let g = lock(&self.inner);
-        json!({"installed": installed, "consent": consent,
-               "installing": g.setup.running, "error": g.setup.error})
-    }
-
-    /// The consent text the user must read before [`Self::tools_install`].
-    pub fn consent_text(&self, lang: &str) -> Result<String, String> {
-        let m = crate::video::manifest()?;
-        let l = if lang == "ar" {
-            eid_media::consent::Lang::Ar
-        } else {
-            eid_media::consent::Lang::En
-        };
-        Ok(eid_media::consent::consent_text(l, &m).text)
-    }
-
-    /// Record consent (the user accepted the text in the window) and install the tools in
-    /// the background (`eid video setup --yes-i-agree`).
-    pub fn tools_install(&self, accept: bool) -> Result<(), String> {
-        if !accept {
-            return Err("consent is required".into());
-        }
-        let mut g = lock(&self.inner);
-        if g.setup.running {
-            return Ok(());
-        }
-        let args: Vec<OsString> = [
-            "video",
-            "setup",
-            "--yes-i-agree",
-            "--events",
-            "--stop-on-stdin-eof",
-        ]
-        .iter()
-        .map(OsString::from)
-        .collect();
-        let mut child = self.command(&args).spawn().map_err(|e| e.to_string())?;
-        let (ktx, krx) = tokio::sync::oneshot::channel();
-        g.setup = Setup {
-            running: true,
-            error: None,
-            ctl: Some(Ctl {
-                stdin: child.stdin.take(),
-                _kill: Some(ktx),
-            }),
-        };
-        drop(g);
-        let me = self.clone();
-        tokio::spawn(async move {
-            let (code, err) = me.drive(None, child, krx).await;
-            let mut g = lock(&me.inner);
-            g.setup.running = false;
-            g.setup.ctl = None;
-            g.setup.error = if code == Some(0) {
-                None
-            } else {
-                Some(err.unwrap_or_else(|| "the video tools were not installed".into()))
-            };
-            drop(g);
-            me.wake.notify_one();
-        });
-        Ok(())
-    }
-
     // ------------------------------------------------------------ probe
 
     /// What `url` is (`eid video probe`): `{kind, title, qualities, items?}`. Errors starting
-    /// with `TOOLS_MISSING:` mean consent or tools are missing.
+    /// with `TOOLS_MISSING:` mean the one-time setup in the window has not been done.
     pub async fn probe(&self, url: &str) -> Result<Value, String> {
         check_url(url)?;
         let args: Vec<OsString> = vec!["video".into(), "probe".into(), "--".into(), url.into()];
@@ -502,15 +423,12 @@ impl VideoJobs {
                     c.stdin.take();
                 }
             }
-            if let Some(c) = g.setup.ctl.as_mut() {
-                c.stdin.take();
-            }
         }
         let t0 = std::time::Instant::now();
         while t0.elapsed() < STOP_GRACE {
             let busy = {
                 let g = lock(&self.inner);
-                g.jobs.iter().any(|j| j.ctl.is_some()) || g.setup.running
+                g.jobs.iter().any(|j| j.ctl.is_some())
             };
             if !busy {
                 break;
@@ -530,9 +448,6 @@ impl VideoJobs {
 
     fn start_ready(&self) {
         let mut g = lock(&self.inner);
-        if g.setup.running {
-            return;
-        }
         let running = g.jobs.iter().filter(|j| j.ctl.is_some()).count();
         let free = self.max_running().saturating_sub(running);
         let ready: Vec<u64> = g
@@ -573,7 +488,7 @@ impl VideoJobs {
     }
 
     /// Read the child's events until it exits; returns its exit code and last error.
-    async fn drive(
+    pub(crate) async fn drive(
         &self,
         id: Option<u64>,
         mut child: tokio::process::Child,

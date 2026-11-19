@@ -2,7 +2,8 @@
 //! yt-dlp: consent + tool install, probe, a playlist job with a selection, pause / resume /
 //! remove of a running job, persistence. Plumbing only: not proof that real YouTube works.
 mod video_env;
-use eid_cli::video_jobs::{JobsConfig, Kind, VideoJobs};
+use eid_cli::media_jobs::{JobsConfig, Kind, VideoJobs};
+use eid_cli::video_setup::VideoSetup;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use video_env::*;
@@ -46,24 +47,42 @@ async fn video_jobs_end_to_end_with_the_fake_tool() {
             .collect(),
     };
     let v = VideoJobs::start(cfg.clone());
+    let setup = VideoSetup::new(v.clone());
 
     // nothing before consent; probe says TOOLS_MISSING and downloads nothing
-    let st = v.tools_status();
+    let st = setup.status();
     assert_eq!(st["installed"], false);
     assert_eq!(st["consent"], false);
     let err = v.probe(&e.url("video/abc", "")).await.unwrap_err();
     assert!(err.contains("TOOLS_MISSING"), "{err}");
     assert_eq!(e.tool_requests(), 0);
-    assert!(v.tools_install(false).is_err());
-    assert!(v.consent_text("ar").unwrap().len() > 100);
+    assert!(setup.install(false).is_err());
+    // a job added before the agreement (e.g. from the browser) stops at once: nothing is
+    // installed or started, and it says why
+    let early = v
+        .add(Kind::Video, &e.url("video/abc", ""), "best", None, None)
+        .unwrap();
+    wait_for("early job", 30, || job(&v, early)["state"] == "failed").await;
+    assert!(
+        job(&v, early)["error"]
+            .as_str()
+            .unwrap()
+            .contains("consent"),
+        "{}",
+        job(&v, early)
+    );
+    assert_eq!(e.tool_requests(), 0);
+    assert!(e.calls().is_empty());
+    v.remove(early).unwrap();
+    assert!(setup.consent_text("ar").unwrap().len() > 100);
 
-    v.tools_install(true).unwrap();
+    setup.install(true).unwrap();
     wait_for("tools", 60, || {
-        let s = v.tools_status();
+        let s = setup.status();
         s["installed"] == true && s["installing"] == false
     })
     .await;
-    assert_eq!(v.tools_status()["consent"], true);
+    assert_eq!(setup.status()["consent"], true);
 
     // probe a playlist, then download items 1 and 3 of it
     let list = e.root.path().join("list.json");
