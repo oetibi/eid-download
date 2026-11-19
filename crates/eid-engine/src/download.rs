@@ -1116,6 +1116,49 @@ fn job_limiter(cfg: &Config) -> Option<Arc<Limiter>> {
     }
 }
 
+/// Adaptive ramp (v0.1): how many workers one ramp tick may add. Like TCP slow start: while
+/// the measured throughput keeps growing (>= 10% per tick) after adding workers, the next tick
+/// adds twice as many (1, 2, 4, 8); as soon as it stops growing (the link or the server is
+/// saturated) it falls back to one per tick, the old gradual ramp. A per-connection-throttled
+/// server so reaches its useful connection count in about a second instead of 0.3 s per
+/// connection, while a saturated link never gets a burst of extra connections. The total is
+/// still bounded by `connections` and by the server-limit cap (`target()`).
+#[derive(Debug, Default)]
+pub(crate) struct Ramp {
+    last: Option<(u64, std::time::Instant)>,
+    last_rate: f64,
+    burst: usize,
+}
+
+impl Ramp {
+    pub(crate) const MAX_BURST: usize = 8;
+
+    pub(crate) fn burst(&mut self, done: u64, now: std::time::Instant) -> usize {
+        let rate = match self.last {
+            Some((d, t)) => {
+                let dt = now.saturating_duration_since(t).as_secs_f64();
+                if dt < 0.05 {
+                    return self.burst.max(1);
+                }
+                done.saturating_sub(d) as f64 / dt
+            }
+            None => {
+                self.last = Some((done, now));
+                self.burst = 1;
+                return 1;
+            }
+        };
+        self.burst = if rate > 0.0 && rate >= self.last_rate * 1.10 {
+            (self.burst * 2).clamp(1, Self::MAX_BURST)
+        } else {
+            1
+        };
+        self.last = Some((done, now));
+        self.last_rate = rate;
+        self.burst
+    }
+}
+
 async fn run_ranged(
     ctx: Arc<Ctx>,
     info: &JobInfo,
@@ -1136,6 +1179,7 @@ async fn run_ranged(
     ramp.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ckpt.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ckpt.reset();
+    let mut ramp_ctl = Ramp::default();
     let mut fatal: Option<Error> = None;
     let mut ckpt_closed = false;
     let (ckpt_ctl, mut ckpt_err) = start_ckpt_task(ctx.clone(), info.clone(), state_path);
@@ -1180,6 +1224,7 @@ async fn run_ranged(
                 }
             }
             _ = ramp.tick(), if fatal.is_none() && !ctx.cancel.is_cancelled() => {
+                for _ in 0..ramp_ctl.burst(ctx.done_bytes.load(Ordering::Relaxed), std::time::Instant::now()) {
                 let active = ctx.active.load(Ordering::SeqCst);
                 if active < target() {
                     let (seg, split) = {
@@ -1196,6 +1241,7 @@ async fn run_ranged(
                     if let Some(seg) = seg {
                         spawn_worker(&mut set, &ctx, seg, None);
                     }
+                }
                 }
             }
             _ = ckpt.tick() => {
@@ -2004,5 +2050,45 @@ async fn resume_inner(
             .await
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod ramp_tests {
+    use super::Ramp;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn doubles_while_throughput_grows_and_falls_back_to_one_when_it_does_not() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut r = Ramp::default();
+        assert_eq!(r.burst(0, ms(0)), 1);
+        // 4 MB/s, then 12, 28, 60, 124, 252: keeps growing -> 2, 4, 8, 8 (capped)
+        assert_eq!(r.burst(1_200_000, ms(300)), 2);
+        assert_eq!(r.burst(4_800_000, ms(600)), 4);
+        assert_eq!(r.burst(13_200_000, ms(900)), 8);
+        assert_eq!(r.burst(31_200_000, ms(1200)), 8);
+        // saturated: same rate as before -> one per tick
+        assert_eq!(r.burst(49_200_000, ms(1500)), 1);
+        assert_eq!(r.burst(67_200_000, ms(1800)), 1);
+        // nothing moving (stall, server not answering): never a burst
+        assert_eq!(r.burst(67_200_000, ms(2100)), 1);
+        assert_eq!(r.burst(67_200_000, ms(2400)), 1);
+    }
+
+    #[test]
+    fn a_saturated_single_connection_never_gets_a_burst() {
+        let t0 = Instant::now();
+        let mut r = Ramp::default();
+        r.burst(0, t0);
+        let mut done = 0;
+        for i in 1..20u64 {
+            done += 30_000_000; // flat 100 MB/s from the start
+            let b = r.burst(done, t0 + Duration::from_millis(300 * i));
+            if i > 1 {
+                assert_eq!(b, 1, "tick {i}");
+            }
+        }
     }
 }
