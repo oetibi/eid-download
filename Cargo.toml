@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/eid-engine", "crates/eid-platform", "crates/eid-testserver", "crates/eid-cli", "crates/eid-ipc", "crates/eid-native-host", "crates/eid-media", "crates/eid-fake-ytdlp", "crates/eid-gui"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"   # docs/adr/0008-license.md (owner decision 2026-11-17)
 

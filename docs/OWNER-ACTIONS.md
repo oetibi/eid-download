@@ -1,6 +1,6 @@
 <div dir="rtl">
 
-# خطوات المالك (v0.1.1) — كل ما لا تستطيع الأتمتة فعله نيابةً عنك
+# خطوات المالك (v0.1.2) — كل ما لا تستطيع الأتمتة فعله نيابةً عنك
 
 كل خطوة هنا محضّرة بالكامل: الأوامر، الملفات، وما يجب أن تراه. إن فشل شيء، أرسل لقطة الشاشة
 ومحتوى الملف المذكور في الخطوة. **لا شيء هنا يحذف بياناتك.**
@@ -12,10 +12,10 @@
 
 ## 1) تجربة البرنامج على جهازك (Windows 10/11) — ~20 دقيقة
 
-1. من صفحة الإصدار التجريبي `v0.1.1` نزّل `EidDownload-0.1.1-windows-x64-setup.exe` و`SHA256SUMS.txt`.
+1. من صفحة الإصدار التجريبي `v0.1.2` نزّل `EidDownload-0.1.2-windows-x64-setup.exe` و`SHA256SUMS.txt`.
 2. تحقق من البصمة في PowerShell:
    ```powershell
-   Get-FileHash .\EidDownload-0.1.1-windows-x64-setup.exe -Algorithm SHA256
+   Get-FileHash .\EidDownload-0.1.2-windows-x64-setup.exe -Algorithm SHA256
    ```
    يجب أن تطابق السطر نفسه في `SHA256SUMS.txt`.
 3. ثبّت (لا يحتاج صلاحيات مدير؛ SmartScreen: More info ← Run anyway، لأن الملف غير موقّع بعد — انظر 6).
@@ -50,10 +50,10 @@
 المثبّت يسجّل اتصال المتصفح (Native Messaging) تلقائياً لـChrome وEdge وFirefox بالمعرّفات الموجودة
 في `extension/native-host-ids.json`. حتى تُنشر الإضافة في المتاجر (الخطوة 5) ثبّتها يدوياً:
 
-1. من صفحة الإصدار نزّل `eid-download-chrome-sideload-0.1.1.zip` (لـChrome وEdge) و`eid-download-firefox-0.1.1.zip`
+1. من صفحة الإصدار نزّل `eid-download-chrome-sideload-0.1.2.zip` (لـChrome وEdge) و`eid-download-firefox-0.1.2.zip`
    وفك ضغط كل واحد في مجلد ثابت (لا تحذفه بعد التثبيت).
    **مهم:** للتثبيت اليدوي استخدم ملف `sideload` تحديداً: فيه المفتاح العام الذي يثبّت المعرّف
-   `ambokeecedpgicighhcpdfjphdnphgaa` المسجّل في المثبّت. ملف المتجر `eid-download-chrome-0.1.1.zip`
+   `ambokeecedpgicighhcpdfjphdnphgaa` المسجّل في المثبّت. ملف المتجر `eid-download-chrome-0.1.2.zip`
    بلا مفتاح (المتاجر ترفضه) فيأخذ معرّفاً آخر لن يقبله البرنامج قبل الخطوة 5.
 2. Chrome: `chrome://extensions` ← وضع المطوّر ← Load unpacked ← المجلد. Edge: `edge://extensions` بنفس الطريقة.
    Firefox: `about:debugging#/runtime/this-firefox` ← Load Temporary Add-on ← `manifest.json`.
@@ -101,9 +101,9 @@ yt-dlp حقيقي ← ملف فيديو حقيقي. **ما لم يُختبر آ�
 
 ---
 
-## 4) قرار: تحويل v0.1.1 إلى إصدار «نهائي»
+## 4) قرار: تحويل v0.1.2 إلى إصدار «نهائي»
 
-الإصدار الحالي (v0.1.1) **تجريبي (pre-release)** عمداً حتى تجربتك (1) و(2). بعد نجاحهما:
+الإصدار الحالي (v0.1.2) **تجريبي (pre-release)** عمداً حتى تجربتك (1) و(2). بعد نجاحهما:
 - إما أن تقول لي «حوّله إلى نهائي» فأفعل ذلك من GitHub (Edit release ← إلغاء Pre-release)،
 - أو بنفسك: صفحة الإصدار ← Edit ← أزل ✔ من «Set as a pre-release» ← Update.
 
@@ -112,7 +112,7 @@ yt-dlp حقيقي ← ملف فيديو حقيقي. **ما لم يُختبر آ�
 ## 5) نشر الإضافة في المتاجر (يحتاج حساباتك)
 
 الحزم جاهزة في صفحة الإصدار وتُبنى بـ`node scripts/ext/package.mjs` (نفس المصدر = نفس البايتات):
-`eid-download-chrome-0.1.1.zip` (Chrome Web Store **و** Edge Add-ons) و`eid-download-firefox-0.1.1.zip` (AMO).
+`eid-download-chrome-0.1.2.zip` (Chrome Web Store **و** Edge Add-ons) و`eid-download-firefox-0.1.2.zip` (AMO).
 لا ترفع ملف `sideload` إلى أي متجر.
 
 | المتجر | الحساب | الرسوم | الرابط |
