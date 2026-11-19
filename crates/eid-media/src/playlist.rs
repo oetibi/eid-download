@@ -181,7 +181,8 @@ fn digest(s: &State) -> String {
     sha_hex(&serde_json::to_vec(s).expect("state serializes"))
 }
 
-fn is_ok_id(id: &str) -> bool {
+/// An id we accept from a listing (non-empty, bounded, no control characters).
+pub fn is_ok_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_ID && !id.chars().any(|c| c.is_control())
 }
 
@@ -484,6 +485,7 @@ mod tests {
             title: format!("t-{id}"),
             url: Some(format!("https://fake.test/video/{id}")),
             availability: None,
+            duration_secs: None,
         }
     }
 
