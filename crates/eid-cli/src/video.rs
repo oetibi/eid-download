@@ -239,7 +239,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
 
 /// The pinned manifest. Builds with the `test-hooks` feature (tests only, never a release)
 /// may replace it with `EID_TEST_MANIFEST` (a file path).
-fn manifest() -> Result<Manifest, String> {
+pub fn manifest() -> Result<Manifest, String> {
     #[cfg(feature = "test-hooks")]
     if let Some(p) = std::env::var_os("EID_TEST_MANIFEST") {
         let t = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
@@ -427,7 +427,7 @@ fn cancel_on_stdin_eof(cancel: &eid_engine::CancellationToken) {
 
 // ------------------------------------------------------------------ steps
 
-fn stores() -> Result<(SettingsStore, ToolStore), String> {
+pub fn stores() -> Result<(SettingsStore, ToolStore), String> {
     let s = SettingsStore::default_location()
         .ok_or("cannot find the configuration folder (APPDATA / XDG_CONFIG_HOME / HOME)")?;
     let t = ToolStore::default_location()

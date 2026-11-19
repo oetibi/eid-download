@@ -6,3 +6,4 @@ pub mod quote;
 pub mod remote;
 pub mod serve;
 pub mod video;
+pub mod video_jobs;
