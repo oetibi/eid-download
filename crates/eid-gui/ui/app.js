@@ -8,7 +8,7 @@
 import { TEXT } from "./i18n.js";
 import {
   ACTIVE, BUSY, CATEGORIES, mergeList, buildView, inView, categoryOf, fraction, clickSelect,
-  pollDelay, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing,
+  pollDelay, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
 } from "./logic.js";
 
 const tauri = window.__TAURI__;
@@ -724,6 +724,81 @@ function openProps(id) {
   propsId = id;
   renderProps();
   $("#dlg-props").showModal();
+  drawMap(segmentView(null));
+  refreshMap();
+}
+
+// ---------------------------------------------------------------- segment map (details window)
+// Asked for only while the details window is open: every second for a moving download, every
+// 4 s otherwise. One request at a time; an answer for an item that is no longer shown is dropped.
+let mapTimer = null;
+let mapBusy = false;
+async function refreshMap() {
+  clearTimeout(mapTimer);
+  mapTimer = null;
+  const dlg = $("#dlg-props");
+  if (propsId == null || !dlg.open || mapBusy) return;
+  const id = propsId;
+  mapBusy = true;
+  let v;
+  try { v = segmentView(await api.call("segments", { id })); } catch { v = segmentView(null); }
+  mapBusy = false;
+  if (propsId !== id || !dlg.open) return;
+  drawMap(v);
+  mapTimer = setTimeout(refreshMap, BUSY.has(store.get(id)?.status) ? 1000 : 4000);
+}
+function drawMap(v) {
+  const c = $("#p-map");
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, c.clientWidth || 480), h = Math.max(1, c.clientHeight || 22);
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+  }
+  const ctx = c.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const css = getComputedStyle(document.documentElement);
+  const col = (k) => css.getPropertyValue(k).trim() || "#888";
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = col("--bar");
+  ctx.fillRect(0, 0, w, h);
+  // bytes always run left to right (an offset scale), in both languages
+  const n = v.cells.length;
+  if (n) {
+    const fill = col(v.source === "finished" ? "--ok" : "--run");
+    const cw = w / n;
+    for (let k = 0; k < n; k++) {
+      const p = v.cells[k];
+      if (!p) continue;
+      ctx.globalAlpha = p >= 100 ? 1 : 0.25 + 0.6 * (p / 100);
+      ctx.fillStyle = fill;
+      ctx.fillRect(Math.floor(k * cw), 0, Math.ceil(cw), h);
+    }
+    ctx.globalAlpha = 1;
+    // segment borders
+    if (v.total && v.rows.length > 1) {
+      ctx.fillStyle = col("--panel");
+      for (const r of v.rows.slice(1)) ctx.fillRect(Math.round((r.start / v.total) * w), 0, 1, h);
+    }
+  }
+  let info;
+  if (v.source === "checkpoint") info = t("p_map_checkpoint", v.segments, size(v.done), size(v.total));
+  else if (v.source === "stream") info = t("p_map_stream", size(v.done), size(v.total));
+  else if (v.source === "finished") info = t("p_map_finished");
+  else info = t("p_map_none");
+  if (v.source === "checkpoint" && v.segments > v.rows.length) info += ` ${t("p_map_more", v.rows.length, v.segments)}`;
+  setText($("#p-map-info"), info);
+  setAttr(c, "aria-label", info);
+  const wrap = $("#p-segs-wrap");
+  wrap.hidden = v.rows.length === 0;
+  const tb = $("#p-segs tbody");
+  const rows = v.rows.map((r) => {
+    const tr = el("tr");
+    for (const x of [String(r.n), size(r.start), size(r.end), `${r.pct}%`]) { const td = el("td", null, x); td.dir = "auto"; tr.append(td); }
+    if (r.pct >= 100) tr.className = "full";
+    return tr;
+  });
+  tb.replaceChildren(...rows);
 }
 function renderProps() {
   const dlg = $("#dlg-props");
@@ -762,7 +837,7 @@ $("#p-reveal").addEventListener("click", async () => {
   try { await api.call("reveal", { id: propsId }); } catch (e) { failure(e); }
 });
 $("#p-copy").addEventListener("click", () => { const it = store.get(propsId); if (it) copyText(it.url); });
-$("#dlg-props").addEventListener("close", () => { propsId = null; viewport.focus(); });
+$("#dlg-props").addEventListener("close", () => { propsId = null; clearTimeout(mapTimer); mapTimer = null; viewport.focus(); });
 
 // ---------------------------------------------------------------- info dialog
 function openInfo(title, body) {

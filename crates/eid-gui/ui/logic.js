@@ -189,3 +189,26 @@ export function jobFraction(job) {
 export function isToolsMissing(err) {
   return /^TOOLS_MISSING:/.test(String(err?.message ?? err ?? ""));
 }
+
+/**
+ * Segment map answer (`segments({ id })`, see segmap.rs) -> what the details window draws.
+ * Never trusts the shape: bad or missing fields give an empty map. `cells` are clamped to
+ * 0..100 and capped at 1000 entries; `rows` to 64.
+ */
+export function segmentView(m) {
+  const out = { source: "none", cells: [], rows: [], segments: 0, done: 0, total: null };
+  if (!m || typeof m !== "object") return out;
+  const src = ["checkpoint", "stream", "finished", "none"].includes(m.source) ? m.source : "none";
+  const num = (x) => (Number.isFinite(x) && x >= 0 ? x : 0);
+  out.source = src;
+  out.segments = num(m.segments);
+  out.done = num(m.done);
+  out.total = Number.isFinite(m.total) && m.total > 0 ? m.total : null;
+  if (src === "none") return out;
+  out.cells = (Array.isArray(m.cells) ? m.cells : []).slice(0, 1000).map((c) => Math.min(100, Math.max(0, Math.round(num(c)))));
+  out.rows = (Array.isArray(m.rows) ? m.rows : []).slice(0, 64).map((r, i) => {
+    const start = num(r?.start), end = Math.max(start, num(r?.end)), done = Math.min(num(r?.done), end - start);
+    return { n: i + 1, start, end, done, pct: end > start ? Math.floor((done / (end - start)) * 100) : 100 };
+  });
+  return out;
+}

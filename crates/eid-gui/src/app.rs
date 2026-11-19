@@ -322,6 +322,23 @@ pub fn reveal(app: AppHandle, st: State<'_, AppState>, id: u64) -> Result<(), St
         .map_err(|e| e.to_string())
 }
 
+/// The segment map of one download for the details window (`None`: no such item). Reads the
+/// download's state file read-only, off the UI thread.
+#[tauri::command]
+pub async fn segments(
+    st: State<'_, AppState>,
+    id: u64,
+) -> Result<Option<crate::segmap::SegmentMap>, String> {
+    let qs = st.sched.snapshot();
+    let live = st
+        .progress
+        .rate(id, true, Instant::now())
+        .map(|r| (r.done, r.total));
+    tauri::async_runtime::spawn_blocking(move || crate::segmap::for_item(&qs, id, live))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// v0.1: the download settings the window shows.
 #[tauri::command]
 pub fn settings_get(st: State<'_, AppState>) -> GuiSettings {

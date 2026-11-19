@@ -1,7 +1,7 @@
 // Unit tests of the window's pure logic (node --test, no browser).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeList, categoryOf, inView, buildView, clickSelect, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, pollDelay } from "../logic.js";
+import { mergeList, categoryOf, inView, buildView, clickSelect, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, pollDelay, segmentView } from "../logic.js";
 
 const it = (id, o = {}) => ({ id, status: "pending", name: `f${id}.zip`, url: "", folder: "D", attempts: 0, error_kind: null, error: null, rate: null, ...o });
 
@@ -55,4 +55,21 @@ test("misc", () => {
   assert.ok(isToolsMissing("TOOLS_MISSING: x")); assert.ok(!isToolsMissing("other"));
   assert.equal(pollDelay({ hidden: true }), null);
   assert.ok(pollDelay({ busy: true }) < pollDelay({ busy: false }));
+});
+
+test("segment map: shapes from the backend, clamped and never trusted", () => {
+  const v = segmentView({ source: "checkpoint", total: 1000, done: 700, segments: 2, cells: [100, 48.6, -3, 250, "x"], rows: [{ start: 0, end: 600, done: 600 }, { start: 600, end: 1000, done: 100 }] });
+  assert.equal(v.source, "checkpoint"); assert.equal(v.segments, 2); assert.equal(v.total, 1000);
+  assert.deepEqual(v.cells, [100, 49, 0, 100, 0]);
+  assert.deepEqual(v.rows.map((r) => [r.n, r.pct]), [[1, 100], [2, 25]]);
+  // a row claiming more saved bytes than its length is clamped
+  assert.equal(segmentView({ source: "checkpoint", cells: [], rows: [{ start: 10, end: 20, done: 99 }] }).rows[0].pct, 100);
+  // unknown source, null, garbage: nothing drawn
+  for (const bad of [null, undefined, 7, "x", { source: "evil", cells: [100] }, { source: "none", cells: [100] }]) {
+    const e = segmentView(bad);
+    assert.equal(e.source, "none"); assert.deepEqual(e.cells, []); assert.deepEqual(e.rows, []);
+  }
+  // huge answers are capped
+  assert.equal(segmentView({ source: "stream", cells: Array(5000).fill(100) }).cells.length, 1000);
+  assert.equal(segmentView({ source: "checkpoint", cells: [], rows: Array(500).fill({ start: 0, end: 1, done: 1 }) }).rows.length, 64);
 });

@@ -50,6 +50,7 @@ fn main() {
             app::pick_folder,
             app::reveal,
             app::open_file,
+            app::segments,
             app::settings_get,
             app::settings_set,
             video::video_probe,

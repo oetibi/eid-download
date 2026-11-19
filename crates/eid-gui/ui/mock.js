@@ -148,6 +148,25 @@ export function mockApi(params = new URLSearchParams()) {
       if (/\.(exe|msi|bat|cmd|ps1|js|vbs|scr|lnk)$/i.test(it.name ?? "")) throw "refused_executable";
       opened.push(id);
     },
+    segments: ({ id }) => {
+      const it = find(id);
+      const r = it.rate;
+      if (it.status === "done") return { source: "finished", total: r?.total ?? null, done: r?.total ?? 0, segments: 0, cells: Array(120).fill(100), rows: [] };
+      if (!r || !r.total) return { source: "none", total: null, done: 0, segments: 0, cells: [], rows: [] };
+      // 8 equal segments, each saved from its start up to the item's fraction (a stand-in)
+      const S = 8, seg = Math.floor(r.total / S), f = r.done / r.total;
+      const rows = Array.from({ length: S }, (_, k) => {
+        const start = k * seg, end = k === S - 1 ? r.total : (k + 1) * seg;
+        return { start, end, done: Math.floor((end - start) * Math.min(1, f * (1 + (k % 3) * 0.2))) };
+      });
+      const cells = Array.from({ length: 120 }, (_, c) => {
+        const k = Math.min(S - 1, Math.floor((c / 120) * S)), row = rows[k];
+        const pos = (c / 120) * r.total;
+        const savedEnd = row.start + row.done;
+        return pos + r.total / 120 <= savedEnd ? 100 : pos >= savedEnd ? 0 : 50;
+      });
+      return { source: "checkpoint", total: r.total, done: rows.reduce((a, x) => a + x.done, 0), segments: S, cells, rows };
+    },
     settings_get: () => ({ ...engineSettings }),
     settings_set: ({ settings: s }) => {
       const keys = ["max_parallel", "connections", "speed_limit_kib", "schedule"];

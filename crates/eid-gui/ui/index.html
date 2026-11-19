@@ -209,7 +209,17 @@
         <dt data-t="folder_label"></dt><dd><bdi id="p-folder" dir="ltr" class="wrap"></bdi></dd>
       </dl>
       <p id="p-error" class="error" hidden></p>
-      <p class="note" data-t="p_segments_note"></p>
+      <section class="segmap" aria-labelledby="p-map-title">
+        <h3 id="p-map-title" data-t="p_map"></h3>
+        <canvas id="p-map" class="map" width="480" height="22" dir="ltr" role="img"></canvas>
+        <p id="p-map-info" class="note"></p>
+        <div class="segs-wrap" id="p-segs-wrap" hidden>
+          <table class="segs" id="p-segs" dir="ltr">
+            <thead><tr><th>#</th><th data-t="seg_from"></th><th data-t="seg_to"></th><th data-t="seg_saved"></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
       <div class="buttons">
         <button type="button" id="p-copy" class="ghost" data-t="c_copy_link"></button>
         <button type="button" id="p-reveal" data-t="c_reveal"></button>

@@ -81,6 +81,12 @@ async function open(q) {
   return Date.now() - t0;
 }
 
+async function shot(name) {
+  const { data } = await S("Page.captureScreenshot", { format: "png" });
+  const dir = arg("--shots");
+  await (await import("node:fs/promises")).mkdir(dir, { recursive: true });
+  await (await import("node:fs/promises")).writeFile(join(dir, name), Buffer.from(data, "base64"));
+}
 const results = { checks: [], bench: [] };
 let failed = 0;
 async function check(name, fn) {
@@ -200,6 +206,42 @@ try {
     await ev("document.querySelector('[data-cmd=open_file]').click()");
     await until("!document.querySelector('#toast').hidden && document.querySelector('#toast').textContent.length > 20", 3000, "refusal message");
     assert(!(await ev(`(window.__eidMockOpened || []).includes(${prog[0]})`)), "program was opened");
+  });
+
+  await check("details window: segment map from the backend, per-segment table, ar/en, closes cleanly", async () => {
+    await open("");
+    const pick = (st) => ev(`[...window.__eid.store.values()].find(i => ${st})?.id ?? null`);
+    const openP = async (id) => {
+      await ev(`window.__eid.select([${id}])`);
+      await ev("document.querySelector('#menu-downloads [data-cmd=properties]').click()");
+      await until("document.querySelector('#dlg-props').open", 3000, "details open");
+    };
+    const paused = await pick("i.status === 'paused' && i.rate?.total");
+    assert(paused != null, "mock has a paused item with a size");
+    await openP(paused);
+    await until("document.querySelectorAll('#p-segs tbody tr').length === 8", 4000, "8 segment rows");
+    const info = await ev("document.querySelector('#p-map-info').textContent");
+    assert(/الأجزاء: 8/.test(info), `info: ${info}`);
+    // the canvas really has drawn pixels of the 'saved' colour, not only the empty bar
+    const painted = await ev(`(() => { const c = document.querySelector('#p-map'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      const px = new Set(); for (let i = 0; i < d.length; i += 4 * 7) px.add(d[i] + ',' + d[i+1] + ',' + d[i+2]); return px.size; })()`);
+    assert(painted >= 2, `canvas looks empty (${painted} colours)`);
+    if (arg("--shots")) await shot("details-ar.png");
+    await ev("document.querySelector('#dlg-props').close()");
+    // English, and an item without a known size: no map, no table
+    await ev("document.querySelector('#btn-lang').click()");
+    const unknown = await pick("i.status === 'running' && i.rate && i.rate.total == null");
+    await openP(unknown);
+    await until("/No map yet/.test(document.querySelector('#p-map-info').textContent)", 4000, "no-map text");
+    assert(await ev("document.querySelector('#p-segs-wrap').hidden"), "table must be hidden");
+    await ev("document.querySelector('#dlg-props').close()");
+    const done = await pick("i.status === 'done'");
+    await openP(done);
+    await until("/complete/.test(document.querySelector('#p-map-info').textContent)", 4000, "finished text");
+    if (arg("--shots")) await shot("details-en-finished.png");
+    await ev("document.querySelector('#dlg-props').close()");
+    await ev("document.querySelector('#btn-lang').click()");
+    await until("document.documentElement.dir === 'rtl'", 3000, "rtl again");
   });
 
   for (const n of [100, 1000, 3000]) {
