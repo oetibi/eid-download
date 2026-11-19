@@ -353,6 +353,51 @@ try {
     await ev("localStorage.removeItem('notify')");
   });
 
+  await check("desktop: tray/close-to-tray/clipboard switches save; tray menu texts follow the language; tray actions and copied links work", async () => {
+    await open("");
+    // tray menu texts were sent in Arabic, then in English after switching
+    await until("window.__eidMockTrayTexts()?.quit === 'خروج'", 3000, "arabic tray texts");
+    await ev("document.querySelector('#btn-lang').click()");
+    await until("window.__eidMockTrayTexts()?.quit === 'Quit'", 3000, "english tray texts");
+    await ev("document.querySelector('#btn-lang').click()");
+    // switches (default: tray on, close-to-tray off, clipboard off)
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await until("document.querySelector('#dlg-settings').open && document.querySelector('#set-tray').checked", 3000, "settings with tray on");
+    assert(!(await ev("document.querySelector('#set-clipboard').checked")), "clipboard must be off by default");
+    await ev("document.querySelector('#set-clipboard').click()");
+    await sleep(200);
+    await ev("document.querySelector('#set-tray').click()"); // off: close-to-tray is disabled
+    await sleep(200);
+    assert(await ev("document.querySelector('#set-close-tray').disabled"), "close-to-tray enabled without the icon");
+    await ev("document.querySelector('#dlg-settings').close()");
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await until("document.querySelector('#dlg-settings').open && document.querySelector('#set-clipboard').checked && !document.querySelector('#set-tray').checked", 3000, "saved switches read back");
+    await ev("document.querySelector('#set-tray').click()");
+    await sleep(200);
+    await ev("document.querySelector('#dlg-settings').close()");
+    // tray "pause all" runs the page's own command
+    const busy = await ev("[...window.__eid.store.values()].filter(i => ['running','pending'].includes(i.status)).length");
+    assert(busy > 0, "need a busy item");
+    await ev("window.__eidMockEmit('tray', 'pause_all')");
+    await until("[...window.__eid.store.values()].filter(i => i.status === 'running').length === 0", 4000, "paused from the tray");
+    // a copied file link: bar, then the add dialog with that link
+    await ev("window.__eidMockEmit('clipboard-link', { url: 'https://example.com/a/setup.zip', kind: 'file' })");
+    await until("!document.querySelector('#clipbar').hidden", 2000, "clipboard bar");
+    await ev("document.querySelector('#clip-add').click()");
+    await until("document.querySelector('#dlg-add').open && document.querySelector('#in-links').value === 'https://example.com/a/setup.zip'", 2000, "add dialog with the link");
+    await ev("document.querySelector('#dlg-add').close()");
+    // a bad payload never shows the bar
+    await ev("window.__eidMockEmit('clipboard-link', { url: 'javascript:alert(1)', kind: 'file' })");
+    await sleep(100);
+    assert(await ev("document.querySelector('#clipbar').hidden"), "bar shown for a non-http link");
+    // a YouTube link opens the video dialog
+    await ev("window.__eidMockEmit('clipboard-link', { url: 'https://www.youtube.com/watch?v=abc', kind: 'video' })");
+    await ev("document.querySelector('#clip-add').click()");
+    await until("document.querySelector('#dlg-video').open", 2000, "video dialog");
+    await ev("document.querySelector('#dlg-video').close()");
+    if (arg("--shots")) { await ev("document.querySelector('[data-cmd=settings]').click()"); await sleep(300); await shot("settings-desktop-ar.png"); await ev("document.querySelector('#dlg-settings').close()"); }
+  });
+
   for (const n of [100, 1000, 3000]) {
     for (const old of [false, true]) {
       await check(`responsive with ${n} downloads (${old ? "v0.0.1 full list" : "revisioned list"})`, async () => {

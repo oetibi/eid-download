@@ -154,6 +154,12 @@
       </main>
     </div>
 
+    <div id="clipbar" class="clipbar" role="status" hidden>
+      <span data-t="clip_found"></span>
+      <bdi id="clip-url" dir="ltr"></bdi>
+      <button type="button" id="clip-add" class="primary small" data-t="clip_add"></button>
+      <button type="button" id="clip-ignore" class="ghost small" data-t="clip_ignore"></button>
+    </div>
     <footer class="statusbar" id="statusbar">
       <span id="sb-active"></span>
       <span id="sb-speed"></span>
@@ -268,6 +274,14 @@
           <option value="dark" data-t="c_theme_dark"></option>
         </select>
         <label class="check"><input id="set-notify" type="checkbox"><span data-t="s_notify"></span></label>
+        <fieldset id="set-desktop">
+          <legend data-t="s_desktop"></legend>
+          <label class="check"><input id="set-tray" type="checkbox"><span data-t="s_tray"></span></label>
+          <label class="check"><input id="set-close-tray" type="checkbox"><span data-t="s_close_tray"></span></label>
+          <label class="check"><input id="set-clipboard" type="checkbox"><span data-t="s_clipboard"></span></label>
+          <p class="note" data-t="s_clipboard_note"></p>
+          <p id="set-desktop-error" class="error" hidden></p>
+        </fieldset>
       </div>
       <div class="tab" data-pane="downloads" hidden>
         <label data-t="s_default_folder"></label>

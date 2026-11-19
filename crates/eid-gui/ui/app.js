@@ -15,7 +15,7 @@ import {
 const tauri = window.__TAURI__;
 const usingMock = !tauri;
 const api = tauri
-  ? { call: (cmd, args) => tauri.core.invoke(cmd, args) }
+  ? { call: (cmd, args) => tauri.core.invoke(cmd, args), on: (name, f) => tauri.event.listen(name, (e) => f(e.payload)) }
   : (await import("./mock.js")).mockApi(new URLSearchParams(location.search));
 
 const $ = (s) => document.querySelector(s);
@@ -107,6 +107,7 @@ function applyLang() {
   d.lang = settings.lang;
   d.dir = settings.lang === "ar" ? "rtl" : "ltr";
   document.title = t("app_title");
+  sendTrayTexts();
   for (const n of $$("[data-t]")) n.textContent = t(n.dataset.t);
   $("#in-links").placeholder = t("links_ph");
   $("#in-vurl").placeholder = "https://www.youtube.com/watch?v=…";
@@ -903,6 +904,7 @@ function openSettings() {
   showSettingsFolder();
   showTools($("#set-tools"), $("#set-tools-install"));
   fillEngineFields();
+  fillDesktopFields();
   $("#dlg-settings").showModal();
 }
 for (const b of $$("#dlg-settings [data-tab]")) {
@@ -1515,3 +1517,49 @@ function showMissingRow() {
   $("#v-missing-row").hidden = !(probe?.result?.kind === "playlist" && /^\d+p$/.test(q));
 }
 $("#v-quality").addEventListener("change", showMissingRow);
+
+// ---------------------------------------------------------------- v0.2: tray, close to tray, clipboard
+function sendTrayTexts() {
+  api.call("tray_texts", { texts: { show: t("tray_show"), pause_all: t("c_pause_all"), resume_all: t("c_resume_all"), quit: t("tray_quit") } })
+    .catch(() => {}); // an older backend without a tray: nothing to name
+}
+api.on?.("tray", (action) => { if (action === "pause_all" || action === "resume_all") run(action); });
+
+async function fillDesktopFields() {
+  const s = await loadEngine();
+  if (!s) return;
+  $("#set-tray").checked = s.tray !== false;
+  $("#set-close-tray").checked = !!s.close_to_tray;
+  $("#set-close-tray").disabled = s.tray === false;
+  $("#set-clipboard").checked = !!s.clipboard;
+  $("#set-desktop-error").hidden = true;
+}
+for (const id of ["#set-tray", "#set-close-tray", "#set-clipboard"]) {
+  $(id).addEventListener("change", async () => {
+    const base = engine ?? (await loadEngine());
+    if (!base) return;
+    const tray = $("#set-tray").checked;
+    const ok = await saveEngine({ ...base, tray, close_to_tray: tray && $("#set-close-tray").checked, clipboard: $("#set-clipboard").checked }, $("#set-desktop-error"));
+    if (!ok) await fillDesktopFields();
+    $("#set-close-tray").disabled = !tray;
+  });
+}
+
+let clipLink = null;
+api.on?.("clipboard-link", (p) => {
+  const url = typeof p?.url === "string" && p.url.length <= 2048 && /^https?:\/\//i.test(p.url) ? p.url : null;
+  if (!url) return;
+  clipLink = { url, kind: p.kind === "video" ? "video" : "file" };
+  setText($("#clip-url"), url);
+  setAttr($("#clip-url"), "title", url);
+  $("#clipbar").hidden = false;
+});
+$("#clip-ignore").addEventListener("click", () => { $("#clipbar").hidden = true; clipLink = null; });
+$("#clip-add").addEventListener("click", () => {
+  if (!clipLink) return;
+  const { url, kind } = clipLink;
+  $("#clipbar").hidden = true;
+  clipLink = null;
+  if (kind === "video") openVideo(url); else openAdd(url);
+});
+sendTrayTexts();

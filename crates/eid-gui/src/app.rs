@@ -39,6 +39,8 @@ pub struct AppState {
     pub list_cache: Mutex<ListCache<u64, ItemView>>,
     /// v0.1: download settings (connections, simultaneous downloads, speed limit, scheduler).
     pub settings: Mutex<GuiSettings>,
+    /// v0.2: the tray menu texts (the page sends them in its language).
+    pub tray_texts: Mutex<crate::desktop::TrayTexts>,
     settings_file: Option<PathBuf>,
     limiter: Arc<Limiter>,
     connections: Arc<AtomicUsize>,
@@ -199,6 +201,7 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         setup,
         list_cache: Mutex::new(ListCache::default()),
         settings: Mutex::new(settings),
+        tray_texts: Mutex::new(crate::desktop::TrayTexts::default()),
         settings_file,
         limiter,
         connections,
@@ -351,7 +354,11 @@ pub fn settings_get(st: State<'_, AppState>) -> GuiSettings {
 /// v0.1: validate, save and apply new download settings at once (speed limit and
 /// simultaneous downloads take effect immediately, connections for downloads that start next).
 #[tauri::command]
-pub fn settings_set(st: State<'_, AppState>, settings: GuiSettings) -> Result<GuiSettings, String> {
+pub fn settings_set(
+    app: AppHandle,
+    st: State<'_, AppState>,
+    settings: GuiSettings,
+) -> Result<GuiSettings, String> {
     settings.validate()?;
     if let Some(f) = &st.settings_file {
         gui_settings::save(f, &settings)?;
@@ -363,7 +370,15 @@ pub fn settings_set(st: State<'_, AppState>, settings: GuiSettings) -> Result<Gu
     st.connections
         .store(settings.connections as usize, Ordering::Relaxed);
     *st.settings.lock().unwrap_or_else(|p| p.into_inner()) = settings.clone();
+    // v0.2: the tray icon follows the setting at once (clipboard monitoring reads it live)
+    crate::desktop::set_tray(&app, settings.tray)?;
     Ok(settings)
+}
+
+/// v0.2: the tray menu in the window's language.
+#[tauri::command]
+pub fn tray_texts(app: AppHandle, texts: crate::desktop::TrayTexts) -> Result<(), String> {
+    crate::desktop::retext_tray(&app, texts)
 }
 
 /// v0.1: open a finished file with its default program. Programs and scripts are never

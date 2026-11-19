@@ -81,7 +81,12 @@ export function mockApi(params = new URLSearchParams()) {
   const jobs = [];
   let nextJob = 1;
   let toolsInstalled = params.get("notools") !== "1";
-  let engineSettings = { max_parallel: 3, connections: 8, speed_limit_kib: 0, schedule: null };
+  let engineSettings = { max_parallel: 3, connections: 8, speed_limit_kib: 0, schedule: null, tray: true, close_to_tray: false, clipboard: false };
+  // events the Rust side would emit (tray menu, clipboard); tests trigger them
+  const listeners = new Map();
+  window.__eidMockEmit = (name, payload) => { for (const f of listeners.get(name) ?? []) f(payload); };
+  let trayTexts = null;
+  window.__eidMockTrayTexts = () => trayTexts;
   const opened = [];
   window.__eidMockOpened = opened;
   // test hook (mock only): change an item as if the engine did, e.g. finish or fail it
@@ -171,7 +176,7 @@ export function mockApi(params = new URLSearchParams()) {
     },
     settings_get: () => ({ ...engineSettings }),
     settings_set: ({ settings: s }) => {
-      const keys = ["max_parallel", "connections", "speed_limit_kib", "schedule"];
+      const keys = ["max_parallel", "connections", "speed_limit_kib", "schedule", "tray", "close_to_tray", "clipboard"];
       if (Object.keys(s).some((k) => !keys.includes(k))) throw "invalid input: unknown field";
       if (!(s.max_parallel >= 1 && s.max_parallel <= 8)) throw "invalid input: max_parallel 1..8";
       if (!(s.connections >= 1 && s.connections <= 32)) throw "invalid input: connections 1..32";
@@ -225,7 +230,13 @@ export function mockApi(params = new URLSearchParams()) {
     },
     video_remove: ({ job: id }) => { const j = job(id); if (j.state === "running") throw "pause_first"; jobs.splice(jobs.indexOf(j), 1); },
   };
+  handlers.tray_texts = ({ texts }) => {
+    const k = ["show", "pause_all", "resume_all", "quit"];
+    if (!texts || Object.keys(texts).some((x) => !k.includes(x)) || k.some((x) => !texts[x])) throw "invalid input: texts";
+    trayTexts = { ...texts };
+  };
   return {
+    on: (name, f) => { if (!listeners.has(name)) listeners.set(name, []); listeners.get(name).push(f); },
     call: async (cmd, args) => {
       const h = handlers[cmd];
       if (!h) throw `Command ${cmd} not found`;

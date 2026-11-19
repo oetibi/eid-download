@@ -292,6 +292,33 @@ pub fn finished_file(qs: &QueueSet, id: u64) -> Option<PathBuf> {
     })
 }
 
+/// v0.2 clipboard monitoring: the copied text, if it is exactly one http(s) link worth
+/// offering: a file whose name has a known download extension (archives, documents, music,
+/// video, pictures, programs) or a YouTube page. Anything else (plain text, links to ordinary
+/// pages, links with a user name or password, very long text) is ignored. Returns
+/// `(link, "file" | "video")`.
+pub fn clipboard_link(text: &str) -> Option<(String, &'static str)> {
+    const MAX: usize = 2048;
+    let t = text.trim();
+    if t.is_empty() || t.len() > MAX || t.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let u = url::Url::parse(t).ok()?;
+    if !matches!(u.scheme(), "http" | "https") || !u.username().is_empty() || u.password().is_some()
+    {
+        return None;
+    }
+    let host = u.host_str()?.to_ascii_lowercase();
+    let yt = host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com");
+    if yt && (u.path() == "/watch" || u.path() == "/playlist" || host == "youtu.be") {
+        return Some((u.to_string(), "video"));
+    }
+    let last = u.path_segments()?.next_back()?.to_string();
+    let name = percent_encoding::percent_decode_str(&last).decode_utf8_lossy();
+    let cat = eid_engine::category::Categorizer::default();
+    (cat.classify(&name, None).name != "Other").then(|| (u.to_string(), "file"))
+}
+
 /// Plain-language category of an engine error text (the window translates it). Matches the
 /// `Display` texts of `eid_engine::Error` and of the URL checks.
 pub fn error_kind(msg: &str) -> &'static str {
@@ -837,6 +864,36 @@ mod tests {
         // later the retry time has passed
         let v = view(&s.snapshot(), &p, t, 3000);
         assert_eq!(v.iter().find(|x| x.id == ids[0]).unwrap().status, "pending");
+    }
+
+    #[test]
+    fn clipboard_offers_only_one_download_link_and_ignores_everything_else() {
+        let ok = |t: &str| clipboard_link(t).map(|(_, k)| k);
+        assert_eq!(ok("https://example.com/files/setup.exe"), Some("file"));
+        assert_eq!(
+            ok("  http://h.test/a/b/%D9%85%D9%84%D9%81.ZIP?x=1  "),
+            Some("file")
+        );
+        assert_eq!(ok("https://www.youtube.com/watch?v=abc"), Some("video"));
+        assert_eq!(ok("https://youtu.be/abc"), Some("video"));
+        assert_eq!(ok("https://m.youtube.com/playlist?list=PL1"), Some("video"));
+        for no in [
+            "",
+            "hello world",
+            "https://example.com/",
+            "https://example.com/page.html",
+            "https://www.youtube.com/",
+            "https://user:pass@example.com/a.zip",
+            "https://example.com/a.zip https://example.com/b.zip",
+            "ftp://example.com/a.zip",
+            "file:///C:/a.zip",
+            "javascript:alert(1)//a.zip",
+            "https://example.com/a.zip\u{202e}",
+        ] {
+            assert_eq!(ok(no), None, "{no:?}");
+        }
+        let long = format!("https://example.com/{}.zip", "a".repeat(3000));
+        assert_eq!(ok(&long), None);
     }
 
     #[test]

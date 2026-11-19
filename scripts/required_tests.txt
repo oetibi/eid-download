@@ -429,3 +429,9 @@ finished_items_show_a_full_map
 # ---- v0.2 video quality fallback (lower/higher/skip); real-yt-dlp selector check is #[ignore] (STATUS)
 fallback_names_and_selectors_never_go_above_4k
 a_v01_saved_job_without_a_fallback_loads_as_lower_and_bad_fallbacks_are_refused
+# ---- v0.2 desktop: tray, close-to-tray, clipboard (the Windows clipboard round trip runs on ci-windows)
+a_v01_settings_file_loads_with_tray_on_and_clipboard_off
+clipboard_offers_only_one_download_link_and_ignores_everything_else
+tray_texts_are_short_single_line_and_never_empty
+windows:windows_clipboard_round_trip_and_sequence_changes
+connect_delay_applies_once_per_new_connection

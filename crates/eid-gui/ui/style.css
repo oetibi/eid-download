@@ -277,3 +277,6 @@ table.segs tr.full td:last-child { color: var(--ok); }
   border-radius: 12px; background: color-mix(in srgb, var(--panel) 85%, transparent); pointer-events: none; }
 .drop p { font-size: 18px; font-weight: 600; color: var(--accent); }
 .toolbar.icons-only .tool { min-width: 36px; justify-content: center; }
+.clipbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--accent-soft); border-top: 1px solid var(--line); }
+.clipbar bdi { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+#set-desktop { margin-top: 10px; }
