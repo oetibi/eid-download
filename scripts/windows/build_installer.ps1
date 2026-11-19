@@ -33,7 +33,8 @@ Copy-Item THIRD-PARTY-LICENSES.html $stage
 # v0.2: the unpacked browser extension and its instructions (built by scripts/ext/build.mjs
 # --out target\ext in ci-windows.yml)
 Copy-Item crates\eid-gui\INSTALL-BROWSER-EXTENSION.txt $stage
-foreach ($t in @{ chrome = "chrome-edge"; firefox = "firefox" }.GetEnumerator()) {
+$extDirs = [ordered]@{ chrome = "chrome-edge"; firefox = "firefox" }
+foreach ($t in $extDirs.GetEnumerator()) {
   if (-not (Test-Path "target\ext\$($t.Key)\manifest.json")) { throw "target\ext\$($t.Key) is missing (node scripts/ext/build.mjs --out target\ext)" }
 }
 
@@ -50,7 +51,7 @@ Get-ChildItem -File $stage | Sort-Object Name | ForEach-Object {
   $res["../../target/installer-stage/$($_.Name)"] = $_.Name
 }
 # every file of the extension, one by one (exact install paths, removed again by the uninstaller)
-foreach ($t in [ordered]@{ chrome = "chrome-edge"; firefox = "firefox" }.GetEnumerator()) {
+foreach ($t in $extDirs.GetEnumerator()) {
   $src = (Resolve-Path "target\ext\$($t.Key)").Path
   Get-ChildItem -File -Recurse $src | Sort-Object FullName | ForEach-Object {
     $rel = $_.FullName.Substring($src.Length + 1).Replace('\', '/')
