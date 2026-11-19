@@ -18,6 +18,7 @@ pub mod grabber;
 pub mod http;
 pub mod limiter;
 pub mod porting;
+pub mod prefix_hash;
 pub mod queue;
 pub mod queue_runner;
 pub mod sanitize;

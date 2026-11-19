@@ -1,0 +1,102 @@
+<!doctype html>
+<!-- UI poll-cost benchmark (not a test gate). Loaded by scripts/bench/ui_bench.py through a
+     loopback static server rooted at the repository. Injects a fake window.__TAURI__ whose
+     `list` returns N synthetic items (R of them running with changing progress), captures the
+     app's setInterval(refresh) callback, and times each refresh: the awaited call (structured
+     clone of the snapshot = deserialisation stand-in + render) and then a forced style/layout. -->
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <title>ui-bench</title>
+  <link rel="stylesheet" href="/crates/eid-gui/ui/style.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="brand"><span class="logo" aria-hidden="true">⭳</span><h1 data-t="app_title"></h1></div>
+    <div class="actions">
+      <button id="btn-add" class="primary" data-t="add"></button>
+      <button id="btn-clear" data-t="clear_finished"></button>
+      <button id="btn-lang" class="ghost" data-t="lang_switch"></button>
+    </div>
+  </header>
+  <nav class="filters" role="tablist">
+    <button role="tab" data-filter="all" class="on"><span data-t="f_all"></span> <b data-count="all">0</b></button>
+    <button role="tab" data-filter="active"><span data-t="f_active"></span> <b data-count="active">0</b></button>
+    <button role="tab" data-filter="done"><span data-t="f_done"></span> <b data-count="done">0</b></button>
+    <button role="tab" data-filter="failed"><span data-t="f_failed"></span> <b data-count="failed">0</b></button>
+  </nav>
+  <main>
+    <ul id="list" class="list" aria-live="polite"></ul>
+    <p id="empty" class="empty" hidden></p>
+  </main>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="dlg-add">
+    <form id="form-add" method="dialog">
+      <textarea id="in-links"></textarea>
+      <bdi id="folder-show" class="path" dir="ltr"></bdi>
+      <button type="button" id="btn-pick"></button>
+      <button type="button" id="btn-reset"></button>
+      <input id="in-name" type="text">
+      <p id="add-error" class="error" hidden></p>
+      <button type="button" id="btn-cancel"></button>
+      <button type="submit" id="btn-start"></button>
+    </form>
+  </dialog>
+  <pre id="out"></pre>
+<script>
+window.addEventListener("error", (e) => { document.getElementById("out").textContent = "ERROR " + e.message; });
+window.addEventListener("unhandledrejection", (e) => { document.getElementById("out").textContent = "ERROR " + (e.reason?.stack ?? e.reason); });
+</script>
+<script type="module">
+const q = new URLSearchParams(location.search);
+const N = +q.get("n"), R = +q.get("running"), POLLS = +(q.get("polls") ?? 30);
+const STATUSES = ["done", "pending", "paused", "failed"];
+const items = [];
+for (let i = N; i >= 1; i--) {
+  const running = i > N - R;
+  const st = running ? "running" : STATUSES[i % STATUSES.length];
+  items.push({
+    id: i, status: st,
+    name: i % 3 ? `file-${i}-ubuntu-24.04-desktop-amd64.iso` : `تقرير رقم ${i} - final report.pdf`,
+    url: `https://releases.example.com/path/${i}/file-${i}.iso`,
+    folder: "C:\\Users\\me\\Downloads", attempts: st === "failed" ? 3 : 1,
+    error_kind: st === "failed" ? "not_found" : null,
+    error: st === "failed" ? `server error: HTTP 404 for https://example.com/${i}` : null,
+    rate: st === "pending" ? null : { done: 1000 * i, total: 6114770944, speed: running ? 12582912 : 0, eta: running ? 332 : null },
+  });
+}
+let payloadBytes = 0;
+window.__TAURI__ = { core: { invoke: async (cmd) => {
+  if (cmd !== "list") return null;
+  for (const it of items) if (it.status === "running") { it.rate.done += 1234567; it.rate.speed += 1; }
+  const json = JSON.stringify({ items, default_dir: "C:\\Users\\me\\Downloads" });
+  payloadBytes = json.length;
+  return JSON.parse(json); // the real IPC also delivers freshly parsed JSON
+} } };
+let refresh = null;
+window.setInterval = (fn) => { refresh = fn; return 1; };
+const t0 = performance.now();
+await import("/crates/eid-gui/ui/app.js");
+document.body.getBoundingClientRect();
+const firstMs = performance.now() - t0;
+const script = [], total = [];
+for (let k = 0; k < POLLS; k++) {
+  const a = performance.now();
+  await refresh();
+  const b = performance.now();
+  document.body.getBoundingClientRect(); // force style + layout of what render() changed
+  void document.getElementById("list").offsetHeight;
+  const c = performance.now();
+  script.push(b - a); total.push(c - a);
+}
+const med = (v) => { const s = [...v].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+const p95 = (v) => { const s = [...v].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(s.length * 0.95))]; };
+document.getElementById("out").textContent = "RESULT " + JSON.stringify({
+  n: N, running: R, polls: POLLS, first_load_ms: +firstMs.toFixed(1),
+  poll_script_median_ms: +med(script).toFixed(2), poll_script_p95_ms: +p95(script).toFixed(2),
+  poll_total_median_ms: +med(total).toFixed(2), poll_total_p95_ms: +p95(total).toFixed(2),
+  payload_bytes: payloadBytes, rows: document.querySelectorAll("#list > li").length,
+});
+</script>
+</body>
+</html>

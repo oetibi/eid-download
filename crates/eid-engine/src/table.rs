@@ -79,6 +79,24 @@ impl Table {
         self.segs.iter().map(|s| s.done - s.start).sum()
     }
 
+    /// End of the completed prefix `[0, n)`: every byte below `n` is written (its segment's
+    /// `done` passed it). Bytes reserved but not completed never count.
+    pub fn contiguous_done(&self) -> u64 {
+        let mut v: Vec<&Seg> = self.segs.iter().collect();
+        v.sort_by_key(|s| s.start);
+        let mut n = 0u64;
+        for s in v {
+            if s.start != n {
+                break;
+            }
+            n = s.done;
+            if s.done < s.end {
+                break;
+            }
+        }
+        n
+    }
+
     pub fn is_complete(&self) -> bool {
         self.segs.iter().all(|s| s.done >= s.end)
     }
@@ -233,6 +251,56 @@ mod tests {
         t.release(a);
         assert_eq!(t.segs[a].next, 10);
         assert_eq!(t.cursor(a), (10, 100));
+    }
+
+    #[test]
+    fn contiguous_done_stops_at_the_first_gap_and_ignores_reservations() {
+        let mut t = Table::new(1000);
+        assert_eq!(t.contiguous_done(), 0);
+        let a = t.take_pending().unwrap();
+        let (o, _) = t.reserve(a, 300);
+        assert_eq!(t.contiguous_done(), 0, "reserved is not written");
+        t.complete(a, o, 100);
+        assert_eq!(t.contiguous_done(), 100);
+        // split: the tail segment completes first; the prefix still ends at a's frontier
+        let b = t.split_largest(10).unwrap();
+        let (bs, be) = (t.segs[b].start, t.segs[b].end);
+        let (ob, nb) = t.reserve(b, be - bs);
+        t.complete(b, ob, nb);
+        assert_eq!(
+            t.contiguous_done(),
+            100,
+            "a completed tail behind a gap never counts"
+        );
+        // a finishes: the prefix jumps over the already-completed tail
+        let (oa, na) = t.reserve(a, 10_000);
+        t.complete(a, o + 100, 200);
+        t.complete(a, oa, na);
+        assert!(t.is_complete());
+        assert_eq!(t.contiguous_done(), 1000);
+        // resume from a persisted table with a hole in the middle
+        let r = Table::from_state(
+            1000,
+            &[
+                SegState {
+                    start: 0,
+                    next: 400,
+                    end: 400,
+                },
+                SegState {
+                    start: 400,
+                    next: 450,
+                    end: 700,
+                },
+                SegState {
+                    start: 700,
+                    next: 1000,
+                    end: 1000,
+                },
+            ],
+        );
+        assert_eq!(r.contiguous_done(), 450);
+        assert_eq!(Table::new(0).contiguous_done(), 0);
     }
 
     fn content_byte(seed: u64, off: u64) -> u8 {
