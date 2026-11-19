@@ -12,7 +12,7 @@
 
 ## 1) تجربة البرنامج على جهازك (Windows 10/11) — ~20 دقيقة
 
-1. من صفحة الإصدار التجريبي `v0.1.2` نزّل `EidDownload-0.1.2-windows-x64-setup.exe` و`SHA256SUMS.txt`.
+1. من صفحة الإصدار التجريبي `v0.1.2` (https://github.com/oetibi/eid-download/releases/tag/v0.1.2) نزّل `EidDownload-0.1.2-windows-x64-setup.exe` و`SHA256SUMS.txt`.
 2. تحقق من البصمة في PowerShell:
    ```powershell
    Get-FileHash .\EidDownload-0.1.2-windows-x64-setup.exe -Algorithm SHA256
@@ -152,5 +152,16 @@ yt-dlp حقيقي ← ملف فيديو حقيقي. **ما لم يُختبر آ�
 بعد اختيارك أحتاج: نوع الخدمة، واسم الشهادة، وأن تضيف الأسرار في GitHub ← Settings ← Secrets
 (لا ترسلها لي في المحادثة). عندها أضيف خطوة التوقيع إلى `ci-windows.yml` قبل حساب البصمات،
 لـ`EidDownload.exe` و`eid.exe` و`eid-native-host.exe` والمثبّت.
+
+</div>
+
+<div dir="rtl">
+
+## ملاحظة عن أرقام الإصدارات
+`v0.1.0` و`v0.1.1` وسمان بلا إصدار: بُنيا واجتازا كل اختبارات Windows لكن خطوة النشر الأخيرة فشلت
+(CRLF في ملف البصمات، ثم أمر اختبارات الإضافة). لم يُحذفا. منذ PR «release dry run» تُجرَّب خطوة النشر
+كاملة في كل PR قبل أي وسم، ويمكن تجربتها محلياً: `python3 scripts/ci/simulate_release.py --artifact DIR`.
+**الإصدار التالي:** ارفع الرقم في `Cargo.toml` و`crates/eid-gui/tauri.conf.json` و`scripts/ext/build.mjs`
+(و`cargo update -w`)، أضف `docs/releases/vX.Y.Z.md`، وانتظر dry run أخضر في PR قبل الوسم.
 
 </div>
