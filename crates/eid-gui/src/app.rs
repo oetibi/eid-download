@@ -3,6 +3,7 @@
 //! window calls.
 
 use crate::core::{self, AddReport, ItemView, Progress, MAIN_QUEUE};
+use crate::listdiff::ListCache;
 use eid_cli::remote::ConnArgs;
 use eid_cli::serve::{self, ServeArgs, APP_GUI};
 use eid_engine::queue::Queue;
@@ -26,6 +27,8 @@ pub struct AppState {
     pub default_dir: String,
     /// Signalled when a second launch of the app asks this window to come forward.
     pub show: Arc<Notify>,
+    /// v0.1: what the window was last sent (`list` answers with changes only).
+    pub list_cache: Mutex<ListCache<u64, ItemView>>,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<Result<(), String>>>>,
 }
 
@@ -160,6 +163,7 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         cancel,
         default_dir,
         show,
+        list_cache: Mutex::new(ListCache::default()),
         task: Mutex::new(Some(task)),
     }))
 }
@@ -177,9 +181,14 @@ impl AppState {
     }
 }
 
+/// What `list` answers (docs/V0.1-CONTRACT.md): with `since` = the `rev` the window holds,
+/// only the rows that changed and the ids that are gone; otherwise (`full`) every row.
 #[derive(Serialize)]
 pub struct Snapshot {
+    rev: u64,
+    full: bool,
     items: Vec<ItemView>,
+    removed: Vec<u64>,
     default_dir: String,
 }
 
@@ -190,14 +199,23 @@ fn unix_now() -> i64 {
 }
 
 #[tauri::command]
-pub fn list(st: State<'_, AppState>) -> Snapshot {
+pub fn list(st: State<'_, AppState>, since: Option<u64>) -> Snapshot {
+    let rows = core::view(
+        &st.sched.snapshot(),
+        &st.progress,
+        Instant::now(),
+        unix_now(),
+    );
+    let d = st
+        .list_cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .update(rows, |r| r.id, since);
     Snapshot {
-        items: core::view(
-            &st.sched.snapshot(),
-            &st.progress,
-            Instant::now(),
-            unix_now(),
-        ),
+        rev: d.rev,
+        full: d.full,
+        items: d.items,
+        removed: d.removed,
         default_dir: st.default_dir.clone(),
     }
 }
