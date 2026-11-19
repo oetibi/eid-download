@@ -1,0 +1,50 @@
+# REAL video test on Windows (owner request 2026-11-19: "test the real functions on Windows;
+# mocks are not proof"). Manual only: real internet, real sites, ~230 MB of pinned tools.
+# Two sources, the same test (crates/eid-cli/tests/real_jobs.rs):
+#  - peertube: framatube.org (PeerTube; CC BY / CC BY-SA videos and a public playlist). Not
+#    bot-checked, so it proves the real Windows pipeline: pinned tools install, probe, quality
+#    choice, FFmpeg merge, audio-only, numbered playlist folder, pause/resume, skip-done.
+#  - youtube: Blender's CC content. YouTube often bot-checks GitHub runner addresses; that
+#    outcome is reported as such (continue-on-error), never hidden and never bypassed.
+name: real-video
+on:
+  # a push to a `real-video/*` branch runs it too (workflow_dispatch needs the file on main)
+  push:
+    branches: ['real-video/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  real:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [peertube, youtube]
+    continue-on-error: ${{ matrix.source == 'youtube' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Real yt-dlp / FFmpeg / Deno through the app's job layer (${{ matrix.source }})
+        env:
+          SOURCE: ${{ matrix.source }}
+        shell: pwsh
+        run: |
+          if ($env:SOURCE -eq 'peertube') {
+            # "What is PeerTube?" (Framasoft, CC BY-SA, 113 s, 240p..1080p)
+            $env:EID_REAL_VIDEO = 'https://framatube.org/w/kkGMgK9ZtnKfYAgnEtQxbv'
+            $env:EID_REAL_BEST_VIDEO = 'https://framatube.org/w/kkGMgK9ZtnKfYAgnEtQxbv'
+            # FSFE "Youth Hacking 4 Freedom" playlist; items 4 (CC BY, 331 s) and 8 (CC BY-SA, 224 s)
+            $env:EID_REAL_PLAYLIST = 'https://framatube.org/w/p/pQQ3gnRUKG6t3ptVy6iNP9'
+            $env:EID_REAL_ITEMS = '4,8'
+          }
+          cargo test -p eid-cli --test real_jobs -- --ignored --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath real-video-$env:SOURCE.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: real-video-${{ matrix.source }}-log
+          retention-days: 30
+          path: real-video-${{ matrix.source }}.log

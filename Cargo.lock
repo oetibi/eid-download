@@ -942,6 +942,7 @@ dependencies = [
  "eid-media",
  "eid-platform",
  "eid-testserver",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",

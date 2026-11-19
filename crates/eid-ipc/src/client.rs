@@ -68,6 +68,8 @@ pub struct Client {
 
 /// Time allowed for one request/response round trip.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// For [`Command::is_slow`] commands (a probe runs yt-dlp; the app gives it 90 s).
+const SLOW_CALL_TIMEOUT: Duration = Duration::from_secs(100);
 
 impl Client {
     /// Connect and authenticate. A refused token is retried twice (100 ms apart): a starting app
@@ -124,6 +126,11 @@ impl Client {
         id: &str,
         command: Command,
     ) -> Result<serde_json::Value, ClientError> {
+        let limit = if command.is_slow() {
+            SLOW_CALL_TIMEOUT
+        } else {
+            CALL_TIMEOUT
+        };
         let body = serde_json::to_vec(&Request {
             v: VERSION,
             id: id.to_owned(),
@@ -131,7 +138,7 @@ impl Client {
         })
         .map_err(|e| ClientError::Protocol(e.to_string()))?;
         write_frame(&mut self.stream, &body).await?;
-        let bytes = tokio::time::timeout(CALL_TIMEOUT, read_frame(&mut self.stream))
+        let bytes = tokio::time::timeout(limit, read_frame(&mut self.stream))
             .await
             .map_err(|_| ClientError::Protocol("request timed out".into()))??;
         let r: Response = serde_json::from_slice(&bytes)

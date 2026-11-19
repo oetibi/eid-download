@@ -14,10 +14,13 @@ pub const OUTPUT_TEMPLATE: &str = "%(id)s.%(ext)s";
 pub const ARCHIVE_FILE: &str = "../.eid-archive.txt";
 /// Prefix of our progress lines on stdout.
 pub const PROGRESS_PREFIX: &str = "[eid-progress]";
-/// Progress template: constant, only numeric fields.
+/// Progress template: constant, only numeric fields. The last field is the height of the
+/// format being downloaded (`NA` for an audio-only part): yt-dlp downloads each part of a
+/// merged format with that format's own info, so the largest height seen is the height we got
+/// (`got_height`, contract v0.1).
 pub const PROGRESS_TEMPLATE: &str = "download:[eid-progress] %(progress.downloaded_bytes)s \
      %(progress.total_bytes)s %(progress.total_bytes_estimate)s %(progress.speed)s \
-     %(progress.eta)s";
+     %(progress.eta)s %(info.height)s";
 /// JS-runtime option for yt-dlp's YouTube EJS solver: deno without JIT (D15).
 pub const EJS_JITLESS: &str = "youtube-ejs:jitless=true";
 /// Container of every video we publish. `--merge-output-format` applies only when two streams
@@ -28,8 +31,17 @@ pub const EJS_JITLESS: &str = "youtube-ejs:jitless=true";
 pub const REMUX_VIDEO: &str = "mp4";
 /// Longest URL we accept.
 pub const MAX_URL: usize = 8192;
-/// Largest `--max-height` style quality we accept (8K is 4320; leave room).
-pub const MAX_HEIGHT: u32 = 8640;
+/// Tallest video we ever ask for: 2160 (4K). The owner's policy is "no 8K": anything taller is
+/// refused everywhere, and `best` means the best available up to this height (v0.1 contract).
+pub const MAX_HEIGHT: u32 = 2160;
+
+/// The fixed quality choices of the v0.1 policy, in the order the UI shows them.
+pub const QUALITY_CHOICES: &[&str] = &[
+    "360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio",
+];
+
+/// The fixed heights of [`QUALITY_CHOICES`].
+pub const POLICY_HEIGHTS: &[u32] = &[360, 480, 720, 1080, 1440, 2160];
 
 /// Every flag we may emit, and whether it takes a value. A valued flag is always emitted as a
 /// single `--flag=value` argument, so a value can never be mistaken for a flag.
@@ -225,6 +237,78 @@ pub enum Quality {
     Format(String),
 }
 
+impl Quality {
+    /// One of the fixed policy strings ([`QUALITY_CHOICES`]); anything else is refused.
+    /// `best` is the best available up to [`MAX_HEIGHT`].
+    pub fn from_policy(s: &str) -> Result<Quality, MediaError> {
+        match s {
+            "best" => Ok(Quality::Best),
+            "audio" => Ok(Quality::AudioMp3),
+            _ => s
+                .strip_suffix('p')
+                .and_then(|n| n.parse::<u32>().ok())
+                .filter(|h| POLICY_HEIGHTS.contains(h) && format!("{h}p") == s)
+                .map(Quality::MaxHeight)
+                .ok_or_else(|| {
+                    MediaError::BadChoice(format!(
+                        "quality must be one of {}",
+                        QUALITY_CHOICES.join(", ")
+                    ))
+                }),
+        }
+    }
+
+    /// The policy string of this quality (`720p`, `best`, `audio`); `None` for a raw
+    /// format id or a height outside the fixed list.
+    pub fn policy_name(&self) -> Option<String> {
+        match self {
+            Quality::Best => Some("best".into()),
+            Quality::AudioMp3 => Some("audio".into()),
+            Quality::MaxHeight(h) if POLICY_HEIGHTS.contains(h) => Some(format!("{h}p")),
+            _ => None,
+        }
+    }
+
+    /// The file extension we publish for this quality.
+    pub fn ext(&self) -> &'static str {
+        if *self == Quality::AudioMp3 {
+            "mp3"
+        } else {
+            "mp4"
+        }
+    }
+}
+
+/// yt-dlp format selection for "the tallest format not taller than `h`; if none, the shortest
+/// available one" (v0.1 policy), never taller than [`MAX_HEIGHT`]:
+///
+/// 1. `bv*[height<=h]+ba` / `b[height<=h]`: the best video not taller than `h` (+ best audio);
+/// 2. `wv*[height<=MAX]+ba` / `w[height<=MAX]`: nothing that short exists, so the *worst* (the
+///    shortest) video, still capped at 4K;
+/// 3. `b[height<=?MAX]`: sites that publish no height at all (the `?` lets an unknown height
+///    through; a known one above 4K still never does).
+pub fn height_selector(h: u32) -> String {
+    let m = MAX_HEIGHT;
+    format!("bv*[height<={h}]+ba/b[height<={h}]/wv*[height<={m}]+ba/w[height<={m}]/b[height<=?{m}]")
+}
+
+/// Which of the fixed heights to offer for a video, from the heights of its formats: a choice
+/// is offered when some video format is taller than the previous choice and not taller than
+/// it (so a 1012-pixel "1080p" crop shows as 1080p, a 144p-only video as 360p and the job then
+/// reports the 144 it got). Heights above [`MAX_HEIGHT`] are never offered.
+pub fn offered_heights(heights: impl IntoIterator<Item = u32>) -> Vec<u32> {
+    let hs: Vec<u32> = heights.into_iter().collect();
+    let mut prev = 0;
+    let mut out = vec![];
+    for &c in POLICY_HEIGHTS {
+        if hs.iter().any(|&h| h > prev && h <= c) {
+            out.push(c);
+        }
+        prev = c;
+    }
+    out
+}
+
 /// What yt-dlp is asked to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -309,7 +393,8 @@ pub fn build(
             a.push("--no-mtime".into());
             match quality {
                 Quality::Best => {
-                    a.push(kv("--format", "bv*+ba/b"));
+                    // best available, capped at 4K (owner: no 8K)
+                    a.push(kv("--format", &height_selector(MAX_HEIGHT)));
                     a.push(kv("--merge-output-format", "mp4"));
                     a.push(kv("--remux-video", REMUX_VIDEO));
                 }
@@ -319,10 +404,7 @@ pub fn build(
                             "height must be 1..={MAX_HEIGHT}"
                         )));
                     }
-                    a.push(kv(
-                        "--format",
-                        &format!("bv*[height<={h}]+ba/b[height<={h}]"),
-                    ));
+                    a.push(kv("--format", &height_selector(*h)));
                     a.push(kv("--merge-output-format", "mp4"));
                     a.push(kv("--remux-video", REMUX_VIDEO));
                 }
@@ -397,4 +479,111 @@ pub fn emitted_flags(args: &[OsString]) -> Vec<String> {
         .filter_map(|a| a.to_str())
         .map(|s| s.split_once('=').map_or(s, |(n, _)| n).to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quality_policy_accepts_only_the_fixed_list_and_never_above_4k() {
+        for (s, q) in [
+            ("360p", Quality::MaxHeight(360)),
+            ("480p", Quality::MaxHeight(480)),
+            ("720p", Quality::MaxHeight(720)),
+            ("1080p", Quality::MaxHeight(1080)),
+            ("1440p", Quality::MaxHeight(1440)),
+            ("2160p", Quality::MaxHeight(2160)),
+            ("best", Quality::Best),
+            ("audio", Quality::AudioMp3),
+        ] {
+            assert_eq!(Quality::from_policy(s).unwrap(), q, "{s}");
+            assert_eq!(q.policy_name().as_deref(), Some(s));
+        }
+        assert_eq!(QUALITY_CHOICES.len(), 8);
+        for bad in [
+            "4320p", "8640p", "2161p", "240p", "720", "0720p", "+720p", "720P", "1080p60", "4k",
+            "8k", "Best", "mp3", "", " 720p", "bv*+ba", "-1p",
+        ] {
+            assert!(Quality::from_policy(bad).is_err(), "{bad:?} accepted");
+        }
+        assert_eq!(Quality::MaxHeight(240).policy_name(), None);
+        assert_eq!(Quality::Format("18".into()).policy_name(), None);
+        assert_eq!(Quality::AudioMp3.ext(), "mp3");
+        assert_eq!(Quality::Best.ext(), "mp4");
+    }
+
+    #[test]
+    fn every_selector_is_capped_at_4k_and_falls_back_to_the_shortest() {
+        assert_eq!(MAX_HEIGHT, 2160, "owner: no 8K");
+        let s = height_selector(1440);
+        assert_eq!(
+            s,
+            "bv*[height<=1440]+ba/b[height<=1440]/wv*[height<=2160]+ba/w[height<=2160]/b[height<=?2160]"
+        );
+        // no alternative of any selector is without a cap (an uncapped `/b` would allow 8K)
+        for h in POLICY_HEIGHTS {
+            for alt in height_selector(*h).split('/') {
+                for atom in alt.split('+').filter(|a| *a != "ba") {
+                    assert!(atom.contains("[height<="), "uncapped {atom} in {h}");
+                    let n: u32 = atom
+                        .rsplit(['=', '?'])
+                        .next()
+                        .unwrap()
+                        .trim_end_matches(']')
+                        .parse()
+                        .unwrap();
+                    assert!(n <= MAX_HEIGHT, "{atom}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn building_refuses_heights_above_4k_and_best_is_capped() {
+        let t = ToolPaths {
+            ytdlp: std::env::temp_dir().join("yt-dlp"),
+            ffmpeg: std::env::temp_dir().join("ffmpeg"),
+            deno: std::env::temp_dir().join("deno"),
+        };
+        let u = MediaUrl::parse("https://x.test/v").unwrap();
+        let dl = |q| {
+            build(
+                &t,
+                &u,
+                &Action::Download {
+                    quality: q,
+                    limit_rate: None,
+                    archive: false,
+                },
+            )
+        };
+        for h in [2161, 4320, 8640, u32::MAX] {
+            assert!(dl(Quality::MaxHeight(h)).is_err(), "{h}");
+        }
+        let a = dl(Quality::Best).unwrap();
+        let f = a
+            .iter()
+            .find_map(|x| x.to_str()?.strip_prefix("--format="))
+            .unwrap()
+            .to_string();
+        assert_eq!(f, height_selector(2160));
+        assert!(!f.contains("bv*+ba/b"), "uncapped best: {f}");
+    }
+
+    #[test]
+    fn offered_heights_bucket_real_heights_into_the_fixed_list() {
+        assert_eq!(
+            offered_heights([144, 240, 360, 480, 720, 1080, 1440, 2160, 4320]),
+            [360, 480, 720, 1080, 1440, 2160]
+        );
+        assert_eq!(offered_heights([1012, 534]), [720, 1080], "crops");
+        assert_eq!(offered_heights([144]), [360]);
+        assert_eq!(
+            offered_heights([4320, 2880]),
+            Vec::<u32>::new(),
+            "only above 4K"
+        );
+        assert_eq!(offered_heights([]), Vec::<u32>::new());
+    }
 }

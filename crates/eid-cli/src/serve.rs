@@ -2,6 +2,7 @@
 //! endpoint. A second `eid serve` does not start another instance: it forwards its `--add` URLs
 //! to the running one and exits.
 
+use crate::media_jobs::{JobsConfig, Kind, VideoJobs};
 use crate::remote::{self, ConnArgs};
 use eid_engine::config::Config;
 use eid_engine::queue::{Queue, Status};
@@ -146,7 +147,59 @@ pub fn handler(
     stopped: Arc<std::sync::atomic::AtomicBool>,
     app: &'static str,
 ) -> impl Fn(Command) -> Result<serde_json::Value, String> + Send + Sync + 'static {
+    handler_with_video(sched, queue, cancel, stopped, app, None)
+}
+
+/// The per-user video job list file (next to the queue file).
+pub fn default_video_jobs_file() -> Result<PathBuf, String> {
+    Ok(eid_platform::ipc::config_dir()
+        .ok_or("no per-user config directory")?
+        .join("video-jobs.json"))
+}
+
+/// Start the video job list (v0.1) on the current tokio runtime: jobs run `eid_exe video ...`
+/// and download into `default_dir` (never a folder chosen by an IPC caller).
+pub fn start_video_jobs(eid_exe: PathBuf, default_dir: PathBuf) -> Result<VideoJobs, String> {
+    Ok(VideoJobs::start(JobsConfig {
+        eid_exe,
+        state_file: default_video_jobs_file()?,
+        default_dir,
+        max_running: 1,
+        env: vec![],
+    }))
+}
+
+/// [`handler`] plus the v0.1 video commands (`probe`, `add_video`, `add_playlist`), served by
+/// `video` (`None`: refused). `probe` is a slow command: the IPC server runs it on a blocking
+/// thread with the runtime entered (eid_ipc::Handler).
+pub fn handler_with_video(
+    sched: Scheduler,
+    queue: String,
+    cancel: CancellationToken,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    app: &'static str,
+    video: Option<VideoJobs>,
+) -> impl Fn(Command) -> Result<serde_json::Value, String> + Send + Sync + 'static {
     move |cmd| match cmd {
+        Command::Probe { url } => {
+            let v = video.as_ref().ok_or("video is not available here")?;
+            let rt = tokio::runtime::Handle::try_current().map_err(|e| e.to_string())?;
+            rt.block_on(v.probe(&url))
+        }
+        Command::AddVideo { url, quality } => {
+            let v = video.as_ref().ok_or("video is not available here")?;
+            let job = v.add(Kind::Video, &url, &quality, None, None)?;
+            Ok(json!({"job": job}))
+        }
+        Command::AddPlaylist {
+            url,
+            quality,
+            items,
+        } => {
+            let v = video.as_ref().ok_or("video is not available here")?;
+            let job = v.add(Kind::Playlist, &url, &quality, items, None)?;
+            Ok(json!({"job": job}))
+        }
         Command::Ping {} => {
             Ok(json!({"pong": true, "version": env!("CARGO_PKG_VERSION"), "app": app}))
         }
@@ -295,12 +348,20 @@ pub async fn run(a: ServeArgs, cancel: CancellationToken) -> Result<i32, String>
         .map_err(|e| e.to_string())?;
 
     let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let h = Arc::new(handler(
+    // video jobs run this very executable (`eid video ...`); without a config folder the
+    // server still serves files, video commands are then refused
+    let video = std::env::current_exe()
+        .map_err(|e| e.to_string())
+        .and_then(|exe| start_video_jobs(exe, dir.clone()))
+        .map_err(|e| eprintln!("eid serve: video jobs are off: {e}"))
+        .ok();
+    let h = Arc::new(handler_with_video(
         sched.clone(),
         a.queue.clone(),
         cancel.clone(),
         stopped.clone(),
         APP_SERVE,
+        video.clone(),
     ));
     let running = match eid_ipc::start(&ep, h, ServeOptions::default()) {
         Ok(r) => r,
@@ -320,6 +381,9 @@ pub async fn run(a: ServeArgs, cancel: CancellationToken) -> Result<i32, String>
     // queue as soon as it sees the endpoint vanish. The second flush keeps an `add` that arrived
     // while the first one was being written.
     let first = sched.flush().await;
+    if let Some(v) = &video {
+        v.shutdown().await;
+    }
     running.stop().await;
     first.map_err(|e| e.to_string())?;
     sched.flush().await.map_err(|e| e.to_string())?;

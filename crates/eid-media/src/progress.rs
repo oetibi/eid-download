@@ -10,6 +10,8 @@ pub struct Progress {
     pub total: Option<u64>,
     pub speed: Option<u64>,
     pub eta_secs: Option<u64>,
+    /// Height of the format being downloaded (`None` for audio or when unknown).
+    pub height: Option<u32>,
 }
 
 /// A number from the tool: non-negative, finite, saturated into `u64`, never panics.
@@ -30,7 +32,8 @@ pub fn parse_line(line: &[u8]) -> Option<Progress> {
     let s = std::str::from_utf8(line).ok()?.trim();
     let rest = s.strip_prefix(PROGRESS_PREFIX)?;
     let f: Vec<&str> = rest.split_whitespace().collect();
-    if f.len() != 5 {
+    // 6 fields with the height (current template); 5 from an older template or tool
+    if f.len() != 5 && f.len() != 6 {
         return None;
     }
     Some(Progress {
@@ -38,6 +41,11 @@ pub fn parse_line(line: &[u8]) -> Option<Progress> {
         total: num(f[1]).or_else(|| num(f[2])),
         speed: num(f[3]),
         eta_secs: num(f[4]),
+        height: f
+            .get(5)
+            .and_then(|h| num(h))
+            .and_then(|h| u32::try_from(h).ok())
+            .filter(|h| *h > 0),
     })
 }
 
@@ -60,6 +68,14 @@ mod tests {
         assert_eq!(p.eta_secs, Some(u64::MAX), "huge values saturate");
         assert!(parse_line(b"[download] 50%").is_none());
         assert!(parse_line(b"[eid-progress] 1 2 3").is_none());
+        assert!(parse_line(b"[eid-progress] 1 2 3 4 5 6 7").is_none());
+        assert_eq!(p.height, None, "five fields: no height");
+        let p = parse_line(b"[eid-progress] 1 2 NA 3 4 1080").unwrap();
+        assert_eq!(p.height, Some(1080));
+        for h in ["NA", "-1", "0", "99999999999", "1e400"] {
+            let line = format!("[eid-progress] 1 2 NA 3 4 {h}");
+            assert_eq!(parse_line(line.as_bytes()).unwrap().height, None, "{h}");
+        }
         assert!(parse_line(&[0xff, 0xfe]).is_none());
     }
 }

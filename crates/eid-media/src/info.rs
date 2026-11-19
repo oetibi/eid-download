@@ -14,6 +14,7 @@ use serde::Deserialize;
 pub struct MediaInfo {
     pub id: String,
     pub title: String,
+    pub uploader: Option<String>,
     pub duration_secs: Option<u64>,
     pub is_live: bool,
     pub formats: Vec<Format>,
@@ -34,6 +35,7 @@ pub struct Format {
 pub struct PlaylistInfo {
     pub id: String,
     pub title: String,
+    pub uploader: Option<String>,
     pub entries: Vec<Entry>,
 }
 
@@ -45,6 +47,7 @@ pub struct Entry {
     pub url: Option<String>,
     /// yt-dlp's availability field (`public`, `private`, `needs_auth`, ...), if present.
     pub availability: Option<String>,
+    pub duration_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -65,12 +68,15 @@ struct RawEntry {
     url: Option<String>,
     webpage_url: Option<String>,
     availability: Option<String>,
+    duration: Option<f64>,
 }
 
 #[derive(Deserialize)]
 struct RawInfo {
     id: Option<String>,
     title: Option<String>,
+    uploader: Option<String>,
+    channel: Option<String>,
     duration: Option<f64>,
     is_live: Option<bool>,
     #[serde(rename = "_type")]
@@ -102,9 +108,40 @@ fn parse_raw(out: &Captured, limit: usize) -> Result<RawInfo, MediaError> {
     serde_json::from_slice(&out.data).map_err(|e| MediaError::BadInfo(e.to_string()))
 }
 
+/// What one `--flat-playlist -J` of an address is: a single video (with its formats) or a
+/// flat playlist.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Probed {
+    Video(MediaInfo),
+    Playlist(PlaylistInfo),
+}
+
+/// Parse the `--flat-playlist -J` output of an address that may be a video or a playlist
+/// (`--flat-playlist` only flattens playlists; a video's document is the full `-J`).
+pub fn parse_probe(out: &Captured, limit: usize) -> Result<Probed, MediaError> {
+    let r = parse_raw(out, limit)?;
+    if r.entries.is_some() || r.kind.as_deref() == Some("playlist") {
+        playlist_from(r).map(Probed::Playlist)
+    } else {
+        video_from(r).map(Probed::Video)
+    }
+}
+
+fn uploader(r: &mut RawInfo) -> Option<String> {
+    r.uploader
+        .take()
+        .or(r.channel.take())
+        .map(|u| bounded(Some(u)))
+        .filter(|u| !u.is_empty())
+}
+
 /// Parse the `-J` output of a single video.
 pub fn parse_video(out: &Captured, limit: usize) -> Result<MediaInfo, MediaError> {
-    let r = parse_raw(out, limit)?;
+    video_from(parse_raw(out, limit)?)
+}
+
+fn video_from(mut r: RawInfo) -> Result<MediaInfo, MediaError> {
+    let up = uploader(&mut r);
     if r.kind.as_deref() == Some("playlist") {
         return Err(MediaError::BadInfo("this address is a playlist".into()));
     }
@@ -136,6 +173,7 @@ pub fn parse_video(out: &Captured, limit: usize) -> Result<MediaInfo, MediaError
         .collect();
     Ok(MediaInfo {
         id,
+        uploader: up,
         title: bounded(r.title),
         duration_secs: non_neg(r.duration),
         is_live: r.is_live.unwrap_or(false),
@@ -145,7 +183,11 @@ pub fn parse_video(out: &Captured, limit: usize) -> Result<MediaInfo, MediaError
 
 /// Parse the `--flat-playlist -J` output of a playlist.
 pub fn parse_playlist(out: &Captured, limit: usize) -> Result<PlaylistInfo, MediaError> {
-    let r = parse_raw(out, limit)?;
+    playlist_from(parse_raw(out, limit)?)
+}
+
+fn playlist_from(mut r: RawInfo) -> Result<PlaylistInfo, MediaError> {
+    let uploader = uploader(&mut r);
     let raw = r
         .entries
         .ok_or_else(|| MediaError::BadInfo("not a playlist".into()))?;
@@ -162,11 +204,13 @@ pub fn parse_playlist(out: &Captured, limit: usize) -> Result<PlaylistInfo, Medi
             title: bounded(e.title),
             url: e.webpage_url.or(e.url).map(|u| bounded(Some(u))),
             availability: e.availability.map(|a| bounded(Some(a))),
+            duration_secs: non_neg(e.duration),
         })
         .collect();
     Ok(PlaylistInfo {
         id: bounded(r.id),
         title: bounded(r.title),
+        uploader,
         entries,
     })
 }

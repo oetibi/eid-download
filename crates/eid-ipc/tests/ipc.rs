@@ -25,6 +25,11 @@ impl Handler for Counting {
             Command::Pause { .. } => Err("no such item".into()),
             Command::Resume { .. } => panic!("handler bug"),
             Command::Show {} => Ok(json!({})),
+            Command::Probe { .. } => {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                Ok(json!({"kind": "video"}))
+            }
+            Command::AddVideo { .. } | Command::AddPlaylist { .. } => Ok(json!({"job": 1})),
         }
     }
 }
@@ -601,4 +606,37 @@ async fn a_retried_id_after_an_app_restart_runs_again_known_limit() {
         "known limit: runs again"
     );
     run.stop().await;
+}
+
+/// v0.1: a slow `probe` (it runs yt-dlp) does not hold up other clients: their commands are
+/// answered while it runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_probe_does_not_block_other_clients() {
+    let f = fixture("slow").await;
+    let ep = f.ep.clone();
+    let slow = tokio::spawn(async move {
+        let mut c = Client::connect(&ep).await.unwrap();
+        let t0 = std::time::Instant::now();
+        let r = c
+            .call(Command::Probe {
+                url: "https://y.test/w".into(),
+            })
+            .await
+            .unwrap();
+        (r, t0.elapsed())
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut c = Client::connect(&f.ep).await.unwrap();
+    let t0 = std::time::Instant::now();
+    let r = c.call(Command::Ping {}).await.unwrap();
+    assert_eq!(r["pong"], true);
+    assert!(
+        t0.elapsed() < Duration::from_millis(800),
+        "ping waited for the probe: {:?}",
+        t0.elapsed()
+    );
+    let (r, took) = slow.await.unwrap();
+    assert_eq!(r["kind"], "video");
+    assert!(took >= Duration::from_millis(1400));
+    f.stop().await;
 }

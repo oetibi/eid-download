@@ -23,7 +23,8 @@ eid-ipc = { path = "../eid-ipc" }
 eid-media = { path = "../eid-media" }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "process", "io-util"] }
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 eid-testserver = { path = "../eid-testserver" }

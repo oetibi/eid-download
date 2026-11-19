@@ -14,7 +14,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 /// Executes a validated command. Must be quick and must not block: it runs under the
-/// idempotency lock. Errors must already be free of secrets.
+/// idempotency lock. Exception: [`Command::is_slow`] commands run on a blocking thread (with
+/// the tokio runtime entered, so `Handle::current().block_on` works there) and outside the lock.
+/// Errors must already be free of secrets.
 pub trait Handler: Send + Sync + 'static {
     fn handle(&self, cmd: Command) -> Result<serde_json::Value, String>;
 }
@@ -169,6 +171,20 @@ async fn serve_connection(
             }
         };
         let resp = match proto::parse_request(&frame) {
+            // read-only slow commands (probe runs yt-dlp): a blocking thread, no idempotency
+            // lock, so they never hold up other clients
+            Ok(req) if req.command.is_slow() => {
+                let (h, id) = (handler.clone(), req.id.clone());
+                match tokio::task::spawn_blocking(move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.handle(req.command)))
+                })
+                .await
+                {
+                    Ok(Ok(Ok(v))) => Response::ok(&id, v),
+                    Ok(Ok(Err(e))) => Response::err(&id, e),
+                    _ => Response::err(&id, "internal error"),
+                }
+            }
             Ok(req) => handle_once(&dedup, handler.as_ref(), req),
             Err(e) => {
                 let _ = send(&mut s, &Response::err("", e), wt).await;

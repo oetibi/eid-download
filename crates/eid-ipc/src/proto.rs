@@ -9,6 +9,13 @@ pub const MAX_ID_LEN: usize = 64;
 pub const MAX_URL_LEN: usize = 8192;
 pub const MAX_NAME_LEN: usize = 255;
 pub const MAX_TOKEN_LEN: usize = 128;
+/// Most playlist items one `add_playlist` may name.
+pub const MAX_ITEMS: usize = 5000;
+/// The only video qualities accepted (v0.1 policy, docs/V0.1-CONTRACT.md: nothing above 4K).
+/// Same list as the media crate's `QUALITY_CHOICES` (checked by a test in eid-cli).
+pub const VIDEO_QUALITIES: &[&str] = &[
+    "360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,12 +50,44 @@ pub enum Command {
     /// Bring the desktop app's window to the front (a second double-click on the app sends it;
     /// the headless `eid serve` has no window and refuses it). Never allowed from a browser.
     Show {},
+    /// v0.1: what a page address is (video or playlist: title, items, offered qualities).
+    /// Read-only and slow (it runs yt-dlp): served outside the idempotency lock.
+    Probe {
+        url: String,
+    },
+    /// v0.1: download one video (or its audio) at a quality of [`VIDEO_QUALITIES`] into the
+    /// default folder (the caller never chooses a folder).
+    AddVideo {
+        url: String,
+        quality: String,
+    },
+    /// v0.1: download a playlist (all items, or only `items`, numbered from 1 in playlist
+    /// order) into a numbered folder named after it, in the default folder.
+    AddPlaylist {
+        url: String,
+        quality: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<Vec<u32>>,
+    },
 }
 
 impl Command {
     /// The subset browser extensions may use through Native Messaging (least privilege).
     pub fn allowed_from_browser(&self) -> bool {
-        matches!(self, Command::Ping {} | Command::Add { .. })
+        matches!(
+            self,
+            Command::Ping {}
+                | Command::Add { .. }
+                | Command::Probe { .. }
+                | Command::AddVideo { .. }
+                | Command::AddPlaylist { .. }
+        )
+    }
+
+    /// Commands that may take long (they run an external tool): served without holding the
+    /// idempotency lock, on a blocking thread, with a longer client timeout.
+    pub fn is_slow(&self) -> bool {
+        matches!(self, Command::Probe { .. })
     }
 }
 
@@ -133,6 +172,30 @@ impl Request {
                         return Err(format!("invalid {n}"));
                     }
                 }
+            }
+        }
+        let video_url = match &self.command {
+            Command::Probe { url } => Some(url),
+            Command::AddVideo { url, quality } | Command::AddPlaylist { url, quality, .. } => {
+                if !VIDEO_QUALITIES.contains(&quality.as_str()) {
+                    return Err("invalid quality".into());
+                }
+                Some(url)
+            }
+            _ => None,
+        };
+        if let Some(url) = video_url {
+            let web = url.starts_with("https://") || url.starts_with("http://");
+            if !web || !plain(url, MAX_URL_LEN) {
+                return Err("invalid url".into());
+            }
+        }
+        if let Command::AddPlaylist {
+            items: Some(items), ..
+        } = &self.command
+        {
+            if items.is_empty() || items.len() > MAX_ITEMS || items.contains(&0) {
+                return Err("invalid items".into());
             }
         }
         Ok(())
@@ -227,7 +290,54 @@ mod tests {
     }
 
     #[test]
-    fn browser_subset_is_only_ping_and_add() {
+    fn video_commands_parse_and_reject_bad_input() {
+        let r = req(r#"{"v":1,"id":"x","command":{"cmd":"probe","url":"https://www.youtube.com/watch?v=a"}}"#).unwrap();
+        assert!(r.command.is_slow());
+        let r = req(r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"1080p"}}"#).unwrap();
+        assert!(!r.command.is_slow());
+        let r = req(r#"{"v":1,"id":"x","command":{"cmd":"add_playlist","url":"https://y.test/p","quality":"audio","items":[1,3]}}"#).unwrap();
+        assert_eq!(
+            r.command,
+            Command::AddPlaylist {
+                url: "https://y.test/p".into(),
+                quality: "audio".into(),
+                items: Some(vec![1, 3])
+            }
+        );
+        for bad in [
+            r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"4320p"}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"bv*+ba"}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w"}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"file:///etc/passwd","quality":"best"}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"probe","url":"javascript:alert(1)"}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"probe","url":""}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"add_playlist","url":"https://y.test/p","quality":"best","items":[]}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"add_playlist","url":"https://y.test/p","quality":"best","items":[0]}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"add_playlist","url":"https://y.test/p","quality":"best","dir":"C:\"}}"#,
+        ] {
+            assert!(req(bad).is_err(), "should be rejected: {bad}");
+        }
+        let many: Vec<u32> = (1..=(MAX_ITEMS as u32 + 1)).collect();
+        let j = serde_json::json!({"v":1,"id":"x","command":{"cmd":"add_playlist","url":"https://y.test/p","quality":"best","items":many}});
+        assert!(req(&j.to_string()).is_err());
+    }
+
+    #[test]
+    fn browser_subset_is_only_ping_add_and_the_video_commands() {
+        for c in [
+            Command::Probe { url: "u".into() },
+            Command::AddVideo {
+                url: "u".into(),
+                quality: "best".into(),
+            },
+            Command::AddPlaylist {
+                url: "u".into(),
+                quality: "best".into(),
+                items: None,
+            },
+        ] {
+            assert!(c.allowed_from_browser());
+        }
         assert!(Command::Ping {}.allowed_from_browser());
         assert!(Command::Add {
             url: "u".into(),
