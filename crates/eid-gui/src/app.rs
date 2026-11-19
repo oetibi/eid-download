@@ -310,9 +310,89 @@ pub fn add(
     links: String,
     folder: Option<String>,
     name: Option<String>,
+    category: Option<String>,
 ) -> Result<AddReport, String> {
     let folder = folder.filter(|f| !f.is_empty() && *f != st.default_dir);
-    core::add_links(&st.sched, &links, folder.as_deref(), name.as_deref())
+    core::add_links_with(
+        &st.sched,
+        &links,
+        folder.as_deref(),
+        name.as_deref(),
+        category.as_deref().unwrap_or("none"),
+    )
+}
+
+/// v0.2: the category names the add dialog offers for its sub-folder choice.
+#[tauri::command]
+pub fn categories() -> Vec<String> {
+    core::category_names()
+}
+
+/// v0.2: import a list file the user picks (txt/list, json, csv). The file is untrusted: read
+/// without following links, at most `MAX_IMPORT_BYTES`, then checked by `eid_engine::porting`.
+/// `None` = cancelled.
+#[tauri::command]
+pub async fn import_list(
+    app: AppHandle,
+    st: State<'_, AppState>,
+    folder: Option<String>,
+) -> Result<Option<core::ImportReport>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Eid Download list", &["txt", "list", "json", "csv"])
+        .pick_file(move |p| {
+            let _ = tx.send(p.and_then(|p| p.into_path().ok()));
+        });
+    let Some(path) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let bytes = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        use std::io::Read;
+        let f = eid_platform::fs::open_regular_nofollow_read(&path).map_err(|e| e.to_string())?;
+        let mut buf = Vec::new();
+        f.take(eid_engine::porting::MAX_IMPORT_BYTES as u64 + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| e.to_string())?;
+        Ok(buf)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let folder = folder.filter(|f| !f.is_empty() && *f != st.default_dir);
+    core::import_into(&st.sched, &bytes, &name, folder.as_deref()).map(Some)
+}
+
+/// v0.2: export every download's link (and name, sub-folder for json/csv) to a file the user
+/// picks; the extension decides the format. `None` = cancelled.
+#[tauri::command]
+pub async fn export_list(app: AppHandle, st: State<'_, AppState>) -> Result<Option<usize>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Eid Download list", &["txt", "json", "csv"])
+        .set_file_name("eid-download-list.txt")
+        .save_file(move |p| {
+            let _ = tx.send(p.and_then(|p| p.into_path().ok()));
+        });
+    let Some(path) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let qs = st.sched.snapshot();
+    let n = qs.queues.iter().map(|q| q.items.len()).sum();
+    let text = core::export_list(&qs, &name)?;
+    tauri::async_runtime::spawn_blocking(move || std::fs::write(&path, text))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(Some(n))
 }
 
 #[tauri::command]

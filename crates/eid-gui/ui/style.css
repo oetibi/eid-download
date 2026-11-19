@@ -291,3 +291,5 @@ table.segs tr.full td:last-child { color: var(--ok); }
 .limit-row { display: flex; gap: 6px; align-items: center; margin-top: 10px; }
 .limit-row input { width: 120px; }
 .q-row select.q-after { width: auto; flex: 1; min-width: 160px; }
+.row.two { gap: 12px; margin-top: 10px; }
+.row.two > label { flex: 1; display: flex; flex-direction: column; gap: 4px; }

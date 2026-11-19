@@ -440,6 +440,76 @@ pub fn apply_queue_patch(
     Ok((stop, start))
 }
 
+/// v0.2 import: what happened to a list file.
+#[derive(Debug, Default, PartialEq, Serialize)]
+pub struct ImportReport {
+    pub added: usize,
+    /// Entries the file had that could not be added (bad links, refused by the queue).
+    pub refused: usize,
+    pub duplicates: usize,
+    /// Links whose `user:pass@` was removed (never stored).
+    pub credentials_dropped: usize,
+}
+
+/// Import a list file's bytes (untrusted: size-, count- and content-checked by
+/// `eid_engine::porting`, names and sub-folders sanitized) into the main queue or the queue of
+/// `dir`. Format from the file extension (`.txt`/`.list`, `.json`, `.csv`).
+pub fn import_into(
+    sched: &Scheduler,
+    bytes: &[u8],
+    file_name: &str,
+    dir: Option<&str>,
+) -> Result<ImportReport, String> {
+    let fmt = eid_engine::porting::Format::from_extension(file_name)
+        .ok_or_else(|| "bad_list_format".to_string())?;
+    let imp = eid_engine::porting::import(bytes, fmt).map_err(|e| e.to_string())?;
+    let queue = match dir {
+        None => MAIN_QUEUE.to_owned(),
+        Some(d) => {
+            let d = check_folder(d)?.to_string_lossy().into_owned();
+            sched
+                .edit(|qs| queue_for_dir(qs, &d))
+                .map_err(|e| e.to_string())?
+        }
+    };
+    let mut r = ImportReport {
+        refused: imp.rejected_total,
+        duplicates: imp.duplicates,
+        credentials_dropped: imp.credentials_dropped,
+        ..ImportReport::default()
+    };
+    for it in imp.items {
+        match sched.add_item(
+            &queue,
+            &it.url,
+            it.subdir.as_deref(),
+            it.name.as_deref(),
+            None,
+        ) {
+            Ok(_) => r.added += 1,
+            Err(_) => r.refused += 1,
+        }
+    }
+    Ok(r)
+}
+
+/// v0.2 export: every item of every queue (credential-free URL, file name, sub-folder).
+pub fn export_list(qs: &QueueSet, file_name: &str) -> Result<String, String> {
+    let fmt = eid_engine::porting::Format::from_extension(file_name)
+        .ok_or_else(|| "bad_list_format".to_string())?;
+    let items: Vec<eid_engine::porting::ListItem> = qs
+        .queues
+        .iter()
+        .flat_map(|q| q.items.iter())
+        .map(|i| eid_engine::porting::ListItem {
+            url: i.url.clone(),
+            name: i.file_name.clone(),
+            subdir: i.subdir.clone(),
+        })
+        .collect();
+    Ok(eid_engine::porting::export(&items, fmt))
+}
+
 /// v0.2 clipboard monitoring: the copied text, if it is exactly one http(s) link worth
 /// offering: a file whose name has a known download extension (archives, documents, music,
 /// video, pictures, programs) or a YouTube page. Anything else (plain text, links to ordinary
@@ -583,6 +653,71 @@ pub fn add_links(
     dir: Option<&str>,
     name: Option<&str>,
 ) -> Result<AddReport, String> {
+    add_links_with(sched, text, dir, name, "none")
+}
+
+/// v0.2 category folders: `none` (the folder itself), `auto` (a sub-folder named after the
+/// file's type: Compressed, Documents, Music, Video, Programs, Pictures; nothing for other or
+/// unknown types) or one category's name. Returns the sub-folder (a plain, sanitized name).
+pub fn category_subdir(
+    url: &str,
+    name: Option<&str>,
+    mode: &str,
+) -> Result<Option<String>, String> {
+    let cat = eid_engine::category::Categorizer::default();
+    if mode == "none" {
+        return Ok(None);
+    }
+    if mode != "auto" {
+        let c = cat
+            .rules
+            .iter()
+            .find(|c| c.name == mode)
+            .ok_or_else(|| "bad_category".to_string())?;
+        return Ok(Some(eid_engine::sanitize::sanitize_file_name(&c.folder)));
+    }
+    let file = match name {
+        Some(n) => n.to_string(),
+        None => url::Url::parse(url)
+            .ok()
+            .and_then(|u| {
+                u.path_segments()
+                    .and_then(|mut s| s.next_back().map(str::to_owned))
+            })
+            .map(|s| {
+                percent_encoding::percent_decode_str(&s)
+                    .decode_utf8_lossy()
+                    .into_owned()
+            })
+            .unwrap_or_default(),
+    };
+    let c = cat.classify(&file, None);
+    if c.name == cat.fallback.name {
+        return Ok(None);
+    }
+    Ok(Some(eid_engine::sanitize::sanitize_file_name(&c.folder)))
+}
+
+/// The category choices the add dialog offers (besides `none` and `auto`).
+pub fn category_names() -> Vec<String> {
+    eid_engine::category::Categorizer::default()
+        .rules
+        .iter()
+        .map(|c| c.name.clone())
+        .collect()
+}
+
+/// [`add_links`] with a category folder mode (see [`category_subdir`]).
+pub fn add_links_with(
+    sched: &Scheduler,
+    text: &str,
+    dir: Option<&str>,
+    name: Option<&str>,
+    category: &str,
+) -> Result<AddReport, String> {
+    if category != "none" && category != "auto" && !category_names().iter().any(|c| c == category) {
+        return Err("bad_category".into());
+    }
     let links = parse_links(text)?;
     let name = name.map(str::trim).filter(|n| !n.is_empty());
     if name.is_some() && links.len() != 1 {
@@ -600,7 +735,8 @@ pub fn add_links(
     };
     let mut r = AddReport::default();
     for l in links {
-        match sched.add_item(&queue, &l, None, name, None) {
+        let sub = category_subdir(&l, name, category)?;
+        match sched.add_item(&queue, &l, sub.as_deref(), name, None) {
             Ok(id) => r.added.push(id),
             Err(e) => r
                 .refused
@@ -1155,6 +1291,112 @@ mod tests {
                 ..Default::default()
             };
             assert!(apply_queue_patch(&mut qs, &p, false).is_ok(), "{a}");
+        }
+    }
+
+    #[test]
+    fn category_folders_auto_fixed_and_none() {
+        let sub = |u: &str, m: &str| category_subdir(u, None, m).unwrap();
+        assert_eq!(
+            sub("http://h/a/setup.ZIP", "auto").as_deref(),
+            Some("Compressed")
+        );
+        assert_eq!(
+            sub("http://h/%D8%AA%D9%82%D8%B1%D9%8A%D8%B1.pdf", "auto").as_deref(),
+            Some("Documents")
+        );
+        assert_eq!(
+            sub("http://h/page", "auto"),
+            None,
+            "unknown type: no sub-folder"
+        );
+        assert_eq!(sub("http://h/x.weird", "auto"), None);
+        assert_eq!(sub("http://h/x.zip", "none"), None);
+        assert_eq!(sub("http://h/x.zip", "Music").as_deref(), Some("Music"));
+        // the name given by the user wins over the link
+        assert_eq!(
+            category_subdir("http://h/x", Some("song.mp3"), "auto")
+                .unwrap()
+                .as_deref(),
+            Some("Music")
+        );
+        assert!(category_subdir("http://h/x", None, "../evil").is_err());
+        let d = tempfile::tempdir().unwrap();
+        let s = sched(d.path());
+        assert_eq!(
+            add_links_with(&s, "http://h/a.zip", None, None, "evil").unwrap_err(),
+            "bad_category"
+        );
+        add_links_with(
+            &s,
+            "http://h/a.zip\nhttp://h/b.mp4\nhttp://h/c",
+            None,
+            None,
+            "auto",
+        )
+        .unwrap();
+        let subs: Vec<_> = s.snapshot().queues[0]
+            .items
+            .iter()
+            .map(|i| i.subdir.clone())
+            .collect();
+        assert_eq!(
+            subs,
+            vec![Some("Compressed".into()), Some("Video".into()), None]
+        );
+    }
+
+    #[test]
+    fn import_and_export_lists_are_untrusted_bounded_and_round_trip() {
+        let d = tempfile::tempdir().unwrap();
+        let s = sched(d.path());
+        let txt = b"http://h/a.zip\nhttp://user:pw@h/b.iso\njavascript:alert(1)\nhttp://h/a.zip\nftp://h/c\n";
+        let r = import_into(&s, txt, "links.txt", None).unwrap();
+        assert_eq!(
+            (r.added, r.credentials_dropped, r.duplicates),
+            (2, 1, 1),
+            "{r:?}"
+        );
+        assert!(r.refused >= 2, "{r:?}");
+        let qs = s.snapshot();
+        assert!(
+            !serde_json::to_string(&qs).unwrap().contains("pw@"),
+            "credentials stored"
+        );
+        // hostile names and sub-folders are sanitized, never a path
+        let json = br#"{"version":1,"items":[{"url":"http://h/x.bin","name":"../../evil.exe","subdir":"..\\up"}]}"#;
+        let r = import_into(&s, json, "l.json", None).unwrap();
+        assert_eq!(r.added, 1, "{r:?}");
+        let it = s.snapshot().queues[0].items.last().cloned().unwrap();
+        for n in [it.file_name.unwrap(), it.subdir.unwrap()] {
+            assert!(!n.contains("..") || !n.contains(['/', '\\']), "{n}");
+            assert!(eid_engine::sanitize::is_safe_stored_name(&n), "{n}");
+        }
+        // unknown format, too large
+        assert_eq!(
+            import_into(&s, b"x", "l.exe", None).unwrap_err(),
+            "bad_list_format"
+        );
+        let big = vec![b'a'; eid_engine::porting::MAX_IMPORT_BYTES + 1];
+        assert!(import_into(&s, &big, "l.txt", None).is_err());
+        // export then import into a fresh queue file gives the same links
+        for f in ["out.txt", "out.json", "out.csv"] {
+            let text = export_list(&s.snapshot(), f).unwrap();
+            let d2 = tempfile::tempdir().unwrap();
+            let s2 = sched(d2.path());
+            let r = import_into(&s2, text.as_bytes(), f, None).unwrap();
+            assert_eq!(r.added, 3, "{f}: {r:?}");
+            let urls = |s: &Scheduler| -> Vec<String> {
+                let mut v: Vec<_> = s
+                    .snapshot()
+                    .queues
+                    .iter()
+                    .flat_map(|q| q.items.iter().map(|i| i.url.clone()))
+                    .collect();
+                v.sort();
+                v
+            };
+            assert_eq!(urls(&s), urls(&s2), "{f}");
         }
     }
 

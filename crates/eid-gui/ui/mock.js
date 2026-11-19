@@ -132,7 +132,12 @@ export function mockApi(params = new URLSearchParams()) {
       const ws = warnings.splice(0);
       return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR, power: pw, warnings: ws };
     },
-    add: ({ links, name, folder }) => {
+    categories: () => ["Compressed", "Documents", "Music", "Video", "Pictures", "Programs"],
+    import_list: () => { const r = window.__eidMockImport ?? null; if (r) for (const u of r.urls) touch(mk({ name: u.split("/").pop(), url: u })); return r && { added: r.urls.length, refused: r.refused ?? 0, duplicates: 0, credentials_dropped: 0 }; },
+    export_list: () => (window.__eidMockExportCancel ? null : items.size),
+    add: ({ links, name, folder, category }) => {
+      if (category != null && !["none", "auto", "Compressed", "Documents", "Music", "Video", "Pictures", "Programs"].includes(category)) throw "bad_category";
+      window.__eidMockLastAdd = { folder, category };
       const ls = String(links).split(/\s+/).filter(Boolean);
       if (!ls.length) throw "no_links";
       if (ls.length > 200) throw "too_many_links";

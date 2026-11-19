@@ -452,6 +452,37 @@ try {
     assert((await ev("document.querySelector('#toast').textContent")).includes(it.name), "names the download");
   });
 
+  await check("add dialog: queue and 'folder by type'; import/export from the menu; Desktop settings tab", async () => {
+    await open("");
+    await ev("document.querySelector('#btn-add').click()");
+    await until("document.querySelector('#dlg-add').open && document.querySelectorAll('#in-cat option').length === 8 && document.querySelectorAll('#in-queue option').length === 2", 3000, "choices filled");
+    assert((await ev("document.querySelector('#in-cat').value")) === "none", "default must be no sub-folder");
+    await ev("(() => { const q = document.querySelector('#in-queue'); q.value = '1'; q.dispatchEvent(new Event('change')); document.querySelector('#in-cat').value = 'auto'; document.querySelector('#in-links').value = 'https://example.com/z.zip'; })()");
+    assert(/Apps/.test(await ev("document.querySelector('#folder-show').textContent")), "queue choice sets the folder");
+    await ev("document.querySelector('#btn-start').click()");
+    await until("window.__eidMockLastAdd?.category === 'auto'", 3000, "category sent");
+    assert(/Apps/.test(await ev("window.__eidMockLastAdd.folder")), "queue folder sent");
+    // the default follows the setting
+    await ev("document.querySelector('#set-autocat').click()");
+    await ev("document.querySelector('#btn-add').click()");
+    await until("document.querySelector('#dlg-add').open && document.querySelector('#in-cat').value === 'auto'", 3000, "auto by default after the setting");
+    await ev("document.querySelector('#dlg-add').close(); document.querySelector('#set-autocat').click()");
+    // import / export
+    await ev("window.__eidMockImport = { urls: ['https://example.com/i1.zip', 'https://example.com/i2.iso'], refused: 1 }");
+    const before = await ev("window.__eid.store.size");
+    await ev("document.querySelector('#menu-downloads [data-cmd=import_list]').click()");
+    await until(`window.__eid.store.size === ${before} + 2`, 4000, "imported items listed");
+    await until("/أُضيف 2/.test(document.querySelector('#toast').textContent) && /رُفض 1/.test(document.querySelector('#toast').textContent)", 3000, "import report");
+    await ev("document.querySelector('#menu-downloads [data-cmd=export_list]').click()");
+    await until("/صُدّر/.test(document.querySelector('#toast').textContent)", 3000, "export report");
+    // Desktop tab holds the desktop switches
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await ev("document.querySelector('#dlg-settings [data-tab=desktop]').click()");
+    assert(!(await ev("document.querySelector('[data-pane=desktop]').hidden")) && await ev("document.querySelector('[data-pane=desktop]').contains(document.querySelector('#set-tray'))"), "desktop tab");
+    if (arg("--shots")) await shot("settings-desktop-tab-ar.png");
+    await ev("document.querySelector('#dlg-settings').close()");
+  });
+
   for (const n of [100, 1000, 3000]) {
     for (const old of [false, true]) {
       await check(`responsive with ${n} downloads (${old ? "v0.0.1 full list" : "revisioned list"})`, async () => {

@@ -444,3 +444,6 @@ windows:windows_shutdown_privilege_can_be_enabled
 # ---- PLAN P1 open items (b) and (c), owner approval 2026-11-19
 a_stall_is_a_barrier_only_while_the_stall_timeout_outlasts_it
 a_failed_final_checkpoint_warns_and_never_changes_the_outcome
+# ---- v0.2 add dialog categories, import/export from the window
+category_folders_auto_fixed_and_none
+import_and_export_lists_are_untrusted_bounded_and_round_trip

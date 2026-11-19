@@ -455,6 +455,15 @@ const commands = {
   columns: { run: () => { const r = $("#thead").getBoundingClientRect(); showColsMenu(document.documentElement.dir === "rtl" ? r.right - 20 : r.left + 20, r.bottom); } },
   customize_toolbar: { run: () => openToolbarDialog() },
   queues: { run: () => openQueues() },
+  import_list: { run: async () => {
+    try {
+      const r = await api.call("import_list", { folder: settings.folder ?? null });
+      if (r) { toast(t("imp_done", r.added, r.refused, r.duplicates)); kick(); }
+    } catch (e) { failure(e); }
+  } },
+  export_list: { run: async () => {
+    try { const n = await api.call("export_list"); if (n != null) toast(t("exp_done", n)); } catch (e) { failure(e); }
+  } },
   find: { run: () => { $("#search").focus(); $("#search").select(); } },
   settings: { run: () => openSettings() },
   resume: {
@@ -697,9 +706,33 @@ function openAdd(prefill) {
   $("#in-name").value = "";
   pickedFolder = null;
   showFolder();
+  fillAddChoices();
   $("#dlg-add").showModal();
   $("#in-links").focus();
 }
+
+// v0.2: queue + "folder by type" choices of the add dialog (lists fetched when it opens)
+const CAT_KEY = { Compressed: "v_compressed", Documents: "v_documents", Music: "v_music", Video: "v_video", Pictures: "v_pictures", Programs: "v_programs" };
+let addQueues = [];
+async function fillAddChoices() {
+  const cat = $("#in-cat");
+  let cats = [];
+  try { cats = await api.call("categories"); } catch { cats = []; }
+  const opt = (v, text) => { const o = el("option", null, text); o.value = v; return o; };
+  cat.replaceChildren(opt("none", t("cat_none")), opt("auto", t("cat_auto")),
+    ...cats.filter((c) => typeof c === "string").map((c) => opt(c, CAT_KEY[c] ? t(CAT_KEY[c]) : c)));
+  cat.value = localStorage.getItem("autocat") === "on" ? "auto" : "none";
+  const q = $("#in-queue");
+  try { addQueues = await api.call("queues"); } catch { addQueues = []; }
+  q.replaceChildren(...addQueues.map((x, i) => opt(String(i), x.name === "main" ? t("q_main") : queueLabel(x))));
+  q.value = "0";
+  q.disabled = addQueues.length < 2;
+}
+$("#in-queue").addEventListener("change", () => {
+  const x = addQueues[Number($("#in-queue").value)];
+  pickedFolder = x && x.name !== "main" ? x.dir : null;
+  showFolder();
+});
 
 async function submitAdd(ev) {
   ev.preventDefault();
@@ -709,7 +742,7 @@ async function submitAdd(ev) {
   start.disabled = true;
   try {
     const name = $("#in-name").value.trim();
-    const r = await api.call("add", { links: $("#in-links").value, folder: effectiveFolder(), name: name || null });
+    const r = await api.call("add", { links: $("#in-links").value, folder: effectiveFolder(), name: name || null, category: $("#in-cat").value || "none" });
     if (r.refused.length) {
       const lines = r.refused.map(([u, k]) => `• ⁨${u}⁩ — ${errText(k) ?? k}`);
       errEl.textContent = `${r.added.length ? t("added_n", r.added.length) + "\n" : ""}${t("refused_n", r.refused.length)}\n${lines.join("\n")}`;
@@ -1645,3 +1678,7 @@ async function fillQueues() {
     return row;
   }));
 }
+
+// v0.2: default "folder by type" for new downloads
+$("#set-autocat").checked = localStorage.getItem("autocat") === "on";
+$("#set-autocat").addEventListener("change", (e) => localStorage.setItem("autocat", e.target.checked ? "on" : "off"));
