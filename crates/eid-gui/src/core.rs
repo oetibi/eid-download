@@ -799,6 +799,38 @@ where
     }
 }
 
+/// v0.2 startup self-check (owner's Windows test, 2026-11-19): what is wrong with where the app
+/// runs, as codes the window explains. `exe` is this program; `exists` tells whether a file is
+/// there (the real disk in the app, a list in the tests).
+/// - `from_zip`: started from inside a ZIP (Explorer runs it from `%TEMP%\Temp1_<name>.zip\`,
+///   7-Zip from `%TEMP%\7zO...`, WinRAR from `%TEMP%\Rar$EX...`): only the clicked file is
+///   there, so the browser link cannot work and Windows may delete the folder at any time.
+/// - `no_native_host`: `eid-native-host` is not next to the app, so the browser extension
+///   cannot reach it (downloads in the window still work).
+pub fn install_problems(
+    exe: &std::path::Path,
+    exists: &dyn Fn(&std::path::Path) -> bool,
+) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    let from_zip = exe
+        .parent()
+        .into_iter()
+        .flat_map(|p| p.ancestors())
+        .filter_map(|a| a.file_name())
+        .any(|n| {
+            let n = n.to_string_lossy().to_lowercase();
+            n.ends_with(".zip") || n.starts_with("7zo") || n.starts_with("rar$ex")
+        });
+    if from_zip {
+        v.push("from_zip");
+    }
+    let host = exe.with_file_name(format!("eid-native-host{}", std::env::consts::EXE_SUFFIX));
+    if !exists(&host) {
+        v.push("no_native_host");
+    }
+    v
+}
+
 /// `edit` wraps the closure's error as "invalid input: X"; give the window just X.
 fn invalid_input_text(s: &str) -> String {
     s.strip_prefix("invalid input: ").unwrap_or(s).to_owned()
@@ -806,6 +838,72 @@ fn invalid_input_text(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_startup_check_sees_a_zip_folder_and_a_missing_native_host() {
+        use super::install_problems;
+        use std::path::{Path, PathBuf};
+        let host = |dir: &str| {
+            PathBuf::from(dir).join(format!("eid-native-host{}", std::env::consts::EXE_SUFFIX))
+        };
+        let only = |p: PathBuf| move |q: &Path| q == p;
+        let sep = std::path::MAIN_SEPARATOR;
+        let d = |parts: &[&str]| parts.join(&sep.to_string());
+        // extracted properly, with everything next to it: nothing to say
+        let ok = d(&["", "Users", "me", "Apps", "EidDownload"]);
+        assert!(
+            install_problems(&Path::new(&ok).join("EidDownload.exe"), &only(host(&ok))).is_empty()
+        );
+        // Explorer's "run from inside the ZIP" folders (any case), 7-Zip and WinRAR
+        for zipdir in [
+            d(&[
+                "",
+                "Users",
+                "me",
+                "AppData",
+                "Local",
+                "Temp",
+                "Temp1_EidDownload-windows-x64.zip",
+                "EidDownload",
+            ]),
+            d(&[
+                "",
+                "Users",
+                "me",
+                "AppData",
+                "Local",
+                "Temp",
+                "Temp2_EIDDOWNLOAD.ZIP",
+            ]),
+            d(&["", "tmp", "7zO8A1B2C3D"]),
+            d(&["", "tmp", "Rar$EXa1234.5678"]),
+        ] {
+            let exe = Path::new(&zipdir).join("EidDownload.exe");
+            assert_eq!(
+                install_problems(&exe, &|_| false),
+                ["from_zip", "no_native_host"],
+                "{zipdir}"
+            );
+            assert_eq!(
+                install_problems(&exe, &only(host(&zipdir))),
+                ["from_zip"],
+                "{zipdir}"
+            );
+        }
+        // a folder merely named like a zip file further away is still a zip folder; a file
+        // name is not looked at, and "zip" inside a name is fine
+        let near = d(&["", "Users", "me", "zipper", "my.zip.tools"]);
+        assert!(install_problems(
+            &Path::new(&near).join("EidDownload.zip.exe"),
+            &only(host(&near))
+        )
+        .is_empty());
+        // missing native host alone
+        assert_eq!(
+            install_problems(&Path::new(&ok).join("EidDownload.exe"), &|_| false),
+            ["no_native_host"]
+        );
+    }
+
     #[test]
     fn executables_are_never_opened() {
         use std::path::Path;

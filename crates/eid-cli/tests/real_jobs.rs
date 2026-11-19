@@ -163,6 +163,7 @@ async fn real_youtube_video_audio_and_playlist_jobs() {
     }
     let v = VideoJobs::start(JobsConfig {
         eid_exe: env!("CARGO_BIN_EXE_eid").into(),
+        worker_args: vec![],
         state_file: cfg_dir.join("video-jobs.json"),
         default_dir: out.clone(),
         max_running: 1,

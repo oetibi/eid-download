@@ -106,6 +106,24 @@ try {
     assert(errors.length === 0, `errors: ${errors.join(" | ")}`);
   });
 
+  await check("startup self-check: opened from inside a ZIP / no native host => a clear bar (ar/en), closable; nothing when all is well", async () => {
+    await open("?check=from_zip,no_native_host");
+    await until("!document.querySelector('#checkbar').hidden", 3000, "check bar");
+    const ar = await ev("[...document.querySelectorAll('#check-list li')].map((l) => l.dataset.code + ':' + l.textContent)");
+    assert(ar.length === 2 && /ZIP/.test(ar[0]) && /استخراج الكل/.test(ar[0]) && /eid-native-host\.exe/.test(ar[1]), JSON.stringify(ar));
+    if (arg("--shots")) await shot("self-check-ar.png");
+    await ev("document.querySelector('#btn-lang').click()");
+    await until("/Extract All/.test(document.querySelector('#check-list').textContent)", 3000, "English text");
+    await ev("document.querySelector('#check-close').click()");
+    assert(await ev("document.querySelector('#checkbar').hidden"), "bar closes");
+    await ev("document.querySelector('#btn-lang').click()");
+    await until("document.documentElement.dir === 'rtl'", 3000, "back to Arabic");
+    await open("?check=bogus");
+    await sleep(300);
+    assert(await ev("document.querySelector('#checkbar').hidden"), "unknown codes or none: no bar");
+    await open("");
+  });
+
   await check("switches to English (left-to-right) and back", async () => {
     await ev("document.querySelector('#btn-lang').click()");
     await until("document.documentElement.dir === 'ltr'", 3000, "ltr");

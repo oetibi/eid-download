@@ -132,6 +132,8 @@ export function mockApi(params = new URLSearchParams()) {
       const ws = warnings.splice(0);
       return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR, power: pw, warnings: ws };
     },
+    // `?check=from_zip,no_native_host`: what the startup self-check reports
+    self_check: () => (params.get("check") ?? "").split(",").filter(Boolean),
     categories: () => ["Compressed", "Documents", "Music", "Video", "Pictures", "Programs"],
     import_list: () => { const r = window.__eidMockImport ?? null; if (r) for (const u of r.urls) touch(mk({ name: u.split("/").pop(), url: u })); return r && { added: r.urls.length, refused: r.refused ?? 0, duplicates: 0, credentials_dropped: 0 }; },
     export_list: () => (window.__eidMockExportCancel ? null : items.size),

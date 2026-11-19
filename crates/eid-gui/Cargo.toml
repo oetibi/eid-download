@@ -28,13 +28,19 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
 url = "2"
 percent-encoding = "2"
 
 [dev-dependencies]
 futures-util = "0.3"
 tempfile = "3"
+# test builds of EidDownload honor EID_TEST_MANIFEST / EID_TEST_TOOLS_BASE (tests/video_worker.rs);
+# a release build never has them (ci-windows checks the release exe)
+eid-cli = { path = "../eid-cli", features = ["test-hooks"] }
+eid-testserver = { path = "../eid-testserver" }
+sha2 = "0.10"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 
 [lints]

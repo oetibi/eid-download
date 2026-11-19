@@ -63,6 +63,7 @@ async fn body() {
     let state = e.root.path().join("cfg").join("video-jobs.json");
     let cfg = JobsConfig {
         eid_exe: env!("CARGO_BIN_EXE_eid").into(),
+        worker_args: vec![],
         state_file: state.clone(),
         default_dir: e.out(),
         max_running: 1,

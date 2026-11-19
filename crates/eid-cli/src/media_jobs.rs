@@ -138,8 +138,11 @@ impl Job {
 /// Where and how jobs run.
 #[derive(Clone, Debug)]
 pub struct JobsConfig {
-    /// The `eid` executable (next to the desktop app, or this very process for `eid serve`).
+    /// The program that runs `video ...` children: `eid` for `eid serve`, or (v0.2) the desktop
+    /// app itself with [`Self::worker_args`] in front, so the window needs no second program.
     pub eid_exe: PathBuf,
+    /// Arguments placed before `video ...` (v0.2: `--eid-video-worker` for the desktop app).
+    pub worker_args: Vec<OsString>,
     /// The persistent job list (`video-jobs.json`).
     pub state_file: PathBuf,
     /// Downloads go here unless the window chose another folder.
@@ -243,8 +246,24 @@ impl VideoJobs {
         }
     }
 
+    /// v0.2: a start failure says WHICH program could not be started and what to do (a bare
+    /// "The system cannot find the file specified" told the owner nothing on a real PC).
+    pub(crate) fn start_error(&self, e: &std::io::Error) -> String {
+        let p = self.cfg.eid_exe.display();
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "cannot start the video worker {p}: the file is missing ({e}). \
+                 If Eid Download was opened from inside the ZIP, extract the whole ZIP first; \
+                 an antivirus may also have removed it."
+            )
+        } else {
+            format!("cannot start the video worker {p}: {e}")
+        }
+    }
+
     pub(crate) fn command(&self, args: &[OsString]) -> AsyncCommand {
-        let mut c = eid_platform::process::async_command(&self.cfg.eid_exe, args);
+        let all: Vec<&OsString> = self.cfg.worker_args.iter().chain(args).collect();
+        let mut c = eid_platform::process::async_command(&self.cfg.eid_exe, all);
         for (k, v) in &self.cfg.env {
             c.env(k, v);
         }
@@ -260,7 +279,7 @@ impl VideoJobs {
         let args: Vec<OsString> = vec!["video".into(), "probe".into(), "--".into(), url.into()];
         let mut c = self.command(&args);
         c.stdin(std::process::Stdio::null());
-        let child = c.spawn().map_err(|e| e.to_string())?;
+        let child = c.spawn().map_err(|e| self.start_error(&e))?;
         let out = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
             .await
             .map_err(|_| "the video information took too long; try again".to_string())?
@@ -510,7 +529,7 @@ impl VideoJobs {
                 }
                 Err(e) => {
                     j.state = JobState::Failed;
-                    j.error = Some(format!("cannot start eid: {e}"));
+                    j.error = Some(self.start_error(&e));
                 }
             }
         }

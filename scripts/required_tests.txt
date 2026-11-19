@@ -447,3 +447,8 @@ a_failed_final_checkpoint_warns_and_never_changes_the_outcome
 # ---- v0.2 add dialog categories, import/export from the window
 category_folders_auto_fixed_and_none
 import_and_export_lists_are_untrusted_bounded_and_round_trip
+# ---- v0.2 owner's real-Windows report (2026-11-19): the window is its own video worker
+the_app_alone_installs_the_tools_and_downloads_a_video_as_its_own_worker
+the_worker_flag_only_runs_video_commands
+the_worker_runs_video_commands_only
+the_startup_check_sees_a_zip_folder_and_a_missing_native_host

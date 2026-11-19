@@ -100,7 +100,7 @@ impl VideoSetup {
             .jobs
             .command(&args)
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| self.jobs.start_error(&e))?;
         g.running = true;
         g.error = None;
         g.stdin = child.stdin.take();

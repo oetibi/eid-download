@@ -160,8 +160,19 @@ pub fn default_video_jobs_file() -> Result<PathBuf, String> {
 /// Start the video job list (v0.1) on the current tokio runtime: jobs run `eid_exe video ...`
 /// and download into `default_dir` (never a folder chosen by an IPC caller).
 pub fn start_video_jobs(eid_exe: PathBuf, default_dir: PathBuf) -> Result<VideoJobs, String> {
+    start_video_jobs_with(eid_exe, vec![], default_dir)
+}
+
+/// [`start_video_jobs`] with arguments in front of `video ...` (v0.2: the desktop app runs its
+/// own executable as the worker: `EidDownload.exe --eid-video-worker video ...`).
+pub fn start_video_jobs_with(
+    eid_exe: PathBuf,
+    worker_args: Vec<std::ffi::OsString>,
+    default_dir: PathBuf,
+) -> Result<VideoJobs, String> {
     Ok(VideoJobs::start(JobsConfig {
         eid_exe,
+        worker_args,
         state_file: default_video_jobs_file()?,
         default_dir,
         max_running: 1,

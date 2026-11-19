@@ -664,6 +664,30 @@ pub fn probe_json(p: &eid_media::info::Probed) -> serde_json::Value {
 
 /// Run a video command; returns the exit code. Messages go to stderr, the final path (get) or
 /// the information (info) to stdout.
+/// `eid video <argv>` as a whole: parse, Ctrl-C stops safely, run. Shared by `eid.exe` and
+/// by the desktop app's own video worker (`EidDownload.exe --eid-video-worker video ...`, v0.2),
+/// so the window needs no second program next to it.
+pub async fn main_args(argv: &[String]) -> i32 {
+    let a = match parse(argv) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}\n\n{HELP}");
+            return 2;
+        }
+    };
+    let cancel = eid_engine::CancellationToken::new();
+    {
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("stopping the tool and everything it started...");
+                c.cancel();
+            }
+        });
+    }
+    run(a, cancel).await
+}
+
 pub async fn run(a: VideoArgs, cancel: eid_engine::CancellationToken) -> i32 {
     #[cfg(feature = "test-hooks")]
     test_hooks::cancel_when_file_appears(&cancel);

@@ -183,11 +183,15 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         .map_err(|e| e.to_string())?;
     let cancel = CancellationToken::new();
     let show = Arc::new(Notify::new());
-    // video jobs run the `eid` program shipped next to this one
-    let eid_exe = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .with_file_name(format!("eid{}", std::env::consts::EXE_SUFFIX));
-    let video = serve::start_video_jobs(eid_exe, PathBuf::from(&default_dir))?;
+    // v0.2: video jobs run THIS executable as their worker (`--eid-video-worker video ...`):
+    // no second program has to sit next to the window (a window started from inside the ZIP
+    // failed with os error 2 before)
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    let video = serve::start_video_jobs_with(
+        me,
+        vec![crate::worker::VIDEO_WORKER_FLAG.into()],
+        PathBuf::from(&default_dir),
+    )?;
     let setup = VideoSetup::new(video.clone());
     let handler = Arc::new(core::with_show(
         serve::handler_with_video(
@@ -323,6 +327,16 @@ pub fn add(
 }
 
 /// v0.2: the category names the add dialog offers for its sub-folder choice.
+/// v0.2 startup self-check: problems with where the app runs (`core::install_problems`), shown
+/// once as a bar in the window.
+#[tauri::command]
+pub fn self_check() -> Vec<&'static str> {
+    match std::env::current_exe() {
+        Ok(exe) => core::install_problems(&exe, &|p| p.is_file()),
+        Err(_) => vec![],
+    }
+}
+
 #[tauri::command]
 pub fn categories() -> Vec<String> {
     core::category_names()

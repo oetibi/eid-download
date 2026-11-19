@@ -143,25 +143,7 @@ async fn queue_main(argv: &[String]) -> i32 {
 
 /// `eid video ...` (P4): standalone in this process.
 async fn video_main(argv: &[String]) -> i32 {
-    use eid_cli::video;
-    let a = match video::parse(argv) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("error: {e}\n\n{}", video::HELP);
-            return 2;
-        }
-    };
-    let cancel = CancellationToken::new();
-    {
-        let c = cancel.clone();
-        tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                eprintln!("stopping the tool and everything it started...");
-                c.cancel();
-            }
-        });
-    }
-    video::run(a, cancel).await
+    eid_cli::video::main_args(argv).await
 }
 
 /// `eid serve` and the remote commands (`add`, `list`, `pause`, `resume`).

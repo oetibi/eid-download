@@ -586,6 +586,7 @@ function applySidebar() {
 function setLang(l) {
   saveSetting("lang", l);
   applyLang();
+  renderCheck();
 }
 
 // ---------------------------------------------------------------- menus
@@ -1607,6 +1608,23 @@ $("#clip-add").addEventListener("click", () => {
   if (kind === "video") openVideo(url); else openAdd(url);
 });
 sendTrayTexts();
+
+// ---------------------------------------------------------------- v0.2: startup self-check
+const CHECK_KEYS = { from_zip: "chk_from_zip", no_native_host: "chk_no_native_host" };
+let checkCodes = [];
+function renderCheck() {
+  const ul = $("#check-list");
+  ul.replaceChildren(...checkCodes.map((c) => { const li = document.createElement("li"); li.dataset.code = c; li.textContent = t(CHECK_KEYS[c]); return li; }));
+  $("#checkbar").hidden = checkCodes.length === 0;
+}
+(async () => {
+  try {
+    const r = await api.call("self_check");
+    checkCodes = Array.isArray(r) ? r.filter((c) => Object.hasOwn(CHECK_KEYS, c)) : [];
+  } catch { checkCodes = []; }
+  renderCheck();
+})();
+$("#check-close").addEventListener("click", () => { checkCodes = []; renderCheck(); });
 
 // ---------------------------------------------------------------- v0.2: per-download speed limit
 $("#p-limit-set").addEventListener("click", async () => {

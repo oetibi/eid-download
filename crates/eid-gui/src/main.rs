@@ -20,6 +20,12 @@ fn endpoint_arg() -> Option<String> {
 }
 
 fn main() {
+    // v0.2: the app's own video worker (see eid_gui::worker): before anything else, so it never
+    // opens a window or touches the single-instance endpoint
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some(eid_gui::worker::VIDEO_WORKER_FLAG) {
+        std::process::exit(eid_gui::worker::run(&args[1..]));
+    }
     let state = match tauri::async_runtime::block_on(app::boot(endpoint_arg())) {
         Ok(Boot::Owner(state)) => state,
         // the open window came to the front: nothing else to show
@@ -57,6 +63,7 @@ fn main() {
             app::item_limit,
             app::cancel_countdown,
             app::categories,
+            app::self_check,
             app::import_list,
             app::export_list,
             app::settings_get,
