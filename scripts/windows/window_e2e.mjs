@@ -87,16 +87,26 @@ let port = 9300 + Math.floor(Math.random() * 400);
 // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS variable (first CI run: no DevTools port opened). The
 // WebView2 per-user policy "AdditionalBrowserArguments" (value name = the exe file name) is
 // applied over what the app asks for; it is set only for this test and removed at the end.
-const POLICY = "HKCU\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments";
-const reg = (...a) => execFileSync("reg", a, { encoding: "utf8", windowsHide: true });
-let policyBefore = null;
-try { policyBefore = /REG_SZ\s+(.+)/.exec(reg("query", POLICY, "/v", "EidDownload.exe"))?.[1].trim() ?? null; } catch {}
-function setPolicy(p) { reg("add", POLICY, "/v", "EidDownload.exe", "/t", "REG_SZ", "/d", `--remote-debugging-port=${p}`, "/f"); }
+const POLICIES = ["HKCU", "HKLM"].map((h) => `${h}\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments`);
+const reg = (...a) => execFileSync("reg", a, { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+const policyBefore = POLICIES.map((k) => { try { return /REG_SZ\s+(.+)/.exec(reg("query", k, "/v", "EidDownload.exe"))?.[1].trim() ?? null; } catch { return null; } });
+function setPolicy(p) {
+  // HKLM needs administrator rights (the CI runner has them); HKCU alone is tried otherwise
+  for (const k of POLICIES) { try { reg("add", k, "/v", "EidDownload.exe", "/t", "REG_SZ", "/d", `--remote-debugging-port=${p}`, "/f"); } catch (e) { log(`     (policy ${k}: ${e.message.split("\n")[0]})`); } }
+}
 function restorePolicy() {
+  POLICIES.forEach((k, i) => {
+    try {
+      if (policyBefore[i]) reg("add", k, "/v", "EidDownload.exe", "/t", "REG_SZ", "/d", policyBefore[i], "/f");
+      else reg("delete", k, "/v", "EidDownload.exe", "/f");
+    } catch {}
+  });
+}
+/** The command lines of the running WebView2 browser processes (diagnosis). */
+function webviewCommandLines() {
   try {
-    if (policyBefore) reg("add", POLICY, "/v", "EidDownload.exe", "/t", "REG_SZ", "/d", policyBefore, "/f");
-    else reg("delete", POLICY, "/v", "EidDownload.exe", "/f");
-  } catch {}
+    return execFileSync("powershell", ["-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | Where-Object { $_.CommandLine -notmatch '--type=' } | ForEach-Object { $_.CommandLine }"], { encoding: "utf8", windowsHide: true }).trim();
+  } catch (e) { return `(${e.message})`; }
 }
 async function startApp(exe, extraArgs = ["--endpoint", ENDPOINT]) {
   port++;
@@ -115,8 +125,8 @@ async function startApp(exe, extraArgs = ["--endpoint", ENDPOINT]) {
     // say what is known: is the app alive, has WebView2 written its DevTools port anywhere?
     const found = [];
     const walk = (d, depth = 0) => { if (depth > 6) return; for (const x of fs.readdirSync(d, { withFileTypes: true })) { const q = path.join(d, x.name); if (x.isDirectory()) { try { walk(q, depth + 1); } catch {} } else if (x.name === "DevToolsActivePort") found.push(`${q}: ${fs.readFileSync(q, "utf8").split(/\r?\n/)[0]}`); } };
-    try { walk(path.join(PROFILE, "AppData")); } catch {}
-    throw new Error(`${e.message}; app ${p.exitCode === null ? "still running" : "exited " + p.exitCode}; DevToolsActivePort: ${found.join(", ") || "none"}; stderr: ${stderr.slice(-1000)}`);
+    for (const d of [path.join(PROFILE, "AppData"), process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "com.eid.download")]) { try { if (d) walk(d); } catch {} }
+    throw new Error(`${e.message}; app ${p.exitCode === null ? "still running" : "exited " + p.exitCode}; DevToolsActivePort: ${found.join(", ") || "none"}; WebView2 browser command lines: ${webviewCommandLines() || "none"}; stderr: ${stderr.slice(-1000)}`);
   });
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
