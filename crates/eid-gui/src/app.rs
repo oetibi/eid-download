@@ -4,13 +4,16 @@
 
 use crate::core::{self, AddReport, ItemView, Progress, MAIN_QUEUE};
 use eid_cli::remote::ConnArgs;
+use eid_cli::media_jobs::VideoJobs;
 use eid_cli::serve::{self, ServeArgs, APP_GUI};
+use eid_cli::video_setup::VideoSetup;
 use eid_engine::queue::Queue;
 use eid_engine::queue_runner::EngineRunner;
 use eid_engine::scheduler::{NoPower, Scheduler, SchedulerConfig, SystemClock};
 use eid_engine::CancellationToken;
 use eid_ipc::{Client, ClientError, Command, Endpoint, ServeOptions, StartError};
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,6 +29,10 @@ pub struct AppState {
     pub default_dir: String,
     /// Signalled when a second launch of the app asks this window to come forward.
     pub show: Arc<Notify>,
+    /// v0.1: video and playlist jobs (also served to the browser over IPC).
+    pub video: VideoJobs,
+    /// v0.1: the window-only agreement + tool install.
+    pub setup: VideoSetup,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<Result<(), String>>>>,
 }
 
@@ -131,13 +138,20 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         .map_err(|e| e.to_string())?;
     let cancel = CancellationToken::new();
     let show = Arc::new(Notify::new());
+    // video jobs run the `eid` program shipped next to this one
+    let eid_exe = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .with_file_name(format!("eid{}", std::env::consts::EXE_SUFFIX));
+    let video = serve::start_video_jobs(eid_exe, PathBuf::from(&default_dir))?;
+    let setup = VideoSetup::new(video.clone());
     let handler = Arc::new(core::with_show(
-        serve::handler(
+        serve::handler_with_video(
             sched.clone(),
             MAIN_QUEUE.to_owned(),
             cancel.clone(),
             Arc::new(AtomicBool::new(false)),
             APP_GUI,
+            Some(video.clone()),
         ),
         show.clone(),
     ));
@@ -160,6 +174,8 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         cancel,
         default_dir,
         show,
+        video,
+        setup,
         task: Mutex::new(Some(task)),
     }))
 }
@@ -168,6 +184,12 @@ impl AppState {
     /// Stop the downloads (they stay resumable) and write the queue. Called once, on exit.
     pub fn shutdown_blocking(&self) {
         self.cancel.cancel();
+        // video children stop like a pause (their partial data is kept for the next run)
+        self.setup.stop();
+        let v = self.video.clone();
+        let _ = tauri::async_runtime::block_on(async move {
+            tokio::time::timeout(Duration::from_secs(16), v.shutdown()).await
+        });
         let task = self.task.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(t) = task {
             let _ = tauri::async_runtime::block_on(async {
