@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 struct State {
     running: bool,
     error: Option<String>,
-    stdin: Option<tokio::process::ChildStdin>,
+    stdin: Option<eid_platform::process::AsyncChildStdin>,
 }
 
 #[derive(Clone)]

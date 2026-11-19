@@ -62,7 +62,15 @@ async fn video_jobs_end_to_end_with_the_fake_tool() {
     let early = v
         .add(Kind::Video, &e.url("video/abc", ""), "best", None, None)
         .unwrap();
-    wait_for("early job", 30, || job(&v, early)["state"] == "failed").await;
+    let t0 = Instant::now();
+    while job(&v, early)["state"] != "failed" {
+        assert!(
+            t0.elapsed() < Duration::from_secs(30),
+            "early job: {}",
+            job(&v, early)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(
         job(&v, early)["error"]
             .as_str()

@@ -13,6 +13,7 @@
 //! starts before the user agreed in the window or the CLI stops with exit code 3 and installs
 //! or starts nothing (crates/eid-media/tests/g2_tools.rs scans this file for that).
 
+use eid_platform::process::{AsyncChild, AsyncChildStdin, AsyncCommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -99,7 +100,7 @@ pub struct Job {
 
 #[derive(Debug)]
 struct Ctl {
-    stdin: Option<tokio::process::ChildStdin>,
+    stdin: Option<AsyncChildStdin>,
     /// Never sent: dropping it (the job was removed) makes the reader kill the child.
     _kill: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -222,18 +223,11 @@ impl VideoJobs {
         }
     }
 
-    pub(crate) fn command(&self, args: &[OsString]) -> tokio::process::Command {
-        let mut c = tokio::process::Command::new(&self.cfg.eid_exe);
-        c.args(args);
+    pub(crate) fn command(&self, args: &[OsString]) -> AsyncCommand {
+        let mut c = eid_platform::process::async_command(&self.cfg.eid_exe, args);
         for (k, v) in &self.cfg.env {
             c.env(k, v);
         }
-        c.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        c.creation_flags(eid_platform::process::CREATE_NO_WINDOW);
         c
     }
 
@@ -491,7 +485,7 @@ impl VideoJobs {
     pub(crate) async fn drive(
         &self,
         id: Option<u64>,
-        mut child: tokio::process::Child,
+        mut child: AsyncChild,
         kill: tokio::sync::oneshot::Receiver<()>,
     ) -> (Option<i32>, Option<String>) {
         let stdout = child.stdout.take();

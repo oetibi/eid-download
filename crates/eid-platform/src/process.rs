@@ -29,6 +29,30 @@ where
     c
 }
 
+/// The async child type the app's own job processes use (see [`async_command`]).
+pub use tokio::process::{
+    Child as AsyncChild, ChildStdin as AsyncChildStdin, Command as AsyncCommand,
+};
+
+/// An async [`tokio::process::Command`] for `program` with `args`: no shell, no console window
+/// on Windows, stdin/stdout/stderr piped, killed when dropped. Used by the desktop app's video
+/// job layer to run its own `eid` executable.
+pub fn async_command<I, S>(program: impl AsRef<OsStr>, args: I) -> AsyncCommand
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut c = tokio::process::Command::new(program);
+    c.args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    c.creation_flags(CREATE_NO_WINDOW);
+    c
+}
+
 /// Apply the "no console window" policy to an existing command.
 pub fn apply_no_window(c: &mut Command) {
     #[cfg(windows)]

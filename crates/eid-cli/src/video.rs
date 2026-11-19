@@ -461,7 +461,11 @@ async fn ensure_consent(
         eprintln!("consent recorded (--yes-i-agree)");
         return Ok(());
     }
-    if !std::io::stdin().is_terminal() {
+    // With --stop-on-stdin-eof stdin belongs to the app (a pipe another thread is reading):
+    // never prompt, and never query the handle either. On Windows a query of a synchronous
+    // pipe handle waits behind that pending read, so `is_terminal()` would hang until the app
+    // closes stdin (seen on the Windows CI runner).
+    if a.stdin_stop || !std::io::stdin().is_terminal() {
         return Err(Fail::NoConsent(
             "video needs your consent first. Read it with `eid video consent`, then run \
              again in a terminal or add --yes-i-agree. Nothing was downloaded or started."
