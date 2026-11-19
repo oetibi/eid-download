@@ -204,8 +204,10 @@ export function mockApi(params = new URLSearchParams()) {
       jobs.unshift(j);
       return { job: j.job };
     },
-    playlist_add: ({ url, quality, items: pick }) => {
+    playlist_add: ({ url, quality, items: pick, if_missing }) => {
       if (!["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"].includes(quality)) throw "bad_quality";
+      if (if_missing != null && !["lower", "higher", "skip"].includes(if_missing)) throw "invalid input: if_missing";
+      window.__eidMockLastPlaylist = { url, quality, if_missing };
       const count = /big/.test(url) ? 300 : 12;
       const idx = pick ?? Array.from({ length: count }, (_, i) => i + 1);
       const its = idx.map((i) => ({ index: i, title: i === 5 ? "الدرس 5 (will fail once)" : `Lesson ${i}`, state: "queued", progress: 0 }));

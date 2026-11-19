@@ -6,7 +6,7 @@
 //! runs with a fresh or resumed staging folder as its working directory → we publish the
 //! finished file ourselves under a sanitized name → the staging folder is removed.
 
-use eid_media::args::{MediaUrl, Quality};
+use eid_media::args::{Fallback, MediaUrl, Quality};
 use eid_media::consent::{self, Lang};
 use eid_media::fetch::Fetcher;
 use eid_media::hints::Hint;
@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 
 pub const HELP: &str = "eid video - video and audio through yt-dlp (after your consent)\n\n\
 USAGE:\n  eid video info <page-url> [--yes-i-agree] [--lang ar|en]\n\
-  eid video get <page-url> [-d DIR] [--quality 360p|480p|720p|1080p|1440p|2160p|best|audio] [--limit RATE] [--yes-i-agree] [--lang ar|en] [-q]\n\
-  eid video playlist <playlist-url> [-d DIR] [--quality Q] [--limit RATE] [--skip 2,5] [--retry-failed 3,7|all] [--list] [--yes-i-agree] [-q]
+  eid video get <page-url> [-d DIR] [--quality 360p|480p|720p|1080p|1440p|2160p|best|audio] [--if-missing lower|higher|skip] [--limit RATE] [--yes-i-agree] [--lang ar|en] [-q]\n\
+  eid video playlist <playlist-url> [-d DIR] [--quality Q] [--if-missing F] [--limit RATE] [--skip 2,5] [--retry-failed 3,7|all] [--list] [--yes-i-agree] [-q]
 \n                                     every item, numbered 01 - ... in a folder named after the playlist;
 \n                                     an item that failed 3 runs in a row, or that the site refused
 \n                                     explicitly (private, removed, sign-in, country, DRM), is not
@@ -143,6 +143,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
             ))
         }
     };
+    let mut fallback = Fallback::Lower;
     let mut a = VideoArgs {
         sub,
         url: None,
@@ -163,6 +164,14 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         match x.as_str() {
             "-d" => a.dir = Some(PathBuf::from(it.next().ok_or("-d needs a folder")?)),
             "--quality" => a.quality = parse_quality(it.next().ok_or("--quality needs a value")?)?,
+            // v0.2: what to do when the chosen height is not available (default: lower)
+            "--if-missing" => {
+                fallback = Fallback::from_name(
+                    it.next()
+                        .ok_or("--if-missing needs lower, higher or skip")?,
+                )
+                .map_err(|e| e.to_string())?
+            }
             "--limit" => {
                 a.limit_bps = Some(crate::args::parse_rate(
                     it.next().ok_or("--limit needs a value")?,
@@ -211,6 +220,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
             }
         }
     }
+    a.quality = a.quality.with_fallback(fallback);
     let needs_url = matches!(a.sub, Sub::Info | Sub::Get | Sub::Playlist | Sub::Probe);
     if needs_url != a.url.is_some() {
         return Err(if needs_url {
@@ -567,6 +577,7 @@ pub fn hint_text(h: Hint) -> &'static str {
         Hint::Geo => "the media is not available in your country.",
         Hint::MissingJsRuntime => "yt-dlp could not use its JavaScript runtime (deno); reinstall the tools with `eid video revoke` and run again.",
         Hint::Unsupported => "yt-dlp does not support this site.",
+        Hint::QualityMissing => "the chosen quality is not available for this media, and \"if missing\" is set to skip it; choose another quality or --if-missing lower|higher.",
     }
 }
 
@@ -1357,6 +1368,38 @@ mod tests {
             Quality::AudioMp3
         );
         assert!(v(&["get", "u", "--yes-i-agree"]).unwrap().yes_i_agree);
+        // v0.2 --if-missing: applies to a fixed height, in any option order
+        let q = |args: &[&str]| v(args).unwrap().quality;
+        assert_eq!(
+            q(&["get", "u", "--if-missing", "higher", "--quality", "720p"]),
+            Quality::AtLeast(720)
+        );
+        assert_eq!(
+            q(&[
+                "playlist",
+                "u",
+                "--quality",
+                "1080p",
+                "--if-missing",
+                "skip"
+            ]),
+            Quality::Exactly(1080)
+        );
+        assert_eq!(
+            q(&["get", "u", "--quality", "720p", "--if-missing", "lower"]),
+            Quality::MaxHeight(720)
+        );
+        assert_eq!(
+            q(&["get", "u", "--quality", "audio", "--if-missing", "skip"]),
+            Quality::AudioMp3
+        );
+        for bad in [
+            vec!["get", "u", "--if-missing"],
+            vec!["get", "u", "--if-missing", "any"],
+            vec!["get", "u", "--if-missing", "--quality"],
+        ] {
+            assert!(v(&bad).is_err(), "{bad:?}");
+        }
         for bad in [
             vec!["get"],
             vec!["info", "u", "-d", "x"],

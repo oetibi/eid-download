@@ -31,6 +31,7 @@ const settings = {
   quality: localStorage.getItem("quality") || "best",
   sidebar: localStorage.getItem("sidebar") !== "off",
   notify: localStorage.getItem("notify") !== "off",
+  missing: ["lower", "higher", "skip"].includes(localStorage.getItem("missing")) ? localStorage.getItem("missing") : "lower",
 };
 function saveSetting(k, v) {
   settings[k] = v;
@@ -895,6 +896,7 @@ async function showTools(target, button) {
   }
 }
 function openSettings() {
+  $("#set-missing").value = settings.missing;
   $("#set-lang").value = settings.lang;
   $("#set-theme").value = settings.theme;
   fillQualitySelect($("#set-quality"), ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"], settings.quality);
@@ -921,6 +923,7 @@ function openSettingsTexts() {
 }
 $("#set-theme").addEventListener("change", (e) => { saveSetting("theme", e.target.value); applyTheme(); updateCommands(); });
 $("#set-quality").addEventListener("change", (e) => saveSetting("quality", e.target.value));
+$("#set-missing").addEventListener("change", (e) => saveSetting("missing", e.target.value));
 $("#set-folder-pick").addEventListener("click", async () => {
   try {
     const p = await api.call("pick_folder");
@@ -1040,6 +1043,8 @@ function renderProbe() {
   if (r.kind === "playlist") meta.push(t("vd_items", r.items?.length ?? 0));
   $("#v-meta").textContent = meta.join(" · ");
   fillQualitySelect($("#v-quality"), safeQualities(r.qualities), settings.quality);
+  $("#v-missing").value = settings.missing;
+  showMissingRow();
   const isList = r.kind === "playlist";
   $("#v-playlist").hidden = !isList;
   if (isList) {
@@ -1104,7 +1109,9 @@ $("#form-video").addEventListener("submit", async (e) => {
       const idx = pickedIndices();
       if (!idx.length) { vError(t("vd_none_selected")); return; }
       const all = idx.length === (probe.result.items?.length ?? 0);
-      await api.call("playlist_add", all ? { url: probe.url, quality, dir } : { url: probe.url, quality, items: idx, dir });
+      // a playlist offers every fixed height: some items may not have the chosen one
+      const if_missing = /^\d+p$/.test(quality) ? $("#v-missing").value : undefined;
+      await api.call("playlist_add", all ? { url: probe.url, quality, dir, if_missing } : { url: probe.url, quality, items: idx, dir, if_missing });
     } else {
       await api.call("video_add", { url: probe.url, quality, dir });
     }
@@ -1500,3 +1507,11 @@ $("#toolbar").addEventListener("mouseover", (e) => {
   const b = e.target.closest?.(".tool");
   if (b) setAttr(b, "title", b.querySelector("span")?.textContent ?? null);
 });
+
+// v0.2: "if this quality is missing" is asked for playlists and a fixed height only (a single
+// video offers only the qualities it really has)
+function showMissingRow() {
+  const q = $("#v-quality").value;
+  $("#v-missing-row").hidden = !(probe?.result?.kind === "playlist" && /^\d+p$/.test(q));
+}
+$("#v-quality").addEventListener("change", showMissingRow);

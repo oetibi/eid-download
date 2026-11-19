@@ -42,11 +42,13 @@ pub fn video_add(
     url: String,
     quality: String,
     dir: Option<String>,
+    if_missing: Option<String>,
 ) -> Result<Value, String> {
     let d = folder(&st, dir);
+    let f = if_missing.as_deref().unwrap_or("lower");
     let job = st
         .video
-        .add(Kind::Video, url.trim(), &quality, None, d.as_deref())?;
+        .add_with(Kind::Video, url.trim(), &quality, f, None, d.as_deref())?;
     Ok(json!({ "job": job }))
 }
 
@@ -57,11 +59,13 @@ pub fn playlist_add(
     quality: String,
     items: Option<Vec<u32>>,
     dir: Option<String>,
+    if_missing: Option<String>,
 ) -> Result<Value, String> {
     let d = folder(&st, dir);
+    let f = if_missing.as_deref().unwrap_or("lower");
     let job = st
         .video
-        .add(Kind::Playlist, url.trim(), &quality, items, d.as_deref())?;
+        .add_with(Kind::Playlist, url.trim(), &quality, f, items, d.as_deref())?;
     Ok(json!({ "job": job }))
 }
 

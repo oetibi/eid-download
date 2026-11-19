@@ -52,6 +52,8 @@ fn all_actions() -> Vec<Action> {
     for q in [
         Quality::Best,
         Quality::MaxHeight(720),
+        Quality::AtLeast(1080),
+        Quality::Exactly(360),
         Quality::AudioMp3,
         Quality::Format("18".into()),
     ] {
@@ -195,16 +197,22 @@ fn no_user_text_reaches_a_template_or_path_option() {
         );
     }
     for bad in [0, args::MAX_HEIGHT + 1] {
-        let e = args::build(
-            &t,
-            &url("https://fake.test/video/x"),
-            &Action::Download {
-                quality: Quality::MaxHeight(bad),
-                limit_rate: None,
-                archive: false,
-            },
-        );
-        assert!(e.is_err(), "height {bad}");
+        for quality in [
+            Quality::MaxHeight(bad),
+            Quality::AtLeast(bad),
+            Quality::Exactly(bad),
+        ] {
+            let e = args::build(
+                &t,
+                &url("https://fake.test/video/x"),
+                &Action::Download {
+                    quality,
+                    limit_rate: None,
+                    archive: false,
+                },
+            );
+            assert!(e.is_err(), "height {bad}");
+        }
     }
 }
 

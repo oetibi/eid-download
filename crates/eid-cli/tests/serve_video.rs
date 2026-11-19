@@ -67,6 +67,7 @@ async fn ipc_probe_and_add_video_through_eid_serve() {
             .call(Command::AddVideo {
                 url: video.clone(),
                 quality: quality.into(),
+                if_missing: None,
             })
             .await
         {
@@ -91,6 +92,7 @@ async fn ipc_probe_and_add_video_through_eid_serve() {
         .call(Command::AddVideo {
             url: video.clone(),
             quality: "360p".into(),
+            if_missing: None,
         })
         .await
         .unwrap();

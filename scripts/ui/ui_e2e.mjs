@@ -152,8 +152,16 @@ try {
     await ev("document.querySelector('#v-none').click()");
     await ev("const b = document.querySelectorAll('#v-items input'); b[0].checked = true; b[3].checked = true; b[0].dispatchEvent(new Event('change', {bubbles:true}))");
     assert(!(await ev("document.querySelector('#v-start').disabled")), "start disabled with 2 items");
+    // v0.2: "if this quality is missing": shown for a fixed height, hidden for best/audio
+    await ev("(() => { const q = document.querySelector('#v-quality'); q.value = 'best'; q.dispatchEvent(new Event('change')); })()");
+    assert(await ev("document.querySelector('#v-missing-row').hidden"), "fallback shown for best");
+    await ev("(() => { const q = document.querySelector('#v-quality'); q.value = '1080p'; q.dispatchEvent(new Event('change')); })()");
+    assert(!(await ev("document.querySelector('#v-missing-row').hidden")), "fallback hidden for 1080p");
+    await ev("document.querySelector('#v-missing').value = 'skip'");
     await ev("document.querySelector('#v-start').click()");
     await until("!document.querySelector('#dlg-video').open", 5000, "dialog closes on start");
+    const sent = await ev("window.__eidMockLastPlaylist");
+    assert(sent.quality === "1080p" && sent.if_missing === "skip", `sent ${JSON.stringify(sent)}`);
   });
 
   await check("settings: engine limits load, validate and save", async () => {

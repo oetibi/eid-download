@@ -293,6 +293,8 @@
       <div class="tab" data-pane="video" hidden>
         <label for="set-quality" data-t="s_default_quality"></label>
         <select id="set-quality"></select>
+        <label for="set-missing" data-t="vd_missing"></label>
+        <select id="set-missing"><option value="lower" data-t="fb_lower"></option><option value="higher" data-t="fb_higher"></option><option value="skip" data-t="fb_skip"></option></select>
         <label data-t="s_tools"></label>
         <p id="set-tools" class="note"></p>
         <button type="button" id="set-tools-install" hidden data-t="v_install"></button>
@@ -322,6 +324,10 @@
         <label for="v-quality" data-t="vd_quality"></label>
         <select id="v-quality"></select>
         <p id="v-got-note" class="note" data-t="vd_quality_note"></p>
+        <div id="v-missing-row" hidden>
+          <label for="v-missing" data-t="vd_missing"></label>
+          <select id="v-missing"><option value="lower" data-t="fb_lower"></option><option value="higher" data-t="fb_higher"></option><option value="skip" data-t="fb_skip"></option></select>
+        </div>
         <div id="v-playlist" hidden>
           <div class="row between">
             <strong id="v-count"></strong>

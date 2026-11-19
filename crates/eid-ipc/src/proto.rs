@@ -16,6 +16,9 @@ pub const MAX_ITEMS: usize = 5000;
 pub const VIDEO_QUALITIES: &[&str] = &[
     "360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio",
 ];
+/// v0.2: what to do when the chosen height is missing. Same list as the media crate's
+/// `FALLBACK_CHOICES` (checked by a test in eid-cli). Absent = `lower` (the v0.1 behaviour).
+pub const VIDEO_FALLBACKS: &[&str] = &["lower", "higher", "skip"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,6 +63,9 @@ pub enum Command {
     AddVideo {
         url: String,
         quality: String,
+        /// v0.2: [`VIDEO_FALLBACKS`]; absent = `lower`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_missing: Option<String>,
     },
     /// v0.1: download a playlist (all items, or only `items`, numbered from 1 in playlist
     /// order) into a numbered folder named after it, in the default folder.
@@ -68,6 +74,9 @@ pub enum Command {
         quality: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<Vec<u32>>,
+        /// v0.2: [`VIDEO_FALLBACKS`]; absent = `lower`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_missing: Option<String>,
     },
 }
 
@@ -176,9 +185,24 @@ impl Request {
         }
         let video_url = match &self.command {
             Command::Probe { url } => Some(url),
-            Command::AddVideo { url, quality } | Command::AddPlaylist { url, quality, .. } => {
+            Command::AddVideo {
+                url,
+                quality,
+                if_missing,
+            }
+            | Command::AddPlaylist {
+                url,
+                quality,
+                if_missing,
+                ..
+            } => {
                 if !VIDEO_QUALITIES.contains(&quality.as_str()) {
                     return Err("invalid quality".into());
+                }
+                if let Some(f) = if_missing {
+                    if !VIDEO_FALLBACKS.contains(&f.as_str()) {
+                        return Err("invalid if_missing".into());
+                    }
                 }
                 Some(url)
             }
@@ -301,12 +325,21 @@ mod tests {
             Command::AddPlaylist {
                 url: "https://y.test/p".into(),
                 quality: "audio".into(),
-                items: Some(vec![1, 3])
+                items: Some(vec![1, 3]),
+                if_missing: None,
             }
+        );
+        // v0.2: optional "if the quality is missing"
+        let r = req(r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"720p","if_missing":"higher"}}"#).unwrap();
+        assert!(
+            matches!(r.command, Command::AddVideo { if_missing: Some(ref f), .. } if f == "higher")
         );
         for bad in [
             r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"4320p"}}"#,
             r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"bv*+ba"}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"720p","if_missing":"any"}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"720p","if_missing":"--exec x"}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"add_playlist","url":"https://y.test/p","quality":"best","if_missing":7}}"#,
             r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w"}}"#,
             r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"file:///etc/passwd","quality":"best"}}"#,
             r#"{"v":1,"id":"x","command":{"cmd":"probe","url":"javascript:alert(1)"}}"#,
@@ -329,11 +362,13 @@ mod tests {
             Command::AddVideo {
                 url: "u".into(),
                 quality: "best".into(),
+                if_missing: None,
             },
             Command::AddPlaylist {
                 url: "u".into(),
                 quality: "best".into(),
                 items: None,
+                if_missing: None,
             },
         ] {
             assert!(c.allowed_from_browser());

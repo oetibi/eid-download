@@ -391,3 +391,23 @@ test("no innerHTML / eval / remote code in the extension sources", () => {
     }
   }
 });
+
+test("v0.2 if-missing: playlist only, a fixed height only, default not sent, bad values refused", () => {
+  const id = "00000000-0000-4000-8000-000000000000";
+  const pl = "https://www.youtube.com/playlist?list=PLabc";
+  const cmd = (a) => C.buildRequest({ cmd: "add_playlist", url: pl, ...a }, id).command;
+  assert.equal(cmd({ quality: "720p", if_missing: "skip" }).if_missing, "skip");
+  assert.equal(cmd({ quality: "1080p", if_missing: "higher" }).if_missing, "higher");
+  // the default is not sent (an older app knows no such field and refuses unknown fields)
+  assert.equal("if_missing" in cmd({ quality: "720p", if_missing: "lower" }), false);
+  // nothing to fall back from for best/audio
+  assert.equal("if_missing" in cmd({ quality: "best", if_missing: "skip" }), false);
+  assert.equal("if_missing" in cmd({ quality: "audio", if_missing: "higher" }), false);
+  for (const bad of ["any", "", "--exec", 1, true]) {
+    assert.throws(() => cmd({ quality: "720p", if_missing: bad }), /bad_if_missing/);
+  }
+  // settings: kept when valid, default otherwise
+  assert.equal(C.normalizeSettings({ ifMissing: "skip" }).ifMissing, "skip");
+  assert.equal(C.normalizeSettings({ ifMissing: "evil" }).ifMissing, "lower");
+  assert.equal(C.normalizeSettings(null).ifMissing, "lower");
+});

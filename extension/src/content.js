@@ -694,7 +694,7 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
               "data-act": "whole",
               text: t("menuWholePlaylist"),
               on: {
-                click: () => act({ cmd: "add_playlist", url: cls.playlistUrl, quality: sel.value }),
+                click: () => act({ cmd: "add_playlist", url: cls.playlistUrl, quality: sel.value, if_missing: settings.ifMissing }),
               },
             }),
           );
@@ -770,7 +770,7 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
         click: () => {
           const items = Array.from(chosen).sort((a, b) => a - b);
           // all selected = the whole playlist (lets the app also pick up new items later)
-          const msg = { cmd: "add_playlist", url, quality };
+          const msg = { cmd: "add_playlist", url, quality, if_missing: settings.ifMissing };
           if (items.length !== pl.items.length) msg.items = items;
           act(msg);
         },
