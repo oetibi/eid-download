@@ -7,7 +7,9 @@
 //!
 //! Windows only; elsewhere every function reports "not available".
 
-/// The clipboard's change counter (`None` when not available: other systems, or no access).
+/// The clipboard's change counter (`None` on other systems). On Windows 0 is a normal value
+/// (nothing copied yet in this session), and it is also what a process without clipboard
+/// access always sees: then it never changes and nothing is ever read.
 pub fn sequence() -> Option<u32> {
     imp::sequence()
 }
@@ -40,9 +42,8 @@ mod imp {
     const CF_UNICODETEXT: u32 = 13;
 
     pub fn sequence() -> Option<u32> {
-        // SAFETY: no arguments; returns 0 when the caller has no access to the clipboard.
-        let n = unsafe { GetClipboardSequenceNumber() };
-        (n != 0).then_some(n)
+        // SAFETY: no arguments (0 = nothing copied yet, or no access: see `sequence`).
+        Some(unsafe { GetClipboardSequenceNumber() })
     }
 
     /// Open the clipboard, retrying briefly: another program may hold it for a moment.
@@ -150,11 +151,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_clipboard_round_trip_and_sequence_changes() {
+        // ci-windows run 44557942324: the counter is 0 before anything was copied in the session
+        write_text("first").expect("write the clipboard");
         let before = sequence().expect("clipboard sequence number");
         let text = "https://example.com/ملف تجريبي.zip";
         write_text(text).expect("write the clipboard");
         let after = sequence().expect("clipboard sequence number");
-        assert_ne!(before, after, "sequence did not change");
+        assert_ne!(before, after, "sequence did not change after a write");
         assert_eq!(read_text(4096).as_deref(), Some(text));
         // bounded read
         assert_eq!(read_text(5).as_deref(), Some("https"));
