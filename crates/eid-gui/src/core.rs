@@ -131,6 +131,60 @@ fn speed_of(samples: &VecDeque<Sample>, now: Instant) -> u64 {
     u64::try_from(bytes * 1000 / span.as_millis().max(1)).unwrap_or(u64::MAX)
 }
 
+/// File types that run code when "opened" on Windows: `open_file` never starts these.
+const EXECUTABLE_EXT: &[&str] = &[
+    "exe",
+    "msi",
+    "msix",
+    "msixbundle",
+    "appx",
+    "appxbundle",
+    "bat",
+    "cmd",
+    "com",
+    "scr",
+    "pif",
+    "cpl",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "hta",
+    "lnk",
+    "url",
+    "reg",
+    "jar",
+    "msc",
+    "application",
+    "appref-ms",
+    "gadget",
+    "inf",
+    "sys",
+    "dll",
+    "ocx",
+    "chm",
+    "settingcontent-ms",
+    "library-ms",
+    "iso",
+    "img",
+    "vhd",
+    "vhdx",
+];
+
+/// Is `p` a program, script or shortcut (by extension, case-insensitive)?
+pub fn is_executable_name(p: &std::path::Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| EXECUTABLE_EXT.iter().any(|x| x.eq_ignore_ascii_case(e)))
+        || p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with('.') || n.ends_with(' '))
+}
+
 /// One row of the download list.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ItemView {
@@ -441,6 +495,27 @@ fn invalid_input_text(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn executables_are_never_opened() {
+        use std::path::Path;
+        for n in [
+            "a.exe",
+            "B.EXE",
+            "x.msi",
+            "s.ps1",
+            "l.lnk",
+            "d.iso",
+            "t.bat",
+            "trailing.pdf.",
+            "sp.pdf ",
+        ] {
+            assert!(super::is_executable_name(Path::new(n)), "{n}");
+        }
+        for n in ["a.pdf", "v.mp4", "z.zip", "noext", "exe.txt"] {
+            assert!(!super::is_executable_name(Path::new(n)), "{n}");
+        }
+    }
+
     use super::*;
     use eid_engine::config::Config;
     use eid_engine::queue_runner::EngineRunner;

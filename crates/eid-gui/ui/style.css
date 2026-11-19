@@ -242,3 +242,9 @@ fieldset.soon legend { font-size: 12px; color: var(--muted); }
   .thead > :nth-child(n+5), .tr > :nth-child(n+5) { display: none; }
 }
 .consent-text { max-height: 40vh; overflow: auto; white-space: pre-wrap; font: inherit; font-size: 0.9em; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+#set-engine { border: 1px solid var(--line); border-radius: 8px; margin: 10px 0 0; padding: 6px 12px 10px; display: grid; gap: 4px; }
+#set-engine legend { font-size: 12px; color: var(--muted); }
+#set-engine button { justify-self: start; margin-top: 6px; }
+#sch-body.off { opacity: .5; pointer-events: none; }
+.row.days { flex-wrap: wrap; gap: 4px 14px; margin: 8px 0; }
+#dlg-sched input[type="time"] { width: auto; }

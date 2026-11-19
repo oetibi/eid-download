@@ -150,6 +150,58 @@ try {
     await until("!document.querySelector('#dlg-video').open", 5000, "dialog closes on start");
   });
 
+  await check("settings: engine limits load, validate and save", async () => {
+    await open("");
+    await ev("document.querySelector('.tool[data-cmd=settings]').click()");
+    await until("document.querySelector('#dlg-settings').open", 3000, "settings dialog");
+    await ev("document.querySelector('#dlg-settings [data-tab=downloads]')?.click()");
+    await until("document.querySelector('#set-conns').value === '8'", 3000, "connections loaded");
+    assert(!(await ev("document.querySelector('#set-conns').disabled")), "connections still disabled");
+    await ev("document.querySelector('#set-conns').value = '99'; document.querySelector('#set-engine-save').click()");
+    await until("!document.querySelector('#set-engine-error').hidden", 3000, "out-of-range refused");
+    await ev("document.querySelector('#set-conns').value = '16'; document.querySelector('#set-limit').value = '2048'; document.querySelector('#set-parallel').value = '2'; document.querySelector('#set-engine-save').click()");
+    await until("document.querySelector('#set-engine-error').hidden", 3000, "error cleared");
+    await sleep(200);
+    await ev("document.querySelector('#dlg-settings').close()");
+    await ev("document.querySelector('.tool[data-cmd=settings]').click()");
+    await until("document.querySelector('#set-conns').value === '16' && document.querySelector('#set-limit').value === '2048' && document.querySelector('#set-parallel').value === '2'", 3000, "saved values read back");
+    await ev("document.querySelector('#dlg-settings').close()");
+  });
+
+  await check("scheduler: needs a day, saves a night window, reads it back", async () => {
+    await ev("document.querySelector('.tool[data-cmd=scheduler]').click()");
+    await until("document.querySelector('#dlg-sched').open", 3000, "scheduler dialog");
+    assert((await ev("document.querySelectorAll('#sch-days input').length")) === 7, "7 days");
+    await ev("const c = document.querySelector('#sch-on'); c.checked = true; c.dispatchEvent(new Event('change'))");
+    await ev("for (const c of document.querySelectorAll('#sch-days input')) c.checked = false; document.querySelector('#sch-save').click()");
+    await until("!document.querySelector('#sch-error').hidden", 3000, "no day refused");
+    assert(await ev("document.querySelector('#dlg-sched').open"), "closed despite error");
+    await ev("document.querySelector('#sch-start').value = '23:30'; document.querySelector('#sch-end').value = '06:00'; const d = document.querySelectorAll('#sch-days input'); d[3].checked = true; d[4].checked = true; document.querySelector('#sch-save').click()");
+    await until("!document.querySelector('#dlg-sched').open", 3000, "saved and closed");
+    await ev("document.querySelector('.tool[data-cmd=scheduler]').click()");
+    await until("document.querySelector('#dlg-sched').open && document.querySelector('#sch-start').value === '23:30'", 3000, "read back");
+    const days = await ev("[...document.querySelectorAll('#sch-days input')].map(c => c.checked)");
+    assert(JSON.stringify(days) === JSON.stringify([false, false, false, true, true, false, false]), `days ${days}`);
+    assert((await ev("document.querySelector('#sch-end').value")) === "06:00", "end");
+    await ev("document.querySelector('#dlg-sched').close()");
+  });
+
+  await check("open file: opens a finished file, refuses a program and says why", async () => {
+    const ids = await ev("[...window.__eid.store.values()].filter(i => i.status === 'done').map(i => [i.id, i.name])");
+    const prog = ids.find(([, n]) => /\.exe$/i.test(n));
+    const doc = ids.find(([, n]) => !/\.(exe|msi|bat|cmd|ps1|js|vbs|scr|lnk)$/i.test(n));
+    assert(prog && doc, `need a finished .exe and a finished document: ${JSON.stringify(ids.slice(0, 5))}`);
+    await ev(`window.__eid.select([${doc[0]}])`);
+    await until("!document.querySelector('.tool[data-cmd=open_file], [data-cmd=open_file]').disabled", 3000, "open enabled");
+    await ev("document.querySelector('[data-cmd=open_file]').click()");
+    await until(`(window.__eidMockOpened || []).includes(${doc[0]})`, 3000, "document opened");
+    await ev(`window.__eid.select([${prog[0]}])`);
+    await sleep(50);
+    await ev("document.querySelector('[data-cmd=open_file]').click()");
+    await until("!document.querySelector('#toast').hidden && document.querySelector('#toast').textContent.length > 20", 3000, "refusal message");
+    assert(!(await ev(`(window.__eidMockOpened || []).includes(${prog[0]})`)), "program was opened");
+  });
+
   for (const n of [100, 1000, 3000]) {
     for (const old of [false, true]) {
       await check(`responsive with ${n} downloads (${old ? "v0.0.1 full list" : "revisioned list"})`, async () => {

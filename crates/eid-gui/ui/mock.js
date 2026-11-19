@@ -37,6 +37,7 @@ export function mockApi(params = new URLSearchParams()) {
   } else {
     touch(mk({ status: "pending", name: "music.flac", url: "https://example.com/music.flac", rate: null }));
     touch(mk({ status: "done", name: "setup.exe", url: "https://example.com/setup.exe", folder: "D:\\Apps", attempts: 1, rate: { done: 48234496, total: 48234496, speed: 0, eta: null } }));
+    touch(mk({ status: "done", name: "holiday-photos.zip", url: "https://example.com/holiday-photos.zip", folder: "D:\\Downloads", attempts: 1, rate: { done: 10485760, total: 10485760, speed: 0, eta: null } }));
     touch(mk({ status: "failed", name: "missing.zip", url: "https://example.com/missing.zip", attempts: 3, error_kind: "not_found", error: "server error: HTTP 404 for https://example.com/missing.zip" }));
     touch(mk({ status: "paused", name: "تقرير 2026 النهائي - final report.pdf", url: "https://example.com/files/report.pdf", attempts: 1, rate: { done: 734003, total: 2097152, speed: 0, eta: null } }));
     touch(mk({ status: "running", name: "ubuntu-24.04-desktop-amd64.iso", url: "https://releases.example.com/ubuntu-24.04-desktop-amd64.iso", attempts: 1, rate: { done: 1932735283, total: 6114770944, speed: 12582912, eta: 332 } }));
@@ -80,6 +81,9 @@ export function mockApi(params = new URLSearchParams()) {
   const jobs = [];
   let nextJob = 1;
   let toolsInstalled = params.get("notools") !== "1";
+  let engineSettings = { max_parallel: 3, connections: 8, speed_limit_kib: 0, schedule: null };
+  const opened = [];
+  window.__eidMockOpened = opened;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   function jobTick() {
     for (const j of jobs) {
@@ -138,6 +142,23 @@ export function mockApi(params = new URLSearchParams()) {
     },
     pick_folder: () => "D:\\Downloads\\مجلد",
     reveal: ({ id }) => { if (find(id).status !== "done") throw "not_finished"; },
+    open_file: ({ id }) => {
+      const it = find(id);
+      if (it.status !== "done") throw "not_finished";
+      if (/\.(exe|msi|bat|cmd|ps1|js|vbs|scr|lnk)$/i.test(it.name ?? "")) throw "refused_executable";
+      opened.push(id);
+    },
+    settings_get: () => ({ ...engineSettings }),
+    settings_set: ({ settings: s }) => {
+      const keys = ["max_parallel", "connections", "speed_limit_kib", "schedule"];
+      if (Object.keys(s).some((k) => !keys.includes(k))) throw "invalid input: unknown field";
+      if (!(s.max_parallel >= 1 && s.max_parallel <= 8)) throw "invalid input: max_parallel 1..8";
+      if (!(s.connections >= 1 && s.connections <= 32)) throw "invalid input: connections 1..32";
+      if (!(s.speed_limit_kib >= 0 && s.speed_limit_kib <= 12500000)) throw "invalid input: speed limit";
+      if (s.schedule && (!s.schedule.weekdays || s.schedule.start_min === s.schedule.end_min)) throw "invalid input: schedule";
+      engineSettings = { ...s };
+      return { ...engineSettings };
+    },
     tools_status: () => ({ installed: toolsInstalled, consent: toolsInstalled, ytdlp_version: toolsInstalled ? "2026.11.01 (mock)" : undefined, ffmpeg_version: toolsInstalled ? "7.1 (mock)" : undefined }),
     tools_consent_text: ({ lang }) => (lang === "ar" ? "نص الموافقة (تجريبي): تُنزَّل yt-dlp وFFmpeg وDeno من مصادرها الرسمية..." : "Agreement (mock): yt-dlp, FFmpeg and Deno are downloaded from their official sources..."),
     tools_install: async ({ accept }) => { if (accept !== true) throw "consent_required"; await sleep(300); toolsInstalled = true; },

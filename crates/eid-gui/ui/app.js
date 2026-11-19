@@ -424,7 +424,7 @@ function renderStatusBar() {
 
 // ---------------------------------------------------------------- commands
 const selItems = () => [...selected].map((id) => store.get(id)).filter(Boolean);
-const SOON = new Set(["open_file", "scheduler"]);
+const SOON = new Set();
 
 async function each(list, cmd) {
   const res = await Promise.allSettled(list.map((it) => api.call(cmd, { id: it.id })));
@@ -487,8 +487,11 @@ const commands = {
     on: () => selItems().length === 1 && selItems()[0].status === "done",
     run: async () => { try { await api.call("reveal", { id: selItems()[0].id }); } catch (e) { failure(e); } },
   },
-  open_file: { on: () => false, run: () => {} },
-  scheduler: { on: () => false, run: () => {} },
+  open_file: {
+    on: () => selItems().length === 1 && selItems()[0].status === "done",
+    run: () => openFile(selItems()[0].id),
+  },
+  scheduler: { run: () => openScheduler() },
   redownload: {
     on: () => selItems().some((i) => i.status === "failed"),
     run: () => each(selItems().filter((i) => i.status === "failed"), "resume"),
@@ -811,6 +814,7 @@ function openSettings() {
   fillQualitySelect($("#set-quality"), ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"], settings.quality);
   showSettingsFolder();
   showTools($("#set-tools"), $("#set-tools-install"));
+  fillEngineFields();
   $("#dlg-settings").showModal();
 }
 for (const b of $$("#dlg-settings [data-tab]")) {
@@ -1148,5 +1152,105 @@ function renderJobItems(x, items) {
 applyTheme();
 applySidebar();
 applyLang();
-if (usingMock) window.__eid = { stats, store, refresh, poll, invalidate, viewport };
+// ---------------------------------------------------------------- open file, engine settings, scheduler
+async function openFile(id) {
+  try { await api.call("open_file", { id }); } catch (e) { failure(e); }
+}
+
+let engine = null; // last settings read from / saved to the app
+async function loadEngine() {
+  try { engine = await api.call("settings_get"); } catch (e) { failure(e); return null; }
+  return engine;
+}
+async function saveEngine(next, errBox) {
+  errBox.hidden = true;
+  try {
+    engine = await api.call("settings_set", { settings: next });
+    toast(t("saved"));
+    return true;
+  } catch (e) {
+    errBox.textContent = errMessage(e);
+    errBox.hidden = false;
+    return false;
+  }
+}
+async function fillEngineFields() {
+  const s = await loadEngine();
+  if (!s) return;
+  $("#set-parallel").value = s.max_parallel;
+  $("#set-conns").value = s.connections;
+  $("#set-limit").value = s.speed_limit_kib;
+  $("#set-engine-error").hidden = true;
+}
+function intIn(input) {
+  const v = Number(input.value);
+  const min = Number(input.min), max = Number(input.max);
+  return Number.isInteger(v) && v >= min && v <= max ? v : null;
+}
+$("#set-engine-save").addEventListener("click", async () => {
+  const errBox = $("#set-engine-error");
+  const p = intIn($("#set-parallel")), c = intIn($("#set-conns")), l = intIn($("#set-limit"));
+  for (const [v, inp] of [[p, "#set-parallel"], [c, "#set-conns"], [l, "#set-limit"]]) {
+    if (v === null) {
+      errBox.textContent = `${$(`label[for="${inp.slice(1)}"]`).textContent}: ${$(inp).min}–${$(inp).max}`;
+      errBox.hidden = false;
+      $(inp).focus();
+      return;
+    }
+  }
+  const base = engine ?? (await loadEngine());
+  if (!base) return;
+  await saveEngine({ ...base, max_parallel: p, connections: c, speed_limit_kib: l }, errBox);
+});
+
+const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+const mins = (v) => { const [h, m] = String(v).split(":").map(Number); return h * 60 + m; };
+function schedDays() {
+  const box = $("#sch-days");
+  if (box.childElementCount) return box;
+  t("sch_days").forEach((name, i) => {
+    const l = el("label", "check");
+    const c = el("input");
+    c.type = "checkbox";
+    c.dataset.bit = String(i);
+    l.append(c, el("span", null, name));
+    box.append(l);
+  });
+  return box;
+}
+function schedToggle() { $("#sch-body").classList.toggle("off", !$("#sch-on").checked); }
+async function openScheduler() {
+  const s = await loadEngine();
+  if (!s) return;
+  const box = schedDays();
+  // day names follow the language at the moment the dialog opens
+  $$("#sch-days span").forEach((n, i) => (n.textContent = t("sch_days")[i]));
+  const w = s.schedule;
+  $("#sch-on").checked = !!w;
+  $("#sch-start").value = hhmm(w ? w.start_min : 120);
+  $("#sch-end").value = hhmm(w ? w.end_min : 480);
+  for (const c of box.querySelectorAll("input")) c.checked = w ? !!(w.weekdays & (1 << Number(c.dataset.bit))) : true;
+  $("#sch-error").hidden = true;
+  schedToggle();
+  $("#dlg-sched").showModal();
+}
+$("#sch-on").addEventListener("change", schedToggle);
+$("#sch-save").addEventListener("click", async () => {
+  const errBox = $("#sch-error");
+  const base = engine ?? (await loadEngine());
+  if (!base) return;
+  let schedule = null;
+  if ($("#sch-on").checked) {
+    let weekdays = 0;
+    for (const c of $$("#sch-days input")) if (c.checked) weekdays |= 1 << Number(c.dataset.bit);
+    const start_min = mins($("#sch-start").value), end_min = mins($("#sch-end").value);
+    const bad = !weekdays ? t("sch_need_day") : !(start_min >= 0 && end_min >= 0) ? t("sch_same") : start_min === end_min ? t("sch_same") : null;
+    if (bad) { errBox.textContent = bad; errBox.hidden = false; return; }
+    schedule = { start_min, end_min, weekdays };
+  }
+  if (await saveEngine({ ...base, schedule }, errBox)) $("#dlg-sched").close();
+});
+
+if (usingMock) window.__eid = { stats, store, refresh, poll, invalidate, viewport, select: (ids) => { selected = new Set(ids); invalidate(true); updateCommands(); } };
 await poll();
+

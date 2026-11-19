@@ -245,13 +245,17 @@
           <button type="button" id="set-folder-reset" class="ghost" data-t="reset_folder"></button>
         </div>
         <p class="note" data-t="s_default_folder_note"></p>
-        <fieldset class="soon" disabled>
-          <legend data-t="soon_title"></legend>
+        <fieldset id="set-engine">
+          <legend data-t="s_engine"></legend>
+          <label for="set-parallel" data-t="s_parallel"></label>
+          <input id="set-parallel" type="number" min="1" max="8" step="1" value="3">
           <label for="set-conns" data-t="s_connections"></label>
-          <input id="set-conns" type="number" min="1" max="32" value="8">
+          <input id="set-conns" type="number" min="1" max="32" step="1" value="8">
           <label for="set-limit" data-t="s_speed_limit"></label>
-          <input id="set-limit" type="number" min="0" value="0">
-          <label class="check"><input id="set-notify" type="checkbox"><span data-t="s_notify"></span></label>
+          <input id="set-limit" type="number" min="0" max="12500000" step="1" value="0">
+          <p class="note" data-t="s_engine_note"></p>
+          <p id="set-engine-error" class="error" hidden></p>
+          <button type="button" id="set-engine-save" data-t="save"></button>
         </fieldset>
       </div>
       <div class="tab" data-pane="video" hidden>
@@ -311,6 +315,26 @@
     </form>
   </dialog>
 
+  <dialog id="dlg-sched">
+    <form method="dialog">
+      <h2 data-t="c_scheduler"></h2>
+      <p class="note" data-t="sch_lead"></p>
+      <label class="check"><input id="sch-on" type="checkbox"><span data-t="sch_on"></span></label>
+      <div id="sch-body">
+        <div class="row">
+          <label for="sch-start" data-t="sch_start"></label><input id="sch-start" type="time" value="02:00" dir="ltr">
+          <label for="sch-end" data-t="sch_end"></label><input id="sch-end" type="time" value="08:00" dir="ltr">
+        </div>
+        <div id="sch-days" class="row days"></div>
+        <p class="note" data-t="sch_note"></p>
+      </div>
+      <p id="sch-error" class="error" hidden></p>
+      <div class="buttons">
+        <button type="button" id="sch-save" class="primary" data-t="save"></button>
+        <button type="submit" data-t="cancel"></button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="dlg-consent">
     <form method="dialog">
       <h2 data-t="c_title"></h2>

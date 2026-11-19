@@ -19,6 +19,9 @@ pub struct EngineRunner {
     pub cfg: Config,
     /// Where byte progress goes (the desktop app's progress bars); `None` drops it.
     pub progress: Option<ProgressSink>,
+    /// v0.1: connections per download changed at run time (the desktop app's settings); read
+    /// when each download starts. `None` = `cfg.connections`.
+    pub connections_live: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl EngineRunner {
@@ -26,6 +29,7 @@ impl EngineRunner {
         EngineRunner {
             cfg,
             progress: None,
+            connections_live: None,
         }
     }
 }
@@ -83,7 +87,13 @@ impl JobRunner for EngineRunner {
         started: Arc<dyn Fn(String) + Send + Sync>,
         cancel: CancellationToken,
     ) -> BoxFuture<'static, RunResult> {
-        let cfg = self.cfg.clone();
+        let mut cfg = self.cfg.clone();
+        if let Some(c) = &self.connections_live {
+            let n = c.load(std::sync::atomic::Ordering::Relaxed);
+            if n > 0 {
+                cfg.connections = n.min(crate::config::MAX_CONNECTIONS);
+            }
+        }
         let progress = self.progress.clone();
         Box::pin(async move {
             let dir = match ensure_job_dir(&job.base_dir, job.subdir.as_deref()) {

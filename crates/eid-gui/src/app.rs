@@ -4,6 +4,7 @@
 
 use crate::core::{self, AddReport, ItemView, Progress, MAIN_QUEUE};
 use crate::listdiff::ListCache;
+use eid_cli::gui_settings::{self, GuiSettings};
 use eid_cli::media_jobs::VideoJobs;
 use eid_cli::remote::ConnArgs;
 use eid_cli::serve::{self, ServeArgs, APP_GUI};
@@ -11,11 +12,11 @@ use eid_cli::video_setup::VideoSetup;
 use eid_engine::queue::Queue;
 use eid_engine::queue_runner::EngineRunner;
 use eid_engine::scheduler::{NoPower, Scheduler, SchedulerConfig, SystemClock};
-use eid_engine::CancellationToken;
+use eid_engine::{CancellationToken, Limiter};
 use eid_ipc::{Client, ClientError, Command, Endpoint, ServeOptions, StartError};
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, State};
@@ -36,10 +37,17 @@ pub struct AppState {
     pub setup: VideoSetup,
     /// v0.1: what the window was last sent (`list` answers with changes only).
     pub list_cache: Mutex<ListCache<u64, ItemView>>,
+    /// v0.1: download settings (connections, simultaneous downloads, speed limit, scheduler).
+    pub settings: Mutex<GuiSettings>,
+    settings_file: Option<PathBuf>,
+    limiter: Arc<Limiter>,
+    connections: Arc<AtomicUsize>,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<Result<(), String>>>>,
 }
 
 /// How start-up ended.
+// built once at start-up and consumed at once: its size does not matter
+#[allow(clippy::large_enum_variant)]
 pub enum Boot {
     /// This process owns the queue: open the window.
     Owner(AppState),
@@ -115,8 +123,18 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let progress = Arc::new(Progress::default());
+    let settings_file = gui_settings::default_file();
+    let settings = settings_file
+        .as_deref()
+        .map(gui_settings::load)
+        .unwrap_or_default();
+    let limiter = Limiter::new(settings.limit_bps());
+    let connections = Arc::new(AtomicUsize::new(settings.connections as usize));
+    let mut cfg = serve::config_for(&ServeArgs::default());
+    cfg.global_limiter = Some(limiter.clone());
     let runner = EngineRunner {
-        cfg: serve::config_for(&ServeArgs::default()),
+        connections_live: Some(connections.clone()),
+        cfg,
         progress: Some({
             let p = progress.clone();
             Arc::new(move |item, done, total| p.record(item, done, total, Instant::now()))
@@ -136,7 +154,7 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
             if qs.queue_mut(MAIN_QUEUE).is_none() {
                 qs.queues.push(Queue::new(MAIN_QUEUE, &main_dir));
             }
-            Ok(())
+            settings.apply_to_queues(qs, MAIN_QUEUE)
         })
         .map_err(|e| e.to_string())?;
     let cancel = CancellationToken::new();
@@ -180,6 +198,10 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         video,
         setup,
         list_cache: Mutex::new(ListCache::default()),
+        settings: Mutex::new(settings),
+        settings_file,
+        limiter,
+        connections,
         task: Mutex::new(Some(task)),
     }))
 }
@@ -297,6 +319,52 @@ pub fn reveal(app: AppHandle, st: State<'_, AppState>, id: u64) -> Result<(), St
     }
     app.opener()
         .reveal_item_in_dir(path)
+        .map_err(|e| e.to_string())
+}
+
+/// v0.1: the download settings the window shows.
+#[tauri::command]
+pub fn settings_get(st: State<'_, AppState>) -> GuiSettings {
+    st.settings
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// v0.1: validate, save and apply new download settings at once (speed limit and
+/// simultaneous downloads take effect immediately, connections for downloads that start next).
+#[tauri::command]
+pub fn settings_set(st: State<'_, AppState>, settings: GuiSettings) -> Result<GuiSettings, String> {
+    settings.validate()?;
+    if let Some(f) = &st.settings_file {
+        gui_settings::save(f, &settings)?;
+    }
+    st.sched
+        .edit(|qs| settings.apply_to_queues(qs, MAIN_QUEUE))
+        .map_err(|e| e.to_string())?;
+    st.limiter.set_rate(settings.limit_bps());
+    st.connections
+        .store(settings.connections as usize, Ordering::Relaxed);
+    *st.settings.lock().unwrap_or_else(|p| p.into_inner()) = settings.clone();
+    Ok(settings)
+}
+
+/// v0.1: open a finished file with its default program. Programs and scripts are never
+/// started from here (they are only shown in their folder): `refused_executable`.
+#[tauri::command]
+pub fn open_file(app: AppHandle, st: State<'_, AppState>, id: u64) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = core::finished_file(&st.sched.snapshot(), id).ok_or("not_finished")?;
+    if !path.is_file() {
+        return Err("file_missing".into());
+    }
+    if core::is_executable_name(&path) {
+        // Never run a downloaded program from here: show it in its folder instead.
+        let _ = app.opener().reveal_item_in_dir(&path);
+        return Err("refused_executable".into());
+    }
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
         .map_err(|e| e.to_string())
 }
 
