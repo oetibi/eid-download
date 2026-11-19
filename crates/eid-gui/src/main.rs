@@ -73,6 +73,9 @@ fn main() {
                 .title("Eid Download — عيد للتحميل")
                 .inner_size(1040.0, 680.0)
                 .min_inner_size(720.0, 460.0)
+                // links dragged onto the window reach the page as HTML drag-and-drop events
+                // (the page reads only http/https text; dropped files are refused there)
+                .disable_drag_drop_handler()
                 .build();
             match window {
                 Ok(_) => app::focus_on_show(&h),

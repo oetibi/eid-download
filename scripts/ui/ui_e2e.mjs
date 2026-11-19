@@ -244,6 +244,107 @@ try {
     await until("document.documentElement.dir === 'rtl'", 3000, "rtl again");
   });
 
+  await check("search filters by name or link; Esc clears", async () => {
+    await open("");
+    await ev("localStorage.removeItem('cols'); localStorage.removeItem('toolbar')");
+    await open("");
+    const total = await ev("window.__eid.store.size");
+    await ev("(() => { const s = document.querySelector('#search'); s.value = 'ubuntu'; s.dispatchEvent(new Event('input')); })()");
+    await until("[...document.querySelectorAll('.tr:not([hidden]) .c-name')].length === 1", 3000, "one row for 'ubuntu'");
+    assert(/ubuntu/i.test(await ev("document.querySelector('.tr:not([hidden]) .c-name').textContent")), "wrong row");
+    await ev("(() => { const s = document.querySelector('#search'); s.value = 'zzzz-none'; s.dispatchEvent(new Event('input')); })()");
+    await until("!document.querySelector('#empty').hidden", 3000, "empty message");
+    await ev("document.querySelector('#search').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+    await until(`[...document.querySelectorAll('.tr:not([hidden])')].length === ${total}`, 3000, "all rows back");
+  });
+
+  await check("columns: hide, move and resize from the header; saved and restored after reload", async () => {
+    // hide the link column through the header menu
+    await ev("document.querySelector('#thead').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 300, clientY: 100 }))");
+    await until("!document.querySelector('#menu-cols').hidden", 2000, "column menu");
+    const urlItem = await ev("[...document.querySelectorAll('#menu-cols [role=menuitemcheckbox]')].findIndex(b => /link|الرابط/i.test(b.textContent))");
+    assert(urlItem >= 0, "no link column item");
+    await ev(`document.querySelectorAll('#menu-cols [role=menuitemcheckbox]')[${urlItem}].click()`);
+    await until("getComputedStyle(document.querySelector('#thead .c-url')).display === 'none'", 2000, "link header hidden");
+    assert(await ev("getComputedStyle(document.querySelector('.tr .c-url')).display === 'none'"), "link cells still shown");
+    // move 'status' before 'name' by drag and drop of the header
+    await ev(`(() => { const dt = new DataTransfer(); const a = document.querySelector('#thead .c-status'), b = document.querySelector('#thead .c-name');
+      a.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+      b.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      b.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt })); })()`);
+    const order = await ev("JSON.parse(localStorage.getItem('cols')).map(c => c.key)");
+    assert(order[0] === "status" && order[1] === "name", `order ${order}`);
+    // resize the size column with the pointer
+    const w0 = await ev("document.querySelector('#thead .c-size').getBoundingClientRect().width");
+    await ev(`(() => { const h = document.querySelector('#thead .c-size .rz'); const r = h.getBoundingClientRect(); const x = r.left + 3, y = r.top + 5;
+      const opt = (cx) => ({ bubbles: true, pointerId: 1, clientX: cx, clientY: y, isPrimary: true });
+      h.setPointerCapture = () => {};
+      h.dispatchEvent(new PointerEvent('pointerdown', opt(x)));
+      h.dispatchEvent(new PointerEvent('pointermove', opt(x + (document.documentElement.dir === 'rtl' ? -60 : 60))));
+      h.dispatchEvent(new PointerEvent('pointerup', opt(x))); })()`);
+    const w1 = await ev("document.querySelector('#thead .c-size').getBoundingClientRect().width");
+    assert(w1 > w0 + 40, `width ${w0} -> ${w1}`);
+    // rows follow the header grid
+    const rw = await ev("document.querySelector('.tr:not([hidden]) .c-size').getBoundingClientRect().width");
+    assert(Math.abs(rw - w1) < 2, `row cell ${rw} vs header ${w1}`);
+    await open("");
+    assert(await ev("getComputedStyle(document.querySelector('#thead .c-url')).display === 'none'"), "hidden column came back after reload");
+    const w2 = await ev("document.querySelector('#thead .c-size').getBoundingClientRect().width");
+    assert(Math.abs(w2 - w1) < 2, `width not restored ${w1} vs ${w2}`);
+    if (arg("--shots")) await shot("columns-ar.png");
+    await ev("localStorage.removeItem('cols')");
+  });
+
+  await check("toolbar: hide buttons and show icons only; 'Add' always stays", async () => {
+    await open("");
+    await ev("document.querySelector('#toolbar').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))");
+    await until("document.querySelector('#dlg-toolbar').open", 2000, "toolbar dialog");
+    await ev("document.querySelector('#tb-list input').click()"); // first = add_video
+    await ev("document.querySelector('#tb-labels').click()");
+    assert(await ev("document.querySelector('#toolbar [data-cmd=add_video]').hidden"), "video button not hidden");
+    assert(!(await ev("document.querySelector('#toolbar [data-cmd=add]').hidden")), "add hidden");
+    assert(await ev("getComputedStyle(document.querySelector('#toolbar [data-cmd=add] span')).display === 'none'"), "labels still shown");
+    await ev("document.querySelector('#dlg-toolbar').close()");
+    await open("");
+    assert(await ev("document.querySelector('#toolbar [data-cmd=add_video]').hidden"), "choice not saved");
+    await ev("localStorage.removeItem('toolbar')");
+    await open("");
+  });
+
+  await check("drag and drop: dropped links open the add dialog; files and non-links are refused", async () => {
+    const drop = (type, data) => ev(`(() => { const dt = new DataTransfer(); dt.setData(${JSON.stringify(type)}, ${JSON.stringify(data)});
+      document.body.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const shown = !document.querySelector('#drop').hidden;
+      document.body.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt })); return shown; })()`);
+    assert(await drop("text/uri-list", "# c\r\nhttps://a.example/x.zip\r\nhttps://b.example/y.iso"), "drop overlay not shown");
+    await until("document.querySelector('#dlg-add').open", 2000, "add dialog");
+    const v = await ev("document.querySelector('#in-links').value");
+    assert(v === "https://a.example/x.zip\nhttps://b.example/y.iso", `links ${JSON.stringify(v)}`);
+    await ev("document.querySelector('#dlg-add').close()");
+    await drop("text/plain", "just words, javascript:alert(1)");
+    await until("!document.querySelector('#toast').hidden", 2000, "refusal toast");
+    assert(!(await ev("document.querySelector('#dlg-add').open")), "dialog opened for a non-link");
+    assert(await ev("document.querySelector('#drop').hidden"), "overlay left on screen");
+  });
+
+  await check("notices: a download that finishes or fails shows a message (and none when turned off)", async () => {
+    await open("");
+    const id = await ev("[...window.__eid.store.values()].find(i => i.status === 'pending' || i.status === 'paused').id");
+    await ev("document.querySelector('#toast').hidden = true");
+    await ev(`window.__eidMockSet(${id}, { status: 'failed', error_kind: 'not_found' })`);
+    await ev("window.__eid.poll()");
+    await until("!document.querySelector('#toast').hidden && /فشل/.test(document.querySelector('#toast').textContent)", 4000, "failure notice");
+    await ev("localStorage.setItem('notify', 'off')");
+    await open("");
+    await ev("document.querySelector('#toast').hidden = true");
+    const id2 = await ev("[...window.__eid.store.values()].find(i => i.status === 'pending' || i.status === 'paused').id");
+    await ev(`window.__eidMockSet(${id2}, { status: 'done' })`);
+    await ev("window.__eid.poll()");
+    await sleep(300);
+    assert(await ev("document.querySelector('#toast').hidden"), "notice shown while turned off");
+    await ev("localStorage.removeItem('notify')");
+  });
+
   for (const n of [100, 1000, 3000]) {
     for (const old of [false, true]) {
       await check(`responsive with ${n} downloads (${old ? "v0.0.1 full list" : "revisioned list"})`, async () => {

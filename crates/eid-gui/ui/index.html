@@ -29,6 +29,7 @@
     <symbol id="i-doc" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM9 12h6M9 16h6"/></symbol>
     <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="16" r="2"/></symbol>
     <symbol id="i-app" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></symbol>
     <symbol id="i-image" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 16l5-5 4 4 2-2 5 5"/></symbol>
   </svg>
 
@@ -65,6 +66,9 @@
     <div class="menu" id="menu-view" role="menu" hidden>
       <button type="button" role="menuitem" data-cmd="toggle_sidebar"><span data-t="c_toggle_sidebar"></span></button>
       <button type="button" role="menuitem" data-cmd="view_jobs"><span data-t="c_view_jobs"></span></button>
+      <button type="button" role="menuitem" data-cmd="columns"><span data-t="c_columns"></span></button>
+      <button type="button" role="menuitem" data-cmd="customize_toolbar"><span data-t="c_customize_toolbar"></span></button>
+      <button type="button" role="menuitem" data-cmd="find"><span data-t="c_find"></span><kbd>Ctrl+F</kbd></button>
       <hr>
       <button type="button" role="menuitemradio" data-cmd="theme_system"><span data-t="c_theme_system"></span></button>
       <button type="button" role="menuitemradio" data-cmd="theme_light"><span data-t="c_theme_light"></span></button>
@@ -90,6 +94,8 @@
       <span class="sep"></span>
       <button type="button" class="tool" data-cmd="scheduler"><svg class="ic"><use href="#i-clock"/></svg><span data-t="t_scheduler"></span></button>
       <button type="button" class="tool" data-cmd="settings"><svg class="ic"><use href="#i-gear"/></svg><span data-t="t_settings"></span></button>
+      <span class="grow"></span>
+      <div class="search"><svg class="ic"><use href="#i-search"/></svg><input id="search" type="search" dir="auto" autocomplete="off" spellcheck="false" maxlength="200"></div>
     </div>
 
     <div class="body">
@@ -170,7 +176,22 @@
     <button type="button" role="menuitem" data-cmd="properties"><span data-t="c_properties"></span><kbd>Enter</kbd></button>
   </div>
 
+  <div class="menu" id="menu-cols" role="menu" hidden></div>
+  <div id="drop" class="drop" hidden><p data-t="drop_hint"></p></div>
   <div id="toast" class="toast" role="status" hidden></div>
+
+  <dialog id="dlg-toolbar">
+    <form method="dialog">
+      <h2 data-t="c_customize_toolbar"></h2>
+      <p class="note" data-t="tb_lead"></p>
+      <div id="tb-list" class="checks"></div>
+      <label class="check"><input id="tb-labels" type="checkbox"><span data-t="tb_labels"></span></label>
+      <div class="buttons">
+        <button type="button" id="tb-reset" class="ghost" data-t="reset"></button>
+        <button type="submit" class="primary" data-t="close"></button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="dlg-add">
     <form id="form-add" method="dialog">
@@ -246,6 +267,7 @@
           <option value="light" data-t="c_theme_light"></option>
           <option value="dark" data-t="c_theme_dark"></option>
         </select>
+        <label class="check"><input id="set-notify" type="checkbox"><span data-t="s_notify"></span></label>
       </div>
       <div class="tab" data-pane="downloads" hidden>
         <label data-t="s_default_folder"></label>

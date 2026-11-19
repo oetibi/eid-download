@@ -84,6 +84,8 @@ export function mockApi(params = new URLSearchParams()) {
   let engineSettings = { max_parallel: 3, connections: 8, speed_limit_kib: 0, schedule: null };
   const opened = [];
   window.__eidMockOpened = opened;
+  // test hook (mock only): change an item as if the engine did, e.g. finish or fail it
+  window.__eidMockSet = (id, patch) => touch({ ...find(id), ...patch });
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   function jobTick() {
     for (const j of jobs) {

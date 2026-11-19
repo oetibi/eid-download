@@ -9,6 +9,7 @@ import { TEXT } from "./i18n.js";
 import {
   ACTIVE, BUSY, CATEGORIES, mergeList, buildView, inView, categoryOf, fraction, clickSelect,
   pollDelay, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
+  COLUMNS, TOOLS, normalizeCols, gridTemplate, moveCol, normalizeToolbar, linksFromText, finishedNow,
 } from "./logic.js";
 
 const tauri = window.__TAURI__;
@@ -29,6 +30,7 @@ const settings = {
   folder: localStorage.getItem("folder") || null,
   quality: localStorage.getItem("quality") || "best",
   sidebar: localStorage.getItem("sidebar") !== "off",
+  notify: localStorage.getItem("notify") !== "off",
 };
 function saveSetting(k, v) {
   settings[k] = v;
@@ -56,6 +58,7 @@ let anchor = null;
 let cursor = null; // keyboard focus row id
 let propsId = null;
 let pickedFolder = null;
+let query = "";
 let jobs = [];
 let jobsAvailable = true;
 let jobsRetryAt = 0;
@@ -106,6 +109,8 @@ function applyLang() {
   for (const n of $$("[data-t]")) n.textContent = t(n.dataset.t);
   $("#in-links").placeholder = t("links_ph");
   $("#in-vurl").placeholder = "https://www.youtube.com/watch?v=…";
+  $("#search").placeholder = t("search_ph");
+  $("#search").setAttribute("aria-label", t("search_ph"));
   for (const n of $$("fieldset.soon, fieldset.soon *")) n.title = t("soon_tip");
   for (const row of pool) row.reset();
   folderKey = "";
@@ -153,7 +158,9 @@ async function refresh() {
   try {
     const s = await api.call("list", rev != null ? { since: rev } : {});
     if (s?.default_dir) defaultDir = s.default_dir;
+    const fin = gotList && settings.notify ? finishedNow(store, s) : [];
     const r = mergeList(store, s);
+    if (fin.length) notify(fin);
     rev = r.rev;
     if (r.changed || !gotList) invalidate(true);
     gotList = true;
@@ -203,7 +210,7 @@ function frame() {
 }
 
 function recomputeView() {
-  viewItems = view === "jobs" ? [] : buildView(store, view, sortKey, sortDir);
+  viewItems = view === "jobs" ? [] : buildView(store, view, sortKey, sortDir, query);
   order = viewItems.map((i) => i.id);
   for (const id of selected) if (!store.has(id)) selected.delete(id);
   $("#spacer").style.height = `${viewItems.length * ROW_H}px`;
@@ -436,6 +443,9 @@ async function each(list, cmd) {
 const commands = {
   add: { run: () => openAdd() },
   add_video: { run: () => openVideo() },
+  columns: { run: () => { const r = $("#thead").getBoundingClientRect(); showColsMenu(document.documentElement.dir === "rtl" ? r.right - 20 : r.left + 20, r.bottom); } },
+  customize_toolbar: { run: () => openToolbarDialog() },
+  find: { run: () => { $("#search").focus(); $("#search").select(); } },
   settings: { run: () => openSettings() },
   resume: {
     on: () => selItems().some((i) => i.status === "paused" || i.status === "failed"),
@@ -617,6 +627,7 @@ document.addEventListener("keydown", (e) => {
   if (ctrl && e.shiftKey && (e.key === "N" || e.key === "n")) { e.preventDefault(); run("add_video"); return; }
   if (ctrl && (e.key === "n" || e.key === "N")) { e.preventDefault(); run("add"); return; }
   if (ctrl && e.key === ",") { e.preventDefault(); run("settings"); return; }
+  if (ctrl && (e.key === "f" || e.key === "F")) { e.preventDefault(); run("find"); return; }
   if (e.key === "F1") { e.preventDefault(); run("shortcuts"); return; }
   if (inField(e) || view === "jobs") return;
   const onButton = e.target.closest?.("button");
@@ -690,7 +701,7 @@ async function submitAdd(ev) {
     const name = $("#in-name").value.trim();
     const r = await api.call("add", { links: $("#in-links").value, folder: effectiveFolder(), name: name || null });
     if (r.refused.length) {
-      const lines = r.refused.map(([u, k]) => `• ⁨${u}⁩ —${errText(k) ?? k}`);
+      const lines = r.refused.map(([u, k]) => `• ⁨${u}⁩ — ${errText(k) ?? k}`);
       errEl.textContent = `${r.added.length ? t("added_n", r.added.length) + "\n" : ""}${t("refused_n", r.refused.length)}\n${lines.join("\n")}`;
       errEl.hidden = false;
       $("#in-links").value = r.refused.map(([u]) => u).join("\n");
@@ -1329,3 +1340,163 @@ $("#sch-save").addEventListener("click", async () => {
 if (usingMock) window.__eid = { stats, store, refresh, poll, invalidate, viewport, select: (ids) => { selected = new Set(ids); invalidate(true); updateCommands(); } };
 await poll();
 
+
+// ---------------------------------------------------------------- v0.2: notices
+function notify(list) {
+  const done = list.filter((x) => x.status === "done"), failed = list.filter((x) => x.status === "failed");
+  if (list.length === 1) toast(done.length ? t("n_done", list[0].name) : t("n_failed", list[0].name));
+  else toast(t("n_many", done.length, failed.length));
+}
+
+// ---------------------------------------------------------------- v0.2: search
+let searchTimer;
+$("#search").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { query = $("#search").value; invalidate(true); }, 120);
+});
+$("#search").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); $("#search").value = ""; query = ""; invalidate(true); viewport.focus(); }
+  else if (e.key === "Enter" || e.key === "ArrowDown") { e.preventDefault(); viewport.focus(); }
+});
+
+// ---------------------------------------------------------------- v0.2: columns (show/hide, order, width)
+const COL_LABEL = { name: "col_name", size: "col_size", prog: "col_progress", status: "col_status", speed: "col_speed", eta: "col_eta", url: "col_url" };
+let cols = normalizeCols(readJson("cols"));
+function readJson(k) { try { return JSON.parse(localStorage.getItem(k) ?? "null"); } catch { return null; } }
+const colStyle = document.head.appendChild(el("style"));
+function applyCols() {
+  const rules = cols.map((c, i) => `.thead > .c-${c.key}, .tr > .c-${c.key} { order: ${i};${c.on ? "" : " display: none;"} }`);
+  colStyle.textContent = `${rules.join("\n")}\n.thead, .tr { grid-template-columns: ${gridTemplate(cols)}; }`;
+}
+function saveCols() { localStorage.setItem("cols", JSON.stringify(cols)); applyCols(); }
+applyCols();
+
+function showColsMenu(x, y) {
+  const m = $("#menu-cols");
+  const items = cols.map((c) => {
+    const b = el("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitemcheckbox");
+    b.setAttribute("aria-checked", c.on ? "true" : "false");
+    b.disabled = c.key === "name";
+    b.append(el("span", "chk", c.on ? "✓" : ""), el("span", null, t(COL_LABEL[c.key])));
+    b.addEventListener("click", () => { c.on = !c.on; saveCols(); closeMenus(); });
+    return b;
+  });
+  const reset = el("button", null, t("cols_reset"));
+  reset.type = "button";
+  reset.setAttribute("role", "menuitem");
+  reset.addEventListener("click", () => { cols = normalizeCols(null); saveCols(); closeMenus(); });
+  const hint = el("p", "note", t("cols_hint"));
+  m.replaceChildren(...items, el("hr"), reset, hint);
+  showMenu(m, x, y);
+}
+$("#thead").addEventListener("contextmenu", (e) => { e.preventDefault(); showColsMenu(e.clientX, e.clientY); });
+
+const COL_DND = "application/x-eid-column";
+for (const b of $$("#thead > button")) {
+  const key = [...b.classList].find((c) => c.startsWith("c-"))?.slice(2);
+  if (!key) continue;
+  b.dataset.col = key;
+  b.draggable = true;
+  b.addEventListener("dragstart", (e) => { e.dataTransfer.setData(COL_DND, key); e.dataTransfer.effectAllowed = "move"; });
+  b.addEventListener("dragover", (e) => { if (e.dataTransfer.types.includes(COL_DND)) { e.preventDefault(); b.classList.add("dropto"); } });
+  b.addEventListener("dragleave", () => b.classList.remove("dropto"));
+  b.addEventListener("drop", (e) => {
+    b.classList.remove("dropto");
+    const from = e.dataTransfer.getData(COL_DND);
+    if (!from) return;
+    e.preventDefault();
+    e.stopPropagation();
+    cols = moveCol(cols, from, key);
+    saveCols();
+  });
+  const h = el("span", "rz");
+  h.setAttribute("aria-hidden", "true");
+  b.append(h);
+  h.addEventListener("click", (e) => e.stopPropagation());
+  h.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const c = cols.find((x) => x.key === key);
+    const x0 = e.clientX, w0 = b.getBoundingClientRect().width;
+    const sign = document.documentElement.dir === "rtl" ? -1 : 1;
+    h.setPointerCapture(e.pointerId);
+    const move = (ev) => { c.w = Math.round(w0 + sign * (ev.clientX - x0)); cols = normalizeCols(cols); applyCols(); };
+    const up = () => { h.removeEventListener("pointermove", move); saveCols(); };
+    h.addEventListener("pointermove", move);
+    h.addEventListener("pointerup", up, { once: true });
+    h.addEventListener("pointercancel", up, { once: true });
+  });
+  h.addEventListener("dblclick", (e) => { e.stopPropagation(); const c = cols.find((x) => x.key === key); c.w = null; saveCols(); });
+}
+
+// ---------------------------------------------------------------- v0.2: toolbar customization
+let toolbar = normalizeToolbar(readJson("toolbar"));
+function applyToolbar() {
+  for (const b of $$("#toolbar .tool[data-cmd]")) b.hidden = toolbar.hidden.has(b.dataset.cmd);
+  $("#toolbar").classList.toggle("icons-only", !toolbar.labels);
+  // a separator with no visible button on one side is hidden too
+  const kids = [...$("#toolbar").children];
+  for (const [i, k] of kids.entries()) {
+    if (!k.classList.contains("sep")) continue;
+    const prev = kids.slice(0, i).reverse().find((x) => !x.classList.contains("sep"));
+    const next = kids.slice(i + 1).find((x) => !x.classList.contains("sep"));
+    k.hidden = !(prev && !prev.hidden && prev.classList.contains("tool")) || !(next && !next.hidden && next.classList.contains("tool"));
+  }
+}
+function saveToolbar() { localStorage.setItem("toolbar", JSON.stringify({ hidden: [...toolbar.hidden], labels: toolbar.labels })); applyToolbar(); }
+function openToolbarDialog() {
+  const list = $("#tb-list");
+  list.replaceChildren(...TOOLS.map((k) => {
+    const src = $(`#toolbar .tool[data-cmd="${k}"] span`);
+    const lab = el("label", "check");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.checked = !toolbar.hidden.has(k);
+    cb.addEventListener("change", () => { if (cb.checked) toolbar.hidden.delete(k); else toolbar.hidden.add(k); saveToolbar(); });
+    lab.append(cb, el("span", null, src?.textContent ?? k));
+    return lab;
+  }));
+  $("#tb-labels").checked = toolbar.labels;
+  $("#dlg-toolbar").showModal();
+}
+$("#tb-labels").addEventListener("change", (e) => { toolbar.labels = e.target.checked; saveToolbar(); });
+$("#tb-reset").addEventListener("click", () => { toolbar = normalizeToolbar(null); saveToolbar(); openToolbarDialog(); });
+$("#toolbar").addEventListener("contextmenu", (e) => { e.preventDefault(); openToolbarDialog(); });
+applyToolbar();
+
+// ---------------------------------------------------------------- v0.2: notify setting
+$("#set-notify").checked = settings.notify;
+$("#set-notify").addEventListener("change", (e) => { settings.notify = e.target.checked; saveSetting("notify", e.target.checked); });
+
+// ---------------------------------------------------------------- v0.2: drag and drop of links
+let dragDepth = 0;
+const isLinkDrag = (e) => {
+  const ty = [...(e.dataTransfer?.types ?? [])];
+  return !ty.includes(COL_DND) && (ty.includes("text/uri-list") || ty.includes("text/plain") || ty.includes("Files"));
+};
+document.addEventListener("dragenter", (e) => {
+  if (!isLinkDrag(e) || anyDialog()) return;
+  e.preventDefault();
+  dragDepth++;
+  $("#drop").hidden = false;
+});
+document.addEventListener("dragover", (e) => { if (isLinkDrag(e) && !anyDialog()) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } });
+document.addEventListener("dragleave", () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $("#drop").hidden = true; });
+document.addEventListener("drop", (e) => {
+  if (!isLinkDrag(e) || anyDialog()) return;
+  e.preventDefault();
+  dragDepth = 0;
+  $("#drop").hidden = true;
+  const dt = e.dataTransfer;
+  const links = linksFromText(dt.getData("text/uri-list") || dt.getData("text/plain"));
+  if (!links.length) { toast(dt.types.includes("Files") ? t("drop_files") : t("drop_none")); return; }
+  if (links.length === 1 && /^https?:\/\/([a-z0-9-]+\.)*(youtube\.com|youtu\.be)\//i.test(links[0])) openVideo(links[0]);
+  else openAdd(links.join("\n"));
+});
+// tooltips carry the button text (needed when only icons are shown), in the current language
+$("#toolbar").addEventListener("mouseover", (e) => {
+  const b = e.target.closest?.(".tool");
+  if (b) setAttr(b, "title", b.querySelector("span")?.textContent ?? null);
+});

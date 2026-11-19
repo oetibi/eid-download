@@ -1,7 +1,7 @@
 // Unit tests of the window's pure logic (node --test, no browser).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeList, categoryOf, inView, buildView, clickSelect, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, pollDelay, segmentView } from "../logic.js";
+import { mergeList, categoryOf, inView, buildView, clickSelect, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, pollDelay, segmentView, matchesQuery, normalizeCols, gridTemplate, moveCol, COLUMNS, normalizeToolbar, linksFromText, finishedNow } from "../logic.js";
 
 const it = (id, o = {}) => ({ id, status: "pending", name: `f${id}.zip`, url: "", folder: "D", attempts: 0, error_kind: null, error: null, rate: null, ...o });
 
@@ -72,4 +72,50 @@ test("segment map: shapes from the backend, clamped and never trusted", () => {
   // huge answers are capped
   assert.equal(segmentView({ source: "stream", cells: Array(5000).fill(100) }).cells.length, 1000);
   assert.equal(segmentView({ source: "checkpoint", cells: [], rows: Array(500).fill({ start: 0, end: 1, done: 1 }) }).rows.length, 64);
+});
+
+test("search: every word in name or link, case-insensitive; empty matches all", () => {
+  const a = it(1, { name: "Ubuntu 24.04 Desktop.iso", url: "https://releases.example.com/u.iso" });
+  assert.ok(matchesQuery(a, ""));
+  assert.ok(matchesQuery(a, "  ubuntu  ISO "));
+  assert.ok(matchesQuery(a, "releases desktop"));
+  assert.ok(!matchesQuery(a, "ubuntu fedora"));
+  assert.ok(matchesQuery(it(2, { name: "تقرير نهائي.pdf" }), "نهائي"));
+  const s = new Map([[1, a], [2, it(2, { name: "x.zip" })]]);
+  assert.deepEqual(buildView(s, "all", "id", -1, "ubuntu").map((x) => x.id), [1]);
+});
+
+test("columns: saved layout is repaired, widths clamped, name always shown, order kept", () => {
+  const d = normalizeCols(null);
+  assert.deepEqual(d.map((c) => c.key), COLUMNS.map((c) => c.key));
+  const n = normalizeCols([{ key: "url", on: false, w: 5 }, { key: "evil" }, { key: "name", on: false, w: 99999 }, { key: "url" }, "x", null]);
+  assert.deepEqual(n.slice(0, 2), [{ key: "url", on: false, w: 80 }, { key: "name", on: true, w: 1200 }]);
+  assert.equal(n.length, COLUMNS.length);
+  assert.equal(new Set(n.map((c) => c.key)).size, COLUMNS.length);
+  assert.equal(gridTemplate(n).split(" ").length >= 6, true);
+  assert.ok(!gridTemplate(n).includes("NaN"));
+  const m = moveCol(d, "url", "name");
+  assert.deepEqual(m.slice(0, 2).map((c) => c.key), ["url", "name"]);
+  assert.deepEqual(moveCol(d, "name", null).at(-1).key, "name");
+  assert.equal(moveCol(d, "nope", "name"), d);
+});
+
+test("toolbar: only known buttons can be hidden; labels on by default", () => {
+  const t = normalizeToolbar({ hidden: ["remove", "add", "evil"], labels: false });
+  assert.deepEqual([...t.hidden], ["remove"]); assert.equal(t.labels, false);
+  assert.equal(normalizeToolbar("junk").labels, true);
+});
+
+test("dropped text: http(s) links only, deduplicated, uri-list comments skipped, bounded", () => {
+  const txt = "# comment http://no.example\r\nhttps://a.example/x.zip\nsee (https://b.example/y.iso), and https://a.example/x.zip\nftp://c/z javascript:alert(1)\n";
+  assert.deepEqual(linksFromText(txt), ["https://a.example/x.zip", "https://b.example/y.iso"]);
+  assert.equal(linksFromText(Array(500).fill("https://h/p").map((u, i) => u + i).join("\n")).length, 200);
+  assert.deepEqual(linksFromText(null), []);
+});
+
+test("notices: only items that changed to done or failed, never on the first list", () => {
+  const s = new Map([[1, it(1, { status: "running" })], [2, it(2, { status: "done" })], [3, it(3, { status: "running" })]]);
+  const r = finishedNow(s, { items: [it(1, { status: "done" }), it(2, { status: "done" }), it(3, { status: "failed" }), it(4, { status: "done" })] });
+  assert.deepEqual(r.map((x) => [x.id, x.status]), [[1, "done"], [3, "failed"]]);
+  assert.deepEqual(finishedNow(new Map(), { items: [it(1, { status: "done" })] }), []);
 });
