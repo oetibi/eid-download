@@ -45,6 +45,8 @@ test("store packages are valid, deterministic and store-ready", () => {
     assert.equal(mc.key, undefined, "stores refuse the key field");
     assert.equal(mf.browser_specific_settings.gecko.id, "eid-download@eid-download");
     assert.deepEqual(mc.permissions.sort(), ["nativeMessaging", "storage"]);
+    const side = readZip(fs.readFileSync(path.join(a, "eid-download-chrome-sideload-0.1.0.zip")));
+    assert.ok(JSON.parse(side.get("manifest.json")).key, "sideload build keeps the pinned key");
   } finally {
     fs.rmSync(a, { recursive: true, force: true });
     fs.rmSync(b, { recursive: true, force: true });
