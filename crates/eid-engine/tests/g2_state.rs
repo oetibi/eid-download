@@ -175,7 +175,18 @@ async fn kill_then_resume_requests_only_from_checkpointed_frontier() {
     };
     let (srv, url) = serve("/k.bin", content(2), behavior).await;
     let dir = tempfile::tempdir().unwrap();
-    let (r, _) = run_until_progress(&url, dir.path(), fast_cfg(4), 5 << 20).await;
+    // PLAN P1 open item (b): fast_cfg gives up on a silent connection after 5 s, so a 30 s stall
+    // was NOT a barrier (workers retried from later frontiers). Here the stall timeout outlives
+    // the stall, and the log below proves no worker retried: nothing moved but the checkpoints.
+    // Only this test's config changes; the product default (Config::default) is untouched.
+    let mut cfg = fast_cfg(4);
+    cfg.stall_timeout = Duration::from_secs(120);
+    let (r, log) = run_until_progress(&url, dir.path(), cfg, 5 << 20).await;
+    assert_eq!(
+        log.count(|e| matches!(e, Event::Retry { .. })),
+        0,
+        "a worker retried during the stall: the stall was not a barrier"
+    );
     assert!(
         matches!(r, Err(Error::Cancelled)),
         "expected Cancelled, got {:?}",
@@ -564,6 +575,9 @@ async fn aborting_the_caller_drains_the_job_and_persists_a_final_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = fast_cfg(4);
     cfg.checkpoint_interval = Duration::from_secs(600); // no periodic checkpoint will fire
+                                                        // PLAN P1 open item (b): the stall must be a real barrier (see kill_then_resume...): the stall
+                                                        // timeout outlives the 30 s stall; the log below proves no worker retried.
+    cfg.stall_timeout = Duration::from_secs(120);
     let log = Log::default();
     let (d, sink) = (dir.path().to_path_buf(), log.sink());
     let task = tokio::spawn(async move {
@@ -615,6 +629,11 @@ async fn aborting_the_caller_drains_the_job_and_persists_a_final_checkpoint() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
     assert!(frontier >= 1 << 20);
+    assert_eq!(
+        log.count(|e| matches!(e, Event::Retry { .. })),
+        0,
+        "a worker retried during the stall: the stall was not a barrier"
+    );
     // job released its ownership: resume now works and is exact
     srv.set_behavior("/m4.bin", Behavior::default());
     let mut tries = 0;
@@ -714,4 +733,55 @@ async fn restart_path_keeps_the_job_lock_for_its_whole_transfer() {
     }
     let o = first.await.unwrap().unwrap();
     assert_eq!(sha_of_file(&o.path), content(33).sha256_hex());
+}
+
+/// PLAN P1 open item (b), positive control for the two stall-barrier tests above: a server stall
+/// is a barrier ONLY while the stall timeout outlasts it. Same server (every response stalls
+/// after 1 MiB for 4 s), same 2.5 s window: with a 300 ms stall timeout the workers give up and
+/// retry inside the window; with a 60 s one nothing retries. The product default
+/// (Config::default, 30 s) is not changed by any test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stall_is_a_barrier_only_while_the_stall_timeout_outlasts_it() {
+    assert_eq!(Config::default().stall_timeout, Duration::from_secs(30));
+    let stall = || Behavior {
+        stall: Some(eid_testserver::Stall {
+            after_bytes: 1 << 20,
+            duration: Duration::from_secs(4),
+            once: false,
+        }),
+        ..Behavior::default()
+    };
+    let retries = |log: &Log| log.count(|e| matches!(e, Event::Retry { .. }));
+    // short timeout: the stall is NOT a barrier
+    let (_s1, url) = serve("/st1.bin", content(51), stall()).await;
+    let d1 = tempfile::tempdir().unwrap();
+    let mut cfg = fast_cfg(2);
+    cfg.stall_timeout = Duration::from_millis(300);
+    let (r, log) = run_then_cancel(&url, d1.path(), cfg, Duration::from_millis(2500)).await;
+    // retrying from later frontiers may even finish the whole file inside the window
+    assert!(
+        matches!(r, Err(Error::Cancelled)) || r.is_ok(),
+        "{:?}",
+        r.map(|o| o.path)
+    );
+    assert!(
+        retries(&log) > 0,
+        "a 300 ms stall timeout must retry during a 4 s stall"
+    );
+    // long timeout: the stall IS a barrier
+    let (_s2, url) = serve("/st2.bin", content(51), stall()).await;
+    let d2 = tempfile::tempdir().unwrap();
+    let mut cfg = fast_cfg(2);
+    cfg.stall_timeout = Duration::from_secs(60);
+    let (r, log) = run_then_cancel(&url, d2.path(), cfg, Duration::from_millis(2500)).await;
+    assert!(
+        matches!(r, Err(Error::Cancelled)),
+        "{:?}",
+        r.map(|o| o.path)
+    );
+    assert_eq!(
+        retries(&log),
+        0,
+        "nothing may retry while the stall timeout outlasts the stall"
+    );
 }
