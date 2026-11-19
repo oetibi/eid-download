@@ -59,6 +59,21 @@ pub fn reset_all(qs: &mut eid_engine::queue::QueueSet) {
     }
 }
 
+/// One-shot rule: reset every queue's "when finished" and wait until it is SAVED. Called on a
+/// blocking thread of the runtime (the scheduler runs power actions with `spawn_blocking`).
+/// Tauri-free, so it is unit tested without a window (ci-windows run 44573561513: a test that
+/// touched the app handle linked the window libraries and the test program could not start).
+pub fn reset_and_save(s: &Scheduler) -> Result<(), String> {
+    s.edit(|qs| {
+        reset_all(qs);
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+    tokio::runtime::Handle::current()
+        .block_on(s.flush())
+        .map_err(|e| e.to_string())
+}
+
 /// The app's [`PowerControl`]: knows the app (for "quit") and the scheduler (to reset and save
 /// the one-shot choice first). Both are attached once they exist.
 #[derive(Default)]
@@ -71,13 +86,7 @@ impl PowerControl for GuiPower {
     fn execute(&self, action: PowerAction) -> Result<(), String> {
         // one-shot: reset and SAVE before anything irreversible happens
         if let Some(s) = self.sched.get() {
-            s.edit(|qs| {
-                reset_all(qs);
-                Ok(())
-            })
-            .map_err(|e| e.to_string())?;
-            // called on a blocking thread (spawn_blocking in the scheduler)
-            tauri::async_runtime::block_on(s.flush()).map_err(|e| e.to_string())?;
+            reset_and_save(s)?;
         }
         let io = |r: std::io::Result<()>| r.map_err(|e| e.to_string());
         match action {
@@ -185,10 +194,8 @@ mod tests {
             Arc::new(|_| {}),
         )
         .unwrap();
-        let p = Arc::new(GuiPower::default());
-        let _ = p.sched.set(sched.clone());
-        let p2 = p.clone();
-        tokio::task::spawn_blocking(move || p2.execute(PowerAction::None))
+        let s2 = sched.clone();
+        tokio::task::spawn_blocking(move || reset_and_save(&s2))
             .await
             .unwrap()
             .unwrap();
