@@ -35,18 +35,34 @@ impl VideoSetup {
         }
     }
 
-    /// `{installed, consent, installing, error}`.
+    /// `{installed, consent, installing, error, ytdlp_version, ffmpeg_version, deno_version}`
+    /// (the versions are the pinned ones, present when installed).
     pub fn status(&self) -> Value {
+        let mut versions = (None, None, None);
         let (consent, installed) = match (crate::video::manifest(), crate::video::stores()) {
-            (Ok(m), Ok((s, t))) => (
-                eid_media::consent::is_granted(&s, &m).unwrap_or(false),
-                t.current(&m).is_ok(),
-            ),
+            (Ok(m), Ok((s, t))) => {
+                let installed = t.current(&m).is_ok();
+                if installed {
+                    let v = |n: &str| {
+                        m.tools
+                            .iter()
+                            .find(|t| t.name == n)
+                            .map(|t| t.version.clone())
+                    };
+                    versions = (v("yt-dlp"), v("ffmpeg"), v("deno"));
+                }
+                (
+                    eid_media::consent::is_granted(&s, &m).unwrap_or(false),
+                    installed,
+                )
+            }
             _ => (false, false),
         };
         let g = lock(&self.st);
         json!({"installed": installed, "consent": consent,
-               "installing": g.running, "error": g.error})
+               "installing": g.running, "error": g.error,
+               "ytdlp_version": versions.0, "ffmpeg_version": versions.1,
+               "deno_version": versions.2})
     }
 
     /// The agreement text the window shows before [`Self::install`] (`ar` or `en`).

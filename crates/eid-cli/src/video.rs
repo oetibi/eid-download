@@ -887,7 +887,9 @@ async fn get(
         "ev": "item", "n": 0, "state": "done",
         "file": dest.file_name().map(|f| f.to_string_lossy().into_owned()),
     }));
-    println!("{}", dest.display());
+    if !events::on() {
+        println!("{}", dest.display());
+    }
     Ok(())
 }
 
@@ -1298,7 +1300,9 @@ async fn playlist(
         gave_up.len() + now_given_up.len(),
         pl::MAX_ATTEMPTS
     );
-    println!("{}", folder.display());
+    if !events::on() {
+        println!("{}", folder.display());
+    }
     if !gave_up.is_empty() {
         let list: Vec<String> = gave_up.iter().map(|n| n.to_string()).collect();
         eprintln!(

@@ -637,15 +637,29 @@ impl VideoJobs {
                 _ => JobState::Failed,
             };
             for i in j.items.iter_mut().filter(|i| i.state == "running") {
-                i.state = if j.state == JobState::Done {
-                    "done"
-                } else {
-                    "paused"
+                i.state = match j.state {
+                    JobState::Done => "done",
+                    JobState::Failed => "failed",
+                    _ => "paused",
                 }
                 .into();
             }
             j.error = match j.state {
-                JobState::Failed => Some(err.unwrap_or_else(|| "the download failed".into())),
+                JobState::Failed => {
+                    let mut e = err.unwrap_or_else(|| "the download failed".into());
+                    // the CLI's summary points at its own console ("see above"): name the items
+                    let why: Vec<String> = j
+                        .items
+                        .iter()
+                        .filter(|i| i.state == "failed")
+                        .filter_map(|i| i.error.as_ref().map(|x| format!("{}: {x}", i.index)))
+                        .take(3)
+                        .collect();
+                    if !why.is_empty() {
+                        e = format!("{} ({})", e.trim_end_matches("; see above"), why.join("; "));
+                    }
+                    Some(e)
+                }
                 _ => None,
             };
         }
