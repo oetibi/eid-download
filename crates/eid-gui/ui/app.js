@@ -9,7 +9,7 @@ import { TEXT } from "./i18n.js";
 import {
   ACTIVE, BUSY, CATEGORIES, mergeList, buildView, inView, categoryOf, fraction, clickSelect,
   pollDelay, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
-  COLUMNS, TOOLS, normalizeCols, gridTemplate, moveCol, normalizeToolbar, linksFromText, finishedNow,
+  COLUMNS, TOOLS, normalizeCols, gridTemplate, moveCol, normalizeToolbar, linksFromText, finishedNow, videoPage,
 } from "./logic.js";
 
 const tauri = window.__TAURI__;
@@ -687,7 +687,7 @@ document.addEventListener("paste", (e) => {
   const text = (e.clipboardData?.getData("text") ?? "").trim();
   if (!/^https?:\/\//i.test(text)) return;
   e.preventDefault();
-  if (/^https?:\/\/([a-z0-9-]+\.)*(youtube\.com|youtu\.be)\//i.test(text) && !/\s/.test(text)) openVideo(text);
+  if (!/\s/.test(text) && videoPage(text)) openVideo(text);
   else openAdd(text);
 });
 
@@ -744,7 +744,15 @@ async function submitAdd(ev) {
   try {
     const name = $("#in-name").value.trim();
     const r = await api.call("add", { links: $("#in-links").value, folder: effectiveFolder(), name: name || null, category: $("#in-cat").value || "none" });
-    if (r.refused.length) {
+    // v0.2: YouTube pages are video downloads, never files: when they are the only links that
+    // were not added, the video dialog opens with the first one
+    const pages = r.refused.filter(([, k]) => k === "video_page");
+    if (pages.length && pages.length === r.refused.length) {
+      $("#dlg-add").close();
+      if (r.added.length) toast(t("added_n", r.added.length));
+      openVideo(pages[0][0]);
+      toast(t("routed_video", pages.length));
+    } else if (r.refused.length) {
       const lines = r.refused.map(([u, k]) => `• ⁨${u}⁩ — ${errText(k) ?? k}`);
       errEl.textContent = `${r.added.length ? t("added_n", r.added.length) + "\n" : ""}${t("refused_n", r.refused.length)}\n${lines.join("\n")}`;
       errEl.hidden = false;
@@ -1545,7 +1553,7 @@ document.addEventListener("drop", (e) => {
   const dt = e.dataTransfer;
   const links = linksFromText(dt.getData("text/uri-list") || dt.getData("text/plain"));
   if (!links.length) { toast(dt.types.includes("Files") ? t("drop_files") : t("drop_none")); return; }
-  if (links.length === 1 && /^https?:\/\/([a-z0-9-]+\.)*(youtube\.com|youtu\.be)\//i.test(links[0])) openVideo(links[0]);
+  if (links.length === 1 && videoPage(links[0])) openVideo(links[0]);
   else openAdd(links.join("\n"));
 });
 // tooltips carry the button text (needed when only icons are shown), in the current language

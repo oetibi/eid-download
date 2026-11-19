@@ -673,6 +673,32 @@ struct Probe {
     last_modified: Option<String>,
     final_url: Url,
     content_disposition: Option<String>,
+    content_type: Option<String>,
+}
+
+/// v0.2: `Some(mime)` when the response is a web page and `name` is not a page file name
+/// (see [`Config::refuse_web_pages`]). Pure, unit tested.
+pub(crate) fn web_page_mismatch(content_type: Option<&str>, name: &str) -> Option<String> {
+    let mime = content_type?
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if mime != "text/html" && mime != "application/xhtml+xml" {
+        return None;
+    }
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(
+        ext.as_str(),
+        "htm" | "html" | "xhtml" | "mht" | "mhtml" | "shtml"
+    ) {
+        return None;
+    }
+    Some(mime)
 }
 
 struct Net<'a> {
@@ -774,6 +800,7 @@ impl Net<'_> {
         }
         let final_url = resp.url().clone();
         let cd = http::header_str(resp.headers(), "content-disposition");
+        let ct = http::header_str(resp.headers(), "content-type");
         let etag = http::header_str(resp.headers(), "etag").and_then(|v| strong_etag(&v));
         // Last-Modified alone is weak unless the server's Date is >= LM + 1 s (RFC 9110 8.8.2.2);
         // a weak one is dropped here, so it is never stored, never sent in If-Range, and a
@@ -806,6 +833,7 @@ impl Net<'_> {
                     last_modified: lm,
                     final_url,
                     content_disposition: cd,
+                    content_type: ct.clone(),
                 })
             }
             StatusCode::OK => {
@@ -819,6 +847,7 @@ impl Net<'_> {
                     last_modified: lm,
                     final_url,
                     content_disposition: cd,
+                    content_type: ct.clone(),
                 })
             }
             s => Err(Error::Status {
@@ -1511,6 +1540,12 @@ async fn download_inner(
                 filename::choose_name(probe.content_disposition.as_deref(), &probe.final_url)
             }
         };
+        if files.is_none() && cfg.refuse_web_pages {
+            // before any file exists: a refused page leaves nothing on disk
+            if let Some(mime) = web_page_mismatch(probe.content_type.as_deref(), &name) {
+                return Err(Error::WebPage(mime));
+            }
+        }
         if files.is_none() {
             // paths the OS cannot open are refused/shortened HERE, not discovered later as an
             // obscure "path not found" from a rename (Windows MAX_PATH, CI run 43576537725)
@@ -2067,6 +2102,39 @@ async fn resume_inner(
             .await
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod web_page_tests {
+    #[test]
+    fn web_pages_are_told_apart_from_files_and_page_names() {
+        use super::web_page_mismatch as m;
+        assert_eq!(
+            m(Some("text/html; charset=UTF-8"), "watch").as_deref(),
+            Some("text/html")
+        );
+        assert_eq!(
+            m(Some(" Text/HTML "), "clip.mp4").as_deref(),
+            Some("text/html")
+        );
+        assert_eq!(
+            m(Some("application/xhtml+xml"), "x").as_deref(),
+            Some("application/xhtml+xml")
+        );
+        for name in ["a.html", "A.HTM", "b.xhtml", "c.mhtml", "d.mht", "e.shtml"] {
+            assert_eq!(m(Some("text/html"), name), None, "{name}");
+        }
+        for ct in [
+            None,
+            Some(""),
+            Some("application/octet-stream"),
+            Some("text/plain"),
+            Some("video/mp4"),
+            Some("text/htmlx"),
+        ] {
+            assert_eq!(m(ct, "watch"), None, "{ct:?}");
+        }
     }
 }
 

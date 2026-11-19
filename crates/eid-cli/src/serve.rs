@@ -96,6 +96,9 @@ pub fn config_for(a: &ServeArgs) -> Config {
     cfg.connections = a.connections.unwrap_or(cfg.connections);
     cfg.job_limit_bps = a.limit_bps;
     cfg.compute_sha256 = true;
+    // v0.2: a link that answers with a web page (a YouTube "watch" page...) is refused with a
+    // clear message instead of saving the page as a file
+    cfg.refuse_web_pages = true;
     if let Some(v) = a.ramp_ms {
         cfg.ramp_interval = Duration::from_millis(v);
     }
@@ -226,6 +229,19 @@ pub fn handler_with_video(
             subdir,
             file_name,
         } => {
+            // v0.2: a YouTube page is a VIDEO download (best quality, lower if missing), never a
+            // file: the file engine would save the page itself (owner's Windows test)
+            if let Some(page) = eid_engine::links::video_page(&url) {
+                let v = video.as_ref().ok_or(
+                    "this is a video page: use the video download (Eid Download's \"Video\")",
+                )?;
+                let kind = match page {
+                    eid_engine::links::VideoPage::Video => Kind::Video,
+                    eid_engine::links::VideoPage::Playlist => Kind::Playlist,
+                };
+                let job = v.add_with(kind, &url, "best", "lower", None, None)?;
+                return Ok(json!({"job": job, "routed": "video"}));
+            }
             let id = sched
                 .add_item(&queue, &url, subdir.as_deref(), file_name.as_deref(), None)
                 .map_err(|e| urlsafe::redact_text(&e.to_string()))?;
@@ -292,7 +308,12 @@ async fn forward(a: &ServeArgs) -> Result<i32, String> {
             },
         )
         .await?;
-        println!("added #{} (handed to the running instance)", r["id"]);
+        match r.get("job") {
+            Some(job) => {
+                println!("video page: added as video job #{job} (handed to the running instance)")
+            }
+            None => println!("added #{} (handed to the running instance)", r["id"]),
+        }
     }
     Ok(0)
 }

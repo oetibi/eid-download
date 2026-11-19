@@ -114,4 +114,56 @@ async fn ipc_probe_and_add_video_through_eid_serve() {
         cfg.join("eid-download").join("video-jobs.json")
     };
     assert!(jobs_file.is_file(), "{}", jobs_file.display());
+
+    // v0.2 (owner's Windows test): a YouTube page handed over as a normal "add" becomes a
+    // VIDEO job; the file queue never sees it (it used to save the page as a file `watch`)
+    for (page, kind) in [
+        ("https://www.youtube.com/watch?v=abc123", "video"),
+        ("https://youtu.be/abc123", "video"),
+        ("https://www.youtube.com/playlist?list=PL1", "playlist"),
+    ] {
+        let mut cl = Client::connect(&ep).await.unwrap();
+        let r = cl
+            .call(Command::Add {
+                url: page.into(),
+                subdir: None,
+                file_name: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(r["routed"], "video", "{page}: {r}");
+        assert!(
+            r["job"].as_u64().is_some() && r.get("id").is_none(),
+            "{page}: {r}"
+        );
+        let jobs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&jobs_file).unwrap()).unwrap();
+        let j = jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["job"] == r["job"])
+            .unwrap_or_else(|| panic!("{page}: job not saved: {jobs}"));
+        assert_eq!(
+            (j["url"].as_str(), j["kind"].as_str()),
+            (Some(page), Some(kind)),
+            "{j}"
+        );
+    }
+    let l = cl.call(Command::List {}).await.unwrap();
+    assert!(
+        !l.to_string().contains("youtu"),
+        "a video page reached the file queue: {l}"
+    );
+    // a plain file link still goes to the file queue
+    let f = format!("{}/yt-dlp.exe", e.srv.base_url());
+    let r = cl
+        .call(Command::Add {
+            url: f,
+            subdir: None,
+            file_name: None,
+        })
+        .await
+        .unwrap();
+    assert!(r["id"].as_u64().is_some(), "{r}");
 }

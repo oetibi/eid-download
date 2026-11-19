@@ -61,6 +61,12 @@ pub struct Config {
     /// When set, a response whose total length is unknown or larger than this is refused
     /// before any byte is written (P4 tool downloads: the manifest knows the size).
     pub max_total_bytes: Option<u64>,
+    /// v0.2: refuse a response that is a web page (`text/html`, `application/xhtml+xml`) when
+    /// the file name does not end in `.htm`/`.html`/`.xhtml`/`.mht`/`.mhtml`
+    /// ([`crate::Error::WebPage`]), before anything is written. On in the desktop app and
+    /// `eid serve` (a link to a page is almost never the file the user wanted); off by default,
+    /// so `eid get` still saves exactly what it is asked to.
+    pub refuse_web_pages: bool,
 }
 
 impl Default for Config {
@@ -92,6 +98,7 @@ impl Default for Config {
             max_path_units: eid_platform::MAX_PATH_UNITS,
             allowed_hosts: None,
             max_total_bytes: None,
+            refuse_web_pages: false,
         }
     }
 }

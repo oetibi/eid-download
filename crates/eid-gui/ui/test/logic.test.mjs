@@ -1,7 +1,7 @@
 // Unit tests of the window's pure logic (node --test, no browser).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeList, categoryOf, inView, buildView, clickSelect, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, pollDelay, segmentView, matchesQuery, normalizeCols, gridTemplate, moveCol, COLUMNS, normalizeToolbar, linksFromText, finishedNow } from "../logic.js";
+import { mergeList, categoryOf, inView, buildView, clickSelect, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, pollDelay, segmentView, matchesQuery, normalizeCols, gridTemplate, moveCol, COLUMNS, normalizeToolbar, linksFromText, finishedNow, videoPage } from "../logic.js";
 
 const it = (id, o = {}) => ({ id, status: "pending", name: `f${id}.zip`, url: "", folder: "D", attempts: 0, error_kind: null, error: null, rate: null, ...o });
 
@@ -118,4 +118,21 @@ test("notices: only items that changed to done or failed, never on the first lis
   const r = finishedNow(s, { items: [it(1, { status: "done" }), it(2, { status: "done" }), it(3, { status: "failed" }), it(4, { status: "done" })] });
   assert.deepEqual(r.map((x) => [x.id, x.status]), [[1, "done"], [3, "failed"]]);
   assert.deepEqual(finishedNow(new Map(), { items: [it(1, { status: "done" })] }), []);
+});
+
+test("video pages: the same rule as eid_engine::links::video_page", () => {
+  for (const [l, want] of [
+    ["https://www.youtube.com/watch?v=dQw4w9WgXcQ", "video"], ["http://youtube.com/watch?v=abc&list=PL1&t=10s", "video"],
+    ["https://m.youtube.com/watch?v=abc", "video"], ["https://music.youtube.com/watch?v=abc", "video"],
+    ["https://WWW.YOUTUBE.COM./watch?v=abc", "video"], ["https://youtu.be/abc?si=x", "video"],
+    ["https://www.youtube.com/shorts/abc", "video"], ["https://www.youtube.com/live/abc", "video"],
+    ["https://www.youtube-nocookie.com/embed/abc", "video"], ["https://www.youtube.com/playlist?list=PL123", "playlist"],
+    ["  https://www.youtube.com/watch?v=abc  ", "video"],
+    ["https://www.youtube.com/", null], ["https://www.youtube.com/watch", null], ["https://www.youtube.com/watch?v=", null],
+    ["https://www.youtube.com/playlist", null], ["https://www.youtube.com/@channel", null], ["https://www.youtube.com/shorts/", null],
+    ["https://youtu.be/", null], ["https://youtu.be/a/b", null], ["https://notyoutube.com/watch?v=abc", null],
+    ["https://youtube.com.evil.example/watch?v=abc", null], ["https://evil.example/www.youtube.com/watch?v=abc", null],
+    ["https://u:p@www.youtube.com/watch?v=abc", null], ["ftp://www.youtube.com/watch?v=abc", null],
+    ["javascript:alert(1)//youtube.com/watch?v=a", null], ["https://example.com/video.mp4", null], ["not a link", null], [null, null],
+  ]) assert.equal(videoPage(l), want, String(l));
 });

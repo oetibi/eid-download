@@ -4,6 +4,8 @@
 // revisions. URL parameters: `?n=1000` (synthetic list size), `&running=50` (how many of them
 // transfer), `&old=1` (answer `list` in the v0.0.1 shape, without revisions).
 // A mock is not proof that the real backend or YouTube works.
+import { videoPage } from "./logic.js";
+
 export function mockApi(params = new URLSearchParams()) {
   const DIR = "C:\\Users\\me\\Downloads";
   const oldShape = params.get("old") === "1";
@@ -147,6 +149,7 @@ export function mockApi(params = new URLSearchParams()) {
       const added = [], refused = [];
       for (const l of ls) {
         if (!/^https?:\/\/[^/]+/i.test(l)) { refused.push([l, "bad_url"]); continue; }
+        if (videoPage(l)) { refused.push([l, "video_page"]); continue; }
         const it = mk({ name: name || decodeURIComponent(l.split("/").pop() || "") || l, url: l, folder: folder || DIR });
         touch(it);
         added.push(it.id);

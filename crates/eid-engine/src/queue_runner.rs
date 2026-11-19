@@ -83,6 +83,7 @@ pub fn is_retryable(e: &Error) -> bool {
         | Error::InvalidInput(_)
         | Error::BadState(_)
         | Error::Checksum { .. }
+        | Error::WebPage(_)
         | Error::Cancelled => false,
     }
 }

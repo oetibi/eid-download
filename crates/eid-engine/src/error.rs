@@ -36,6 +36,11 @@ pub enum Error {
     Busy,
     #[error("cancelled")]
     Cancelled,
+    /// v0.2: the link answered with a web page (`text/html`) while a file was expected, e.g. a
+    /// YouTube "watch" page added as a normal download (owner's Windows test: a 1.4 MB file
+    /// named `watch`). Only with [`crate::Config::refuse_web_pages`]; nothing is written.
+    #[error("this link opens a web page, not a file (the server sent {0}); for a video page use \"Video\"; to save the page itself, give it a name ending in .html")]
+    WebPage(String),
 }
 
 impl Error {

@@ -470,6 +470,40 @@ try {
     assert((await ev("document.querySelector('#toast').textContent")).includes(it.name), "names the download");
   });
 
+  await check("add dialog: a YouTube page opens the video window (never a file); mixed links name it", async () => {
+    await open("");
+    const before = await ev("window.__eid.store.size");
+    await ev("document.querySelector('#btn-add').click()");
+    await until("document.querySelector('#dlg-add').open", 3000, "add dialog");
+    await ev("document.querySelector('#in-links').value = 'https://www.youtube.com/watch?v=abc123'; document.querySelector('#btn-start').click()");
+    await until("document.querySelector('#dlg-video').open && !document.querySelector('#dlg-add').open", 3000, "video dialog instead");
+    assert((await ev("document.querySelector('#in-vurl').value")) === "https://www.youtube.com/watch?v=abc123", "link carried over");
+    assert(/فيديو/.test(await ev("document.querySelector('#toast').textContent")), "says why");
+    if (arg("--shots")) await shot("youtube-routed-ar.png");
+    await ev("document.querySelector('#dlg-video').close()");
+    await sleep(300);
+    assert((await ev("window.__eid.store.size")) === before, "no file download was added");
+    // a file link next to it is added; then the video window opens for the page
+    await ev("document.querySelector('#btn-add').click()");
+    await until("document.querySelector('#dlg-add').open", 3000, "add dialog 2");
+    await ev("document.querySelector('#in-links').value = 'https://example.com/a.zip\\nhttps://youtu.be/xyz'; document.querySelector('#btn-start').click()");
+    await until("document.querySelector('#dlg-video').open && document.querySelector('#in-vurl').value === 'https://youtu.be/xyz'", 3000, "video dialog 2");
+    await until(`window.__eid.store.size === ${before} + 1`, 3000, "the file link was added");
+    await ev("document.querySelector('#dlg-video').close()");
+    // with a bad link too: the dialog stays and names each problem
+    await ev("document.querySelector('#btn-add').click()");
+    await until("document.querySelector('#dlg-add').open", 3000, "add dialog 3");
+    await ev("document.querySelector('#in-links').value = 'ftp://h/x https://www.youtube.com/shorts/q1'; document.querySelector('#btn-start').click()");
+    await until("!document.querySelector('#add-error').hidden", 3000, "errors shown");
+    const err = await ev("document.querySelector('#add-error').textContent");
+    assert(/صفحة فيديو/.test(err) && /غير صالح/.test(err) && !(await ev("document.querySelector('#dlg-video').open")), err);
+    await ev("document.querySelector('#dlg-add').close()");
+    // Ctrl+V outside a field with a YouTube link: the video window
+    await ev("document.dispatchEvent(Object.assign(new Event('paste', { bubbles: true, cancelable: true }), { clipboardData: { getData: () => 'https://m.youtube.com/watch?v=p1' } }))");
+    await until("document.querySelector('#dlg-video').open", 3000, "paste opens video");
+    await ev("document.querySelector('#dlg-video').close()");
+  });
+
   await check("add dialog: queue and 'folder by type'; import/export from the menu; Desktop settings tab", async () => {
     await open("");
     await ev("document.querySelector('#btn-add').click()");

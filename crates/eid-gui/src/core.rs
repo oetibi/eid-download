@@ -526,9 +526,7 @@ pub fn clipboard_link(text: &str) -> Option<(String, &'static str)> {
     {
         return None;
     }
-    let host = u.host_str()?.to_ascii_lowercase();
-    let yt = host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com");
-    if yt && (u.path() == "/watch" || u.path() == "/playlist" || host == "youtu.be") {
+    if eid_engine::links::video_page(t).is_some() {
         return Some((u.to_string(), "video"));
     }
     let last = u.path_segments()?.next_back()?.to_string();
@@ -548,6 +546,8 @@ pub fn error_kind(msg: &str) -> &'static str {
         && (has("os error 5)") || has("access is denied") || has("permission denied"))
     {
         "disk_denied"
+    } else if has("opens a web page") {
+        "web_page"
     } else if has("i/o error") {
         "disk"
     } else if has("http 404") || has("http 410") {
@@ -735,6 +735,11 @@ pub fn add_links_with(
     };
     let mut r = AddReport::default();
     for l in links {
+        // v0.2: a video page is never a file (the window opens the video dialog for it)
+        if eid_engine::links::video_page(&l).is_some() {
+            r.refused.push((urlsafe::redact_text(&l), "video_page"));
+            continue;
+        }
         let sub = category_subdir(&l, name, category)?;
         match sched.add_item(&queue, &l, sub.as_deref(), name, None) {
             Ok(id) => r.added.push(id),
@@ -1116,6 +1121,36 @@ mod tests {
         let app = with_show(mk(), Arc::new(Notify::new()));
         assert!(app(Command::Show {}).is_ok());
         assert_eq!(app(Command::Ping {}).unwrap()["app"], "gui");
+    }
+
+    /// v0.2 (owner's Windows test): a YouTube page in the add dialog is never queued as a
+    /// file; it comes back as `video_page` (the window opens the video dialog for it) while the
+    /// file links next to it are added.
+    #[test]
+    fn video_pages_are_not_queued_as_files() {
+        let d = tempfile::tempdir().unwrap();
+        let s = sched(d.path());
+        let r = add_links(
+            &s,
+            "https://www.youtube.com/watch?v=abc\nhttp://h/a.zip\nhttps://youtu.be/xyz\nhttps://www.youtube.com/playlist?list=PL1",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.added.len(), 1, "{r:?}");
+        assert_eq!(r.refused.len(), 3, "{r:?}");
+        assert!(r.refused.iter().all(|(_, k)| *k == "video_page"), "{r:?}");
+        let urls: Vec<String> = s
+            .snapshot()
+            .queues
+            .iter()
+            .flat_map(|q| q.items.iter().map(|i| i.url.clone()))
+            .collect();
+        assert_eq!(urls, ["http://h/a.zip"]);
+        assert_eq!(
+            error_kind(&eid_engine::Error::WebPage("text/html".into()).to_string()),
+            "web_page"
+        );
     }
 
     #[test]

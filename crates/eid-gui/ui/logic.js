@@ -285,6 +285,27 @@ export function normalizeToolbar(saved) {
 }
 
 /**
+ * v0.2: "video" | "playlist" for a YouTube video or playlist PAGE, otherwise null. The same rule
+ * as `eid_engine::links::video_page` (the backend refuses such a link as a file anyway); the
+ * window uses it to open the video dialog instead of saving the page as a file.
+ */
+export function videoPage(link) {
+  let u;
+  try { u = new URL(String(link ?? "").trim()); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol) || u.username || u.password) return null;
+  const host = u.hostname.toLowerCase().replace(/\.$/, "");
+  const seg = u.pathname.split("/").filter(Boolean);
+  const has = (k) => !!u.searchParams.get(k);
+  if (host === "youtu.be") return seg.length === 1 ? "video" : null;
+  const yt = ["youtube.com", "youtube-nocookie.com"].some((d) => ["", "www.", "m.", "music."].some((p) => host === p + d));
+  if (!yt) return null;
+  if (seg.length === 1 && seg[0] === "watch" && has("v")) return "video";
+  if (seg.length === 1 && seg[0] === "playlist" && has("list")) return "playlist";
+  if (seg.length === 2 && ["shorts", "live", "embed", "v"].includes(seg[0])) return "video";
+  return null;
+}
+
+/**
  * Links in dropped or pasted text (text/uri-list or plain text): http(s) only, without
  * duplicates, at most `max`. Comment lines of a uri-list (#...) are skipped.
  */
