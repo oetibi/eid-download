@@ -154,11 +154,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - uses: taiki-e/install-action@v2
         with: { tool: tauri-cli@2.12.6 }   # pinned, = the tauri crate version in Cargo.lock; prebuilt release binary
-      - name: Build the NSIS installer (tag builds refuse placeholder extension IDs)
+      - name: Build the NSIS installer (release mode on every build, refuses placeholder extension IDs)
         shell: pwsh
         run: |
           cargo tauri --version
-          if ($env:GITHUB_REF -like 'refs/tags/v*') { scripts\windows\build_installer.ps1 -Release } else { scripts\windows\build_installer.ps1 }
+          scripts\windows\build_installer.ps1 -Release   # every build: the release path is the one tested (refuses placeholder ids)
       - name: Verify the installer (silent install, files, HKCU Native Messaging keys, app start, silent uninstall, cleanup)
         shell: pwsh
         run: |
@@ -214,47 +214,106 @@ jobs:
   # Release kind: a PRE-release by default. It is published as a full (latest) release only
   # when docs/releases/<tag>.md contains the exact line `release-kind: final` (the owner's
   # decision, made in the reviewed notes file; the line itself is not shown in the notes).
+  #
+  # DRY RUN: on every pull request, push to main and manual dispatch this job runs EVERY step
+  # with the tag the next release would get (v<workspace version>) except `gh release create`;
+  # it then checks that this tag is not taken yet and uploads what it would publish as the
+  # artifact `release-dry-run`. A version is tagged only after a green dry run, so a release
+  # step can no longer fail for the first time on a tag (v0.1.0 and v0.1.1 did).
   release:
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     needs: windows
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Release tag (the pushed tag, or the one the next release would get)
+        id: tag
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          test -n "$ver"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"; echo "dry=false" >> "$GITHUB_OUTPUT"
+            test "$GITHUB_REF_NAME" = "v$ver" || { echo "tag $GITHUB_REF_NAME != v$ver"; exit 1; }
+          else
+            echo "tag=v$ver" >> "$GITHUB_OUTPUT"; echo "dry=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "release tag: v$ver (dry run: $([[ "$GITHUB_REF" == refs/tags/v* ]] && echo no || echo yes))"
       - uses: actions/download-artifact@v4
         with: { name: eid-windows-x64, path: rel }
       - name: Check the artifact against its SHA256SUMS
         working-directory: rel
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           cp dist/EidDownload-windows-x64.zip dist/EidDownload-*-windows-x64-setup.exe target/release/EidDownload.exe target/release/eid.exe target/release/eid-native-host.exe .
           # SHA256SUMS.txt is written on Windows (CRLF): normalise to LF so grep/sha256sum and the notes read it exactly
           sed -i 's/\r$//' SHA256SUMS.txt
           test "$(ls EidDownload-*-windows-x64-setup.exe | wc -l)" -eq 1
+          test -f "EidDownload-${TAG#v}-windows-x64-setup.exe" || { echo "installer is not EidDownload-${TAG#v}-windows-x64-setup.exe"; ls; exit 1; }
           grep -q 'windows-x64-setup.exe$' SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
       - name: Browser extension packages (store + sideload), added to SHA256SUMS
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           (cd extension && node --test)
           node scripts/ext/package.mjs --out ext-pkg
+          for t in chrome firefox chrome-sideload; do test -f "ext-pkg/eid-download-$t-${TAG#v}.zip" || { echo "missing eid-download-$t-${TAG#v}.zip"; ls ext-pkg; exit 1; }; done
           cp ext-pkg/*.zip rel/
           cat ext-pkg/SHA256SUMS.txt >> rel/SHA256SUMS.txt
           (cd rel && sha256sum -c SHA256SUMS.txt)
-      - name: Publish the GitHub release
+      - name: Release notes and kind
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           notes="docs/releases/$TAG.md"
           test -f "$notes" || { echo "missing $notes"; exit 1; }
           grep -q 'لم يُختبر يدوياً' "$notes" || { echo "$notes has no 'not tested by hand' section"; exit 1; }
           if grep -q '<<FILL>>' "$notes"; then echo "$notes still has <<FILL>> placeholders"; exit 1; fi
-          kind=(--prerelease)
-          if grep -qx 'release-kind: final' "$notes"; then kind=(--latest); fi
-          echo "release kind: ${kind[*]}"
+          if grep -qx 'release-kind: final' "$notes"; then echo "--latest" > kind.txt; else echo "--prerelease" > kind.txt; fi
+          echo "release kind: $(cat kind.txt)"
           { grep -vx 'release-kind: final' "$notes"; printf '\n## SHA-256\n```\n'; cat rel/SHA256SUMS.txt; printf '```\n'; } > notes.md
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${kind[@]}" --verify-tag \
+          ls rel/EidDownload-windows-x64.zip rel/EidDownload-*-windows-x64-setup.exe rel/eid-download-*.zip rel/SHA256SUMS.txt
+      - name: Dry run - the tag is still free, show what would be published
+        if: ${{ steps.tag.outputs.dry == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1 > /dev/null   # the token can read releases
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
+            echo "::warning::tag $TAG already exists: bump the workspace version before the next release"
+          fi
+          echo "WOULD RUN: gh release create $TAG --repo $GITHUB_REPOSITORY $(cat kind.txt) --verify-tag --title \"Eid Download $TAG (Windows x64)\" --notes-file notes.md" rel/EidDownload-windows-x64.zip rel/EidDownload-*-windows-x64-setup.exe rel/eid-download-*.zip rel/SHA256SUMS.txt
+          mkdir -p dry && cp notes.md kind.txt rel/SHA256SUMS.txt dry/
+      - uses: actions/upload-artifact@v4
+        if: ${{ steps.tag.outputs.dry == 'true' }}
+        with:
+          name: release-dry-run
+          retention-days: 14
+          path: dry/
+      - name: Publish the GitHub release
+        if: ${{ steps.tag.outputs.dry == 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "$(cat kind.txt)" --verify-tag \
             --title "Eid Download $TAG (Windows x64)" --notes-file notes.md \
             rel/EidDownload-windows-x64.zip rel/EidDownload-*-windows-x64-setup.exe rel/eid-download-*.zip rel/SHA256SUMS.txt
+      - name: Verify the published release (assets downloaded back, SHA-256, kind)
+        if: ${{ steps.tag.outputs.dry == 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          mkdir back && cd back
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY"
+          sha256sum -c --ignore-missing SHA256SUMS.txt
+          test "$(ls | wc -l)" -eq "$(( $(wc -l < SHA256SUMS.txt) - 3 + 1 ))"   # every zip/installer + SHA256SUMS (the 3 bare .exe are not assets)
+          pre=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease -q .isPrerelease)
+          if [ "$(cat ../kind.txt)" = "--prerelease" ]; then test "$pre" = "true"; fi
+          echo "published $TAG, prerelease=$pre, $(ls | wc -l) assets verified"
