@@ -3,8 +3,8 @@
 //! window calls.
 
 use crate::core::{self, AddReport, ItemView, Progress, MAIN_QUEUE};
-use eid_cli::media_jobs::VideoJobs;
 use crate::listdiff::ListCache;
+use eid_cli::media_jobs::VideoJobs;
 use eid_cli::remote::ConnArgs;
 use eid_cli::serve::{self, ServeArgs, APP_GUI};
 use eid_cli::video_setup::VideoSetup;
