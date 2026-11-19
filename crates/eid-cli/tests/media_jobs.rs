@@ -26,9 +26,35 @@ fn job(v: &VideoJobs, id: u64) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// The step the test is in, so a hang fails with its place instead of running until the CI
+/// job's timeout (a Windows run once sat 25 minutes in this test with no output).
+static PHASE: std::sync::Mutex<&str> = std::sync::Mutex::new("start");
+fn phase(p: &'static str) {
+    *PHASE.lock().unwrap_or_else(|e| e.into_inner()) = p;
+}
+
 // one test: the status functions read this process's environment (the per-user folders)
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn video_jobs_end_to_end_with_the_fake_tool() {
+#[test]
+fn video_jobs_end_to_end_with_the_fake_tool() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let r = rt.block_on(async { tokio::time::timeout(Duration::from_secs(300), body()).await });
+    let at = *PHASE.lock().unwrap_or_else(|e| e.into_inner());
+    // pipe reads of child processes run on blocking threads (Windows): never wait on them forever
+    let t0 = Instant::now();
+    rt.shutdown_timeout(Duration::from_secs(20));
+    assert!(r.is_ok(), "the test hung for 300 s in phase: {at}");
+    assert!(
+        t0.elapsed() < Duration::from_secs(20),
+        "runtime shutdown waited {:?}: a child pipe stayed open after the test",
+        t0.elapsed()
+    );
+}
+
+async fn body() {
     let e = Env::new().await;
     for (k, v) in e.envs() {
         // the only test in this binary; set before anything reads the environment
@@ -49,6 +75,7 @@ async fn video_jobs_end_to_end_with_the_fake_tool() {
     let v = VideoJobs::start(cfg.clone());
     let setup = VideoSetup::new(v.clone());
 
+    phase("consent");
     // nothing before consent; probe says TOOLS_MISSING and downloads nothing
     let st = setup.status();
     assert_eq!(st["installed"], false);
@@ -84,6 +111,7 @@ async fn video_jobs_end_to_end_with_the_fake_tool() {
     v.remove(early).unwrap();
     assert!(setup.consent_text("ar").unwrap().len() > 100);
 
+    phase("install");
     setup.install(true).unwrap();
     wait_for("tools", 60, || {
         let s = setup.status();
@@ -92,6 +120,7 @@ async fn video_jobs_end_to_end_with_the_fake_tool() {
     .await;
     assert_eq!(setup.status()["consent"], true);
 
+    phase("playlist");
     // probe a playlist, then download items 1 and 3 of it
     let list = e.root.path().join("list.json");
     std::fs::write(
@@ -136,6 +165,7 @@ async fn video_jobs_end_to_end_with_the_fake_tool() {
     assert!(folder.join("03 - Gamma.mp4").is_file());
     assert!(!folder.join("02 - Beta.mp4").exists());
 
+    phase("pause/resume");
     // a long-running job: pause stops the child, resume starts it again, remove stops it
     let slow = e.url("sleep/60", "");
     let id2 = v.add(Kind::Video, &slow, "best", None, None).unwrap();
@@ -152,12 +182,15 @@ async fn video_jobs_end_to_end_with_the_fake_tool() {
         "pause took {:?}",
         t0.elapsed()
     );
+    phase("remove");
     v.remove(id2).unwrap();
     assert!(job(&v, id2).is_null());
 
+    phase("restart");
     // the list survives a restart; nothing restarts by itself
     let id3 = v.add(Kind::Video, &slow, "720p", None, None).unwrap();
     wait_for("running 3", 30, || job(&v, id3)["state"] == "running").await;
+    phase("shutdown");
     v.shutdown().await;
     drop(v);
     let saved: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
@@ -166,8 +199,10 @@ async fn video_jobs_end_to_end_with_the_fake_tool() {
         .unwrap()
         .iter()
         .any(|j| j["job"] == id));
+    phase("reload");
     let v2 = VideoJobs::start(cfg);
     assert_eq!(job(&v2, id)["state"], "done");
     assert_eq!(job(&v2, id3)["state"], "paused");
     v2.remove(id3).unwrap();
+    phase("done");
 }
