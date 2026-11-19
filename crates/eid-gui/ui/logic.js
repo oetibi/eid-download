@@ -173,7 +173,8 @@ export function fmtClock(s) {
 /** Overall fraction 0..1 of a video job (bytes when known, otherwise finished items + item progress). */
 export function jobFraction(job) {
   if (job.state === "done") return 1;
-  if (job.total_bytes > 0 && job.bytes != null) return Math.min(1, job.bytes / job.total_bytes);
+  // bytes are those of the CURRENT item: a whole-job fraction only for a single video
+  if (job.kind !== "playlist" && job.total_bytes > 0 && job.bytes != null) return Math.min(1, job.bytes / job.total_bytes);
   const total = job.total_items || 0;
   if (!total) return 0;
   let sum = 0;

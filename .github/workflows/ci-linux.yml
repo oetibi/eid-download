@@ -75,3 +75,16 @@ jobs:
           node --test 2>&1 | tee "$RUNNER_TEMP/ui-tests.txt"
           test "${PIPESTATUS[0]}" -eq 0
           if grep -Eq '^(ℹ|#) tests 0$' "$RUNNER_TEMP/ui-tests.txt"; then echo "node found zero tests in crates/eid-gui/ui/"; exit 1; fi
+      - name: Desktop UI end-to-end in headless Chrome (Blink = WebView2's engine; mock backend)
+        run: |
+          google-chrome --version
+          node scripts/ui/ui_e2e.mjs --chrome google-chrome --json "$RUNNER_TEMP/ui-e2e.json"
+      - name: Browser extension end-to-end in headless Chrome (button over a real <video>)
+        run: node scripts/ext/ext_e2e.mjs --chrome google-chrome
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: ui-e2e
+          retention-days: 30
+          path: ${{ runner.temp }}/ui-e2e.json
+          if-no-files-found: ignore
