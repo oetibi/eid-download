@@ -1,9 +1,8 @@
 //! Incremental SHA-256 of a download's completed prefix, computed *during* the transfer.
 //!
 //! Finalization always needs the digest of the whole file (finalization record, review B2).
-//! Measured on a 1 GiB loopback download, re-reading the finished file for that digest took
-//! 0.78-1.05 s, longer than the transfer itself (docs/STATUS.md, "dev/perf-playlists-ui").
-//! Instead, a background task reads the bytes below the table's contiguous completed frontier
+//! Re-reading the finished file for it is the largest part of finalization on a big file
+//! (measured: docs/BENCHMARKS.md). Instead, a background task reads the bytes below the table's contiguous completed frontier
 //! (positional reads through the SAME verified handle the engine writes through) and feeds
 //! them to the digest, so finalization only hashes whatever tail is left.
 //!
@@ -154,9 +153,17 @@ impl HashTask {
     }
 
     /// Stop and wait for the in-flight slice. Never aborts the blocking read.
-    pub async fn join(self) -> Option<PrefixHash> {
+    pub async fn join(mut self) -> Option<PrefixHash> {
         self.stop.cancel();
-        self.handle.await.ok().flatten()
+        (&mut self.handle).await.ok().flatten()
+    }
+}
+
+impl Drop for HashTask {
+    /// A task that is dropped without `join` (its download future was dropped) must not keep
+    /// polling the table and holding the file handle for ever.
+    fn drop(&mut self) {
+        self.stop.cancel();
     }
 }
 
@@ -249,5 +256,22 @@ mod tests {
         let task = HashTask::start(Arc::new(f), table);
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(task.join().await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_task_stops_and_releases_the_file() {
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        let table = Arc::new(Mutex::new(Table::new(8 * 1024 * 1024)));
+        let task = HashTask::start(file.clone(), table);
+        assert_eq!(Arc::strong_count(&file), 2);
+        drop(task);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&file) > 1 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the detached hasher kept the file handle"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
