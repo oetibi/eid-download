@@ -1,0 +1,8 @@
+{
+  "_comment": "Browser extension IDs allowed to start the native host com.eid.download. Read by scripts/windows/native_host_manifests.py when the Windows installer is built (docs/INSTALLER.md). PLACEHOLDER VALUES: the extension IDs are not final yet. Set the real IDs and \"placeholder\": false before a release; a tag build refuses placeholder IDs. An empty list means that browser is not registered by the installer.",
+  "placeholder": true,
+  "host_name": "com.eid.download",
+  "chrome": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+  "edge": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+  "firefox": ["eid-download@placeholder.invalid"]
+}
