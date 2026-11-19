@@ -146,6 +146,9 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         }),
     };
     let power = Arc::new(crate::power::GuiPower::default());
+    power
+        .allowed
+        .store(settings.power_actions, Ordering::Relaxed);
     let power_view = Arc::new(Mutex::new(crate::power::PowerView::default()));
     let sched_cell = Arc::new(std::sync::OnceLock::new());
     let sched = Scheduler::open(
@@ -373,7 +376,14 @@ pub fn queues(st: State<'_, AppState>) -> Vec<core::QueueView> {
 pub fn queue_set(st: State<'_, AppState>, patch: core::QueuePatch) -> Result<(), String> {
     let (stop, start) = st
         .sched
-        .edit(|qs| core::apply_queue_patch(qs, &patch))
+        .edit(|qs| {
+            let allowed = st
+                .settings
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .power_actions;
+            core::apply_queue_patch(qs, &patch, allowed)
+        })
         .map_err(|e| e.to_string())?;
     // the main queue's simultaneous downloads is also the Settings value: keep them equal
     if patch.name == MAIN_QUEUE {
@@ -449,8 +459,22 @@ pub fn settings_set(
         gui_settings::save(f, &settings)?;
     }
     st.sched
-        .edit(|qs| settings.apply_to_queues(qs, MAIN_QUEUE))
+        .edit(|qs| {
+            settings.apply_to_queues(qs, MAIN_QUEUE)?;
+            // computer actions turned off: no queue may keep one
+            if !settings.power_actions {
+                for q in &mut qs.queues {
+                    if core::is_machine_action(q.after_done) {
+                        q.after_done = eid_engine::queue::PowerAction::None;
+                    }
+                }
+            }
+            Ok(())
+        })
         .map_err(|e| e.to_string())?;
+    st.power
+        .allowed
+        .store(settings.power_actions, Ordering::Relaxed);
     st.limiter.set_rate(settings.limit_bps());
     st.connections
         .store(settings.connections as usize, Ordering::Relaxed);

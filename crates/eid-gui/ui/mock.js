@@ -81,7 +81,7 @@ export function mockApi(params = new URLSearchParams()) {
   const jobs = [];
   let nextJob = 1;
   let toolsInstalled = params.get("notools") !== "1";
-  let engineSettings = { max_parallel: 3, connections: 8, speed_limit_kib: 0, schedule: null, tray: true, close_to_tray: false, clipboard: false };
+  let engineSettings = { max_parallel: 3, connections: 8, speed_limit_kib: 0, schedule: null, tray: true, close_to_tray: false, clipboard: false, power_actions: false };
   // events the Rust side would emit (tray menu, clipboard); tests trigger them
   const listeners = new Map();
   window.__eidMockEmit = (name, payload) => { for (const f of listeners.get(name) ?? []) f(payload); };
@@ -192,6 +192,7 @@ export function mockApi(params = new URLSearchParams()) {
       if (!q) throw "no_such_queue";
       if (patch.max_parallel != null && !(patch.max_parallel >= 1 && patch.max_parallel <= 8)) throw "invalid input: max_parallel";
       if (patch.after_done != null && !["none", "exit", "sleep", "hibernate", "shutdown"].includes(patch.after_done)) throw "invalid input: after_done";
+      if (["sleep", "hibernate", "shutdown"].includes(patch.after_done) && !engineSettings.power_actions) throw "power_actions_off";
       Object.assign(q, Object.fromEntries(Object.entries(patch).filter(([k, v]) => k !== "name" && v != null)));
     },
     item_limit: ({ id, limit_kib }) => {
@@ -203,7 +204,7 @@ export function mockApi(params = new URLSearchParams()) {
     cancel_countdown: () => { const had = !!power.countdown; power.countdown = null; if (had) { power.last = "cancelled"; for (const q of queues) q.after_done = "none"; } return had; },
     settings_get: () => ({ ...engineSettings }),
     settings_set: ({ settings: s }) => {
-      const keys = ["max_parallel", "connections", "speed_limit_kib", "schedule", "tray", "close_to_tray", "clipboard"];
+      const keys = ["max_parallel", "connections", "speed_limit_kib", "schedule", "tray", "close_to_tray", "clipboard", "power_actions"];
       if (Object.keys(s).some((k) => !keys.includes(k))) throw "invalid input: unknown field";
       if (!(s.max_parallel >= 1 && s.max_parallel <= 8)) throw "invalid input: max_parallel 1..8";
       if (!(s.connections >= 1 && s.connections <= 32)) throw "invalid input: connections 1..32";

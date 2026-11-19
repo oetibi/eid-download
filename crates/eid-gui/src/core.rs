@@ -338,6 +338,14 @@ pub fn power_from_name(s: &str) -> Result<PowerAction, String> {
     })
 }
 
+/// Sleep, hibernate and shut down act on the computer (off unless allowed in Settings).
+pub fn is_machine_action(a: PowerAction) -> bool {
+    matches!(
+        a,
+        PowerAction::Sleep | PowerAction::Hibernate | PowerAction::Shutdown
+    )
+}
+
 /// Every queue, main first, then in creation order.
 pub fn queues_view(qs: &QueueSet) -> Vec<QueueView> {
     let mut v: Vec<QueueView> = qs
@@ -386,6 +394,7 @@ pub struct QueuePatch {
 pub fn apply_queue_patch(
     qs: &mut QueueSet,
     p: &QueuePatch,
+    power_allowed: bool,
 ) -> Result<(Vec<u64>, Vec<u64>), String> {
     let max = eid_cli::gui_settings::MAX_PARALLEL;
     if let Some(n) = p.max_parallel {
@@ -394,6 +403,9 @@ pub fn apply_queue_patch(
         }
     }
     let after = p.after_done.as_deref().map(power_from_name).transpose()?;
+    if after.is_some_and(is_machine_action) && !power_allowed {
+        return Err("power_actions_off".into());
+    }
     let q = qs
         .queues
         .iter_mut()
@@ -1070,7 +1082,10 @@ mod tests {
             paused: Some(true),
             ..Default::default()
         };
-        assert_eq!(apply_queue_patch(&mut qs, &p).unwrap(), (vec![1], vec![]));
+        assert_eq!(
+            apply_queue_patch(&mut qs, &p, true).unwrap(),
+            (vec![1], vec![])
+        );
         assert!(qs.queues[0].paused);
         // start: its paused items are reported to be resumed
         let p = QueuePatch {
@@ -1079,7 +1094,10 @@ mod tests {
             max_parallel: Some(4),
             after_done: Some("shutdown".into()),
         };
-        assert_eq!(apply_queue_patch(&mut qs, &p).unwrap(), (vec![], vec![2]));
+        assert_eq!(
+            apply_queue_patch(&mut qs, &p, true).unwrap(),
+            (vec![], vec![2])
+        );
         assert_eq!(
             (qs.queues[0].max_parallel, qs.queues[0].after_done),
             (4, PowerAction::Shutdown)
@@ -1110,11 +1128,33 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            assert!(apply_queue_patch(&mut qs, &bad).is_err(), "{bad:?}");
+            assert!(apply_queue_patch(&mut qs, &bad, true).is_err(), "{bad:?}");
             assert_eq!(qs, before);
         }
         for n in AFTER_DONE {
             assert_eq!(power_name(power_from_name(n).unwrap()), *n);
+        }
+        // owner decision: computer actions are refused unless allowed in Settings; quitting is fine
+        let before = qs.clone();
+        for a in ["sleep", "hibernate", "shutdown"] {
+            let p = QueuePatch {
+                name: "folder-1".into(),
+                after_done: Some(a.into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                apply_queue_patch(&mut qs, &p, false).unwrap_err(),
+                "power_actions_off"
+            );
+            assert_eq!(qs, before);
+        }
+        for a in ["none", "exit"] {
+            let p = QueuePatch {
+                name: "folder-1".into(),
+                after_done: Some(a.into()),
+                ..Default::default()
+            };
+            assert!(apply_queue_patch(&mut qs, &p, false).is_ok(), "{a}");
         }
     }
 

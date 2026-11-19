@@ -404,6 +404,17 @@ try {
     await ev("document.querySelector('#menu-downloads [data-cmd=queues]').click()");
     await until("document.querySelector('#dlg-queues').open && document.querySelectorAll('.q-row').length === 2", 3000, "two queues");
     assert(/الرئيسية/.test(await ev("document.querySelector('.q-row .q-name').textContent")), "main queue first, named");
+    // off by default: computer actions cannot be chosen
+    assert(await ev("document.querySelector('.q-row .q-after option[value=shutdown]').disabled"), "shutdown offered while turned off");
+    await ev("document.querySelector('#dlg-queues').close()");
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await until("document.querySelector('#dlg-settings').open", 2000, "settings");
+    assert(!(await ev("document.querySelector('#set-power').checked")), "power actions must be off by default");
+    await ev("document.querySelector('#set-power').click()");
+    await sleep(200);
+    await ev("document.querySelector('#dlg-settings').close()");
+    await ev("document.querySelector('#menu-downloads [data-cmd=queues]').click()");
+    await until("document.querySelector('#dlg-queues').open && document.querySelectorAll('.q-row').length === 2 && !document.querySelector('.q-row .q-after option[value=shutdown]').disabled", 3000, "shutdown allowed after turning it on");
     await ev("(() => { const r = document.querySelectorAll('.q-row')[1]; r.querySelector('.q-par').value = '4'; r.querySelector('.q-after').value = 'shutdown'; r.querySelector('.q-save').click(); })()");
     await until("document.querySelectorAll('.q-row')[1]?.querySelector('.q-after').value === 'shutdown' && document.querySelectorAll('.q-row')[1].querySelector('.q-par').value === '4'", 3000, "saved and read back");
     await ev("document.querySelectorAll('.q-row')[1].querySelector('.q-toggle').click()");

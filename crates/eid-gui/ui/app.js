@@ -1538,14 +1538,15 @@ async function fillDesktopFields() {
   $("#set-close-tray").checked = !!s.close_to_tray;
   $("#set-close-tray").disabled = s.tray === false;
   $("#set-clipboard").checked = !!s.clipboard;
+  $("#set-power").checked = !!s.power_actions;
   $("#set-desktop-error").hidden = true;
 }
-for (const id of ["#set-tray", "#set-close-tray", "#set-clipboard"]) {
+for (const id of ["#set-tray", "#set-close-tray", "#set-clipboard", "#set-power"]) {
   $(id).addEventListener("change", async () => {
     const base = engine ?? (await loadEngine());
     if (!base) return;
     const tray = $("#set-tray").checked;
-    const ok = await saveEngine({ ...base, tray, close_to_tray: tray && $("#set-close-tray").checked, clipboard: $("#set-clipboard").checked }, $("#set-desktop-error"));
+    const ok = await saveEngine({ ...base, tray, close_to_tray: tray && $("#set-close-tray").checked, clipboard: $("#set-clipboard").checked, power_actions: $("#set-power").checked }, $("#set-desktop-error"));
     if (!ok) await fillDesktopFields();
     $("#set-close-tray").disabled = !tray;
   });
@@ -1609,6 +1610,7 @@ async function openQueues() {
 async function fillQueues() {
   let list;
   try { list = await api.call("queues"); } catch (e) { failure(e); return; }
+  const machineOk = !!(engine ?? (await loadEngine()))?.power_actions;
   $("#q-error").hidden = true;
   const tpl = $("#q-row");
   $("#q-list").replaceChildren(...list.map((q) => {
@@ -1619,6 +1621,10 @@ async function fillQueues() {
     row.querySelector(".q-dir").textContent = q.dir;
     row.querySelector(".q-counts").textContent = t("q_counts", q.total, q.done, q.running, q.failed);
     row.querySelector(".q-par").value = q.max_parallel;
+    // owner decision: computer actions only when allowed in Settings (off by default)
+    for (const o of row.querySelectorAll(".q-after option")) {
+      if (["sleep", "hibernate", "shutdown"].includes(o.value) && !machineOk) { o.disabled = true; o.textContent += ` ${t("q_power_off")}`; }
+    }
     row.querySelector(".q-after").value = AD_KEY[q.after_done] ? q.after_done : "none";
     const tg = row.querySelector(".q-toggle");
     tg.textContent = q.paused ? t("q_start") : t("q_stop");

@@ -36,6 +36,11 @@ pub struct GuiSettings {
     /// F9). The clipboard text is never stored or logged.
     #[serde(default)]
     pub clipboard: bool,
+    /// v0.2 (owner decision 2026-11-19): sleep / hibernate / shut down after the downloads are
+    /// OFF unless the user turns them on here; while off they are refused everywhere (quitting
+    /// the app is always allowed).
+    #[serde(default)]
+    pub power_actions: bool,
 }
 
 fn on() -> bool {
@@ -52,6 +57,7 @@ impl Default for GuiSettings {
             tray: true,
             close_to_tray: false,
             clipboard: false,
+            power_actions: false,
         }
     }
 }
@@ -126,9 +132,9 @@ mod tests {
         let v01 = r#"{"max_parallel":2,"connections":16,"speed_limit_kib":0,"schedule":null}"#;
         let s: GuiSettings = serde_json::from_str(v01).unwrap();
         assert_eq!((s.max_parallel, s.connections), (2, 16));
-        assert!(s.tray && !s.close_to_tray && !s.clipboard);
+        assert!(s.tray && !s.close_to_tray && !s.clipboard && !s.power_actions);
         let d = GuiSettings::default();
-        assert!(d.tray && !d.close_to_tray && !d.clipboard);
+        assert!(d.tray && !d.close_to_tray && !d.clipboard && !d.power_actions);
         // still strict about unknown fields
         assert!(serde_json::from_str::<GuiSettings>(
             r#"{"max_parallel":2,"connections":16,"speed_limit_kib":0,"evil":1}"#
@@ -207,6 +213,7 @@ mod tests {
             tray: false,
             close_to_tray: true,
             clipboard: true,
+            power_actions: true,
         };
         save(&p, &s).unwrap();
         assert_eq!(load(&p), s);

@@ -80,6 +80,9 @@ pub fn reset_and_save(s: &Scheduler) -> Result<(), String> {
 pub struct GuiPower {
     pub app: OnceLock<AppHandle>,
     pub sched: OnceLock<Scheduler>,
+    /// Settings > "allow sleep, hibernate and shut down" (off by default). Checked again here,
+    /// at the last moment, whatever a queue file says.
+    pub allowed: std::sync::atomic::AtomicBool,
 }
 
 impl PowerControl for GuiPower {
@@ -87,6 +90,11 @@ impl PowerControl for GuiPower {
         // one-shot: reset and SAVE before anything irreversible happens
         if let Some(s) = self.sched.get() {
             reset_and_save(s)?;
+        }
+        if crate::core::is_machine_action(action)
+            && !self.allowed.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err("power actions are turned off in Settings".into());
         }
         let io = |r: std::io::Result<()>| r.map_err(|e| e.to_string());
         match action {
