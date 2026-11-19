@@ -62,6 +62,12 @@ fn sink(quiet: bool, name: Arc<Mutex<Option<String>>>) -> EventSink {
         if let Event::Started { name: n, .. } = &e {
             *name.lock().unwrap() = Some(n.clone());
         }
+        // shown even with -q: the user must know their resume point is older than they think
+        if let Event::CheckpointFailed { message } = &e {
+            eprintln!(
+                "warning: could not save the resume point ({message}); a resume repeats the bytes since the last saved one"
+            );
+        }
         if quiet {
             return;
         }

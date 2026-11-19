@@ -443,6 +443,15 @@ try {
     await until("/أُلغي/.test(document.querySelector('#toast').textContent)", 4000, "cancelled message");
   });
 
+  await check("an engine warning (resume point not saved) is shown once", async () => {
+    await open("");
+    const it = await ev("[...window.__eid.store.values()][0]");
+    await ev("document.querySelector('#toast').hidden = true");
+    await ev(`window.__eidMockWarn(${it.id}, 'final checkpoint: injected'); window.__eid.poll()`);
+    await until("!document.querySelector('#toast').hidden && /نقطة الاستكمال/.test(document.querySelector('#toast').textContent)", 4000, "warning shown");
+    assert((await ev("document.querySelector('#toast').textContent")).includes(it.name), "names the download");
+  });
+
   for (const n of [100, 1000, 3000]) {
     for (const old of [false, true]) {
       await check(`responsive with ${n} downloads (${old ? "v0.0.1 full list" : "revisioned list"})`, async () => {

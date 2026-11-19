@@ -47,6 +47,8 @@ pub struct AppState {
     /// v0.2: "when the downloads are finished" (one-shot, with a cancellable countdown).
     pub power: Arc<crate::power::GuiPower>,
     pub power_view: Arc<Mutex<crate::power::PowerView>>,
+    /// v0.2: engine warnings not yet shown by the window.
+    pub warnings: Arc<Mutex<Vec<(u64, String)>>>,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<Result<(), String>>>>,
 }
 
@@ -137,7 +139,16 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
     let connections = Arc::new(AtomicUsize::new(settings.connections as usize));
     let mut cfg = serve::config_for(&ServeArgs::default());
     cfg.global_limiter = Some(limiter.clone());
+    // v0.2: warnings from the engine (a resume point that could not be saved), shown once
+    let warnings: Arc<Mutex<Vec<(u64, String)>>> = Arc::default();
+    let w2 = warnings.clone();
     let runner = EngineRunner {
+        warnings: Some(Arc::new(move |item, text| {
+            let mut g = w2.lock().unwrap_or_else(|p| p.into_inner());
+            if g.len() < 50 {
+                g.push((item, text));
+            }
+        })),
         connections_live: Some(connections.clone()),
         cfg,
         progress: Some({
@@ -218,6 +229,7 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         connections,
         power,
         power_view,
+        warnings,
         task: Mutex::new(Some(task)),
     }))
 }
@@ -252,6 +264,8 @@ pub struct Snapshot {
     default_dir: String,
     /// v0.2: the "when finished" countdown and its last outcome.
     power: crate::power::PowerView,
+    /// v0.2: engine warnings `(item, text)` since the previous answer (sent once).
+    warnings: Vec<(u64, String)>,
 }
 
 fn unix_now() -> i64 {
@@ -286,6 +300,7 @@ pub fn list(st: State<'_, AppState>, since: Option<u64>) -> Snapshot {
             g.last = None;
             v
         },
+        warnings: std::mem::take(&mut *st.warnings.lock().unwrap_or_else(|p| p.into_inner())),
     }
 }
 

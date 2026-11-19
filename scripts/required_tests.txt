@@ -441,3 +441,6 @@ queues_are_listed_main_first_and_patches_are_validated_all_or_nothing
 the_window_follows_the_countdown_and_its_outcome
 the_choice_is_reset_and_saved_before_the_action_runs
 windows:windows_shutdown_privilege_can_be_enabled
+# ---- PLAN P1 open items (b) and (c), owner approval 2026-11-19
+a_stall_is_a_barrier_only_while_the_stall_timeout_outlasts_it
+a_failed_final_checkpoint_warns_and_never_changes_the_outcome

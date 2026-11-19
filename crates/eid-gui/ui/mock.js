@@ -117,6 +117,8 @@ export function mockApi(params = new URLSearchParams()) {
   const power = { countdown: null, last: null };
   window.__eidMockCountdown = (secs, action) => { power.countdown = secs ? [secs, action] : null; };
   const limits = new Map();
+  const warnings = [];
+  window.__eidMockWarn = (id, text) => warnings.push([id, text]);
   window.__eidMockLimit = (id) => limits.get(id);
   const handlers = {
     list: ({ since }) => {
@@ -127,7 +129,8 @@ export function mockApi(params = new URLSearchParams()) {
       if (tooOld) return { rev, full: true, items: sorted(), removed: [], default_dir: DIR };
       const changed = [...items.values()].filter((e) => e.rev > since).map((e) => e.item);
       const pw = { ...power }; power.last = null;
-      return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR, power: pw };
+      const ws = warnings.splice(0);
+      return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR, power: pw, warnings: ws };
     },
     add: ({ links, name, folder }) => {
       const ls = String(links).split(/\s+/).filter(Boolean);

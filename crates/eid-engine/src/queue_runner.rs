@@ -22,7 +22,13 @@ pub struct EngineRunner {
     /// v0.1: connections per download changed at run time (the desktop app's settings); read
     /// when each download starts. `None` = `cfg.connections`.
     pub connections_live: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// v0.2: warnings for the user, `(item, text)`: today only "the last checkpoint could not be
+    /// saved" (PLAN P1 open item (c)). `None` drops them.
+    pub warnings: Option<WarningSink>,
 }
+
+/// Where per-item warnings go (the desktop app shows them).
+pub type WarningSink = Arc<dyn Fn(u64, String) + Send + Sync>;
 
 impl EngineRunner {
     pub fn new(cfg: Config) -> EngineRunner {
@@ -30,6 +36,7 @@ impl EngineRunner {
             cfg,
             progress: None,
             connections_live: None,
+            warnings: None,
         }
     }
 }
@@ -99,6 +106,7 @@ impl JobRunner for EngineRunner {
             cfg.job_limit_bps = Some(b.max(1));
         }
         let progress = self.progress.clone();
+        let warnings = self.warnings.clone();
         Box::pin(async move {
             let dir = match ensure_job_dir(&job.base_dir, job.subdir.as_deref()) {
                 Ok(d) => d,
@@ -127,6 +135,11 @@ impl JobRunner for EngineRunner {
                     Event::Finished { size } => {
                         if let Some(p) = &progress {
                             p(item, size, Some(size));
+                        }
+                    }
+                    Event::CheckpointFailed { message } => {
+                        if let Some(w) = &warnings {
+                            w(item, message);
                         }
                     }
                     _ => {}

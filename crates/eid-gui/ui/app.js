@@ -166,6 +166,10 @@ async function refresh() {
     const r = mergeList(store, s);
     if (fin.length) notify(fin);
     if (s && "power" in s) applyPower(s.power);
+    // engine warnings (e.g. a resume point that could not be saved): shown once each
+    if (Array.isArray(s?.warnings)) for (const w of s.warnings.slice(0, 5)) {
+      if (Array.isArray(w) && typeof w[1] === "string") toast(t("w_checkpoint", store.get(w[0])?.name ?? `#${w[0]}`, w[1].slice(0, 300)));
+    }
     rev = r.rev;
     if (r.changed || !gotList) invalidate(true);
     gotList = true;
