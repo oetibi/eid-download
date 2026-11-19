@@ -6,6 +6,7 @@ use crate::fault;
 use crate::filename;
 use crate::http::{self, parse_content_range, strong_etag, strong_last_modified};
 use crate::limiter::Limiter;
+use crate::prefix_hash::{HashTask, PrefixHash};
 use crate::sanitize::{numbered_name as numbered, sanitize_file_name};
 use crate::state::{self, SegState, State, STATE_VERSION};
 use crate::table::Table;
@@ -169,6 +170,9 @@ pub struct Outcome {
     pub restarts: u32,
     /// Highest number of bytes held in memory across all workers (bounded buffering evidence).
     pub peak_buffered: u64,
+    /// Leading bytes whose SHA-256 was computed during the transfer, i.e. NOT re-read at
+    /// finalization (evidence for the prefix hasher; 0 = the whole file was hashed at the end).
+    pub hashed_before_finish: u64,
     pub peak_workers: usize,
 }
 
@@ -890,6 +894,16 @@ fn claim_files(dir: &Path, base: &str, held: &mut Option<JobLock>) -> Result<Fil
 /// Hash through an already-open handle (the one we verified and keep until finalization):
 /// hashing the very handle we verified, not a re-opened path, closes a path swap. (The
 /// advisory job lock lives on the separate `.eid-lock` file, not on this data file.)
+/// Finish a digest whose first `prefix.len()` bytes were hashed during the transfer: only the
+/// tail `[prefix.len(), size)` is read here (positionally, through the verified handle).
+fn sha256_handle_from(f: &File, mut prefix: PrefixHash, size: u64) -> Result<String> {
+    let mut buf = vec![0u8; 1 << 20];
+    prefix
+        .extend_from(f, size, &mut buf)
+        .map_err(Error::io("read for hashing"))?;
+    Ok(prefix.finish_hex())
+}
+
 fn sha256_handle(f: &File) -> Result<String> {
     use std::io::{Seek, SeekFrom};
     let mut f = f.try_clone().map_err(Error::io("clone for hashing"))?;
@@ -1102,12 +1116,55 @@ fn job_limiter(cfg: &Config) -> Option<Arc<Limiter>> {
     }
 }
 
+/// Adaptive ramp (v0.1): how many workers one ramp tick may add. Like TCP slow start: while
+/// the measured throughput keeps growing (>= 10% per tick) after adding workers, the next tick
+/// adds twice as many (1, 2, 4, 8); as soon as it stops growing (the link or the server is
+/// saturated) it falls back to one per tick, the old gradual ramp. A per-connection-throttled
+/// server so reaches its useful connection count in about a second instead of 0.3 s per
+/// connection, while a saturated link never gets a burst of extra connections. The total is
+/// still bounded by `connections` and by the server-limit cap (`target()`).
+#[derive(Debug, Default)]
+pub(crate) struct Ramp {
+    last: Option<(u64, std::time::Instant)>,
+    last_rate: f64,
+    burst: usize,
+}
+
+impl Ramp {
+    pub(crate) const MAX_BURST: usize = 8;
+
+    pub(crate) fn burst(&mut self, done: u64, now: std::time::Instant) -> usize {
+        let rate = match self.last {
+            Some((d, t)) => {
+                let dt = now.saturating_duration_since(t).as_secs_f64();
+                if dt < 0.05 {
+                    return self.burst.max(1);
+                }
+                done.saturating_sub(d) as f64 / dt
+            }
+            None => {
+                self.last = Some((done, now));
+                self.burst = 1;
+                return 1;
+            }
+        };
+        self.burst = if rate > 0.0 && rate >= self.last_rate * 1.10 {
+            (self.burst * 2).clamp(1, Self::MAX_BURST)
+        } else {
+            1
+        };
+        self.last = Some((done, now));
+        self.last_rate = rate;
+        self.burst
+    }
+}
+
 async fn run_ranged(
     ctx: Arc<Ctx>,
     info: &JobInfo,
     state_path: &Path,
     first: Option<Response>,
-) -> Result<()> {
+) -> Result<Option<PrefixHash>> {
     let target = || {
         ctx.cap
             .load(Ordering::SeqCst)
@@ -1122,9 +1179,12 @@ async fn run_ranged(
     ramp.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ckpt.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ckpt.reset();
+    let mut ramp_ctl = Ramp::default();
     let mut fatal: Option<Error> = None;
     let mut ckpt_closed = false;
     let (ckpt_ctl, mut ckpt_err) = start_ckpt_task(ctx.clone(), info.clone(), state_path);
+    // Hashes the completed prefix while the transfer runs (finalization hashes only the rest).
+    let hasher = HashTask::start(ctx.file.clone(), ctx.table.clone());
 
     // the first worker starts immediately
     {
@@ -1164,6 +1224,7 @@ async fn run_ranged(
                 }
             }
             _ = ramp.tick(), if fatal.is_none() && !ctx.cancel.is_cancelled() => {
+                for _ in 0..ramp_ctl.burst(ctx.done_bytes.load(Ordering::Relaxed), std::time::Instant::now()) {
                 let active = ctx.active.load(Ordering::SeqCst);
                 if active < target() {
                     let (seg, split) = {
@@ -1180,6 +1241,7 @@ async fn run_ranged(
                     if let Some(seg) = seg {
                         spawn_worker(&mut set, &ctx, seg, None);
                     }
+                }
                 }
             }
             _ = ckpt.tick() => {
@@ -1202,6 +1264,8 @@ async fn run_ranged(
         }
     }
     while set.join_next().await.is_some() {}
+    // Joined before anything may truncate (restart) or finalize the file; read-only, bounded.
+    let prefix = hasher.join().await;
     // Join the checkpoint task (and its spawn_blocking) BEFORE any further state write.
     // Skipping this would let an in-flight checkpoint overwrite a new-generation restart
     // state (B1) or recreate a state file after remove_all.
@@ -1219,7 +1283,7 @@ async fn run_ranged(
     if ctx.cancel.is_cancelled() && !ctx.table.lock().unwrap().is_complete() {
         return Err(Error::Cancelled);
     }
-    Ok(())
+    Ok(prefix)
 }
 
 /// Sequential single-connection download for servers without usable ranges.
@@ -1229,13 +1293,15 @@ async fn run_single(
     mut resp: Response,
     total: Option<u64>,
     limiter: Option<Arc<Limiter>>,
-) -> Result<u64> {
+) -> Result<(u64, PrefixHash)> {
     let cfg = net.cfg;
     let cancel_t = net.cancel;
     let sink_fn = net.sink;
     let mut attempt = 0u32;
     loop {
         let mut written: u64 = 0;
+        // sequential: the digest follows exactly the bytes written at [0, written)
+        let mut ph = PrefixHash::new();
         let mut stream = resp.bytes_stream();
         let outcome: std::result::Result<(), String> = loop {
             let next = tokio::select! {
@@ -1262,14 +1328,21 @@ async fn run_single(
                         }
                     }
                     let f = file.clone();
-                    let data = chunk.to_vec();
                     let off = written;
-                    tokio::task::spawn_blocking(move || pfs::write_all_at(&f, &data, off))
-                        .await
-                        .map_err(|e| Error::Network(e.to_string()))?
-                        .map_err(Error::io("write data"))?;
-                    written += chunk.len() as u64;
-                    if written % (1 << 20) < chunk.len() as u64 {
+                    let n = chunk.len() as u64;
+                    let (back, r) = tokio::task::spawn_blocking(move || {
+                        let r = pfs::write_all_at(&f, &chunk, off);
+                        if r.is_ok() {
+                            ph.update(&chunk);
+                        }
+                        (ph, r)
+                    })
+                    .await
+                    .map_err(|e| Error::Network(e.to_string()))?;
+                    ph = back;
+                    r.map_err(Error::io("write data"))?;
+                    written += n;
+                    if written % (1 << 20) < n {
                         sink_fn(Event::Progress {
                             done: written,
                             total,
@@ -1284,7 +1357,7 @@ async fn run_single(
                 if total.is_none() {
                     file.set_len(written).map_err(Error::io("truncate"))?;
                 }
-                return Ok(written);
+                return Ok((written, ph));
             }
             other => {
                 // release the failed body (and its socket) before sleeping / reconnecting
@@ -1496,7 +1569,7 @@ async fn download_inner(
         }
         fault::hit("restart_truncated");
         let peaks: (u64, usize);
-        let result: Result<u64> = if ranged_mode {
+        let result: Result<(u64, Option<PrefixHash>)> = if ranged_mode {
             let total = probe.total.unwrap();
             let state_path = f.state.clone();
             let table = Arc::new(Mutex::new(Table::new(total)));
@@ -1527,17 +1600,20 @@ async fn download_inner(
                 ctx.peak_workers.load(Ordering::SeqCst),
             );
             peaks = peak;
-            r.map(|_| total)
+            r.map(|p| (total, p))
         } else {
             peaks = (0, 1);
-            run_single(&net, &file, probe.resp, probe.total, job_limiter(&cfg)).await
+            run_single(&net, &file, probe.resp, probe.total, job_limiter(&cfg))
+                .await
+                .map(|(n, p)| (n, Some(p)))
         };
         match result {
-            Ok(size) => {
+            Ok((size, prefix)) => {
                 let done = Done {
                     size,
                     restarts,
                     peaks,
+                    prefix,
                 };
                 return finish(&cfg, &st.dir, files.take().unwrap(), file, done, &sink).await;
             }
@@ -1557,6 +1633,8 @@ struct Done {
     restarts: u32,
     /// (peak buffered bytes, peak workers)
     peaks: (u64, usize),
+    /// Digest of the leading bytes, computed during the transfer (None = hash everything).
+    prefix: Option<PrefixHash>,
 }
 
 /// Finalization does blocking disk work (fsync, full-file hash, rename, state removal): run it on
@@ -1591,6 +1669,7 @@ fn finish_blocking(
         size,
         restarts,
         peaks: (peak_buffered, peak_workers),
+        prefix,
     } = done;
     file.sync_all().map_err(Error::io("sync final"))?;
     let len = file.metadata().map_err(Error::io("stat final"))?.len();
@@ -1610,7 +1689,9 @@ fn finish_blocking(
     } = files;
     // The digest is always computed: the finalization record below needs it so that a crash
     // after the rename can be recognised by content, never by file size alone (review B2).
-    let full_digest = sha256_handle(&file)?;
+    let prefix = prefix.filter(|p| p.len() <= size);
+    let hashed_before_finish = prefix.as_ref().map_or(0, PrefixHash::len);
+    let full_digest = sha256_handle_from(&file, prefix.unwrap_or_default(), size)?;
     if let Some(want) = &cfg.expected_sha256 {
         if !want.eq_ignore_ascii_case(&full_digest) {
             return Err(Error::Checksum {
@@ -1657,6 +1738,7 @@ fn finish_blocking(
         restarts,
         peak_buffered,
         peak_workers,
+        hashed_before_finish,
     })
 }
 
@@ -1818,6 +1900,7 @@ async fn resume_inner(
                     restarts: st.restarts,
                     peak_buffered: 0,
                     peak_workers: 0,
+                    hashed_before_finish: 0,
                 });
             }
         }
@@ -1921,7 +2004,7 @@ async fn resume_inner(
         ctx.peak_workers.load(Ordering::SeqCst),
     );
     match r {
-        Ok(()) => {
+        Ok(prefix) => {
             let part_name = part.clone();
             drop(ctx);
             let f0 = pfs::open_regular_nofollow(&part_name).map_err(Error::io("reopen part"))?;
@@ -1941,6 +2024,7 @@ async fn resume_inner(
                     size: total,
                     restarts: st.restarts,
                     peaks,
+                    prefix,
                 },
                 &sink,
             )
@@ -1966,5 +2050,45 @@ async fn resume_inner(
             .await
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod ramp_tests {
+    use super::Ramp;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn doubles_while_throughput_grows_and_falls_back_to_one_when_it_does_not() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut r = Ramp::default();
+        assert_eq!(r.burst(0, ms(0)), 1);
+        // 4 MB/s, then 12, 28, 60, 124, 252: keeps growing -> 2, 4, 8, 8 (capped)
+        assert_eq!(r.burst(1_200_000, ms(300)), 2);
+        assert_eq!(r.burst(4_800_000, ms(600)), 4);
+        assert_eq!(r.burst(13_200_000, ms(900)), 8);
+        assert_eq!(r.burst(31_200_000, ms(1200)), 8);
+        // saturated: same rate as before -> one per tick
+        assert_eq!(r.burst(49_200_000, ms(1500)), 1);
+        assert_eq!(r.burst(67_200_000, ms(1800)), 1);
+        // nothing moving (stall, server not answering): never a burst
+        assert_eq!(r.burst(67_200_000, ms(2100)), 1);
+        assert_eq!(r.burst(67_200_000, ms(2400)), 1);
+    }
+
+    #[test]
+    fn a_saturated_single_connection_never_gets_a_burst() {
+        let t0 = Instant::now();
+        let mut r = Ramp::default();
+        r.burst(0, t0);
+        let mut done = 0;
+        for i in 1..20u64 {
+            done += 30_000_000; // flat 100 MB/s from the start
+            let b = r.burst(done, t0 + Duration::from_millis(300 * i));
+            if i > 1 {
+                assert_eq!(b, 1, "tick {i}");
+            }
+        }
     }
 }

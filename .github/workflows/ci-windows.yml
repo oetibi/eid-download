@@ -103,8 +103,8 @@ jobs:
           $bad += @('EID_TEST_', 'EID_FAULT') | Where-Object { $rel.Contains($_) }
           if ($bad.Count -gt 0) { throw "release eid.exe contains test hooks: $($bad -join ', ')" }
           "release eid.exe: no test hook markers (control: test build has $($ctl.Count) of 5)"
-      # ---- Desktop app (P5): build, end-to-end smoke on the real window, ZIP package.
-      # The NSIS installer comes with P7 (tauri-cli bundling); until then the app ships as a ZIP.
+      # ---- Desktop app (P5): build, end-to-end smoke on the real window, ZIP package, and
+      # (v0.1) the NSIS installer made from these same tested binaries.
       - run: cargo build --release -p eid-gui -p eid-native-host -p eid-testserver
       - name: Release EidDownload.exe and eid-native-host.exe carry no test hooks
         shell: pwsh
@@ -144,10 +144,57 @@ jobs:
           if ($n -lt 100) { throw "THIRD-PARTY-LICENSES.html lists only $n crates" }
           "THIRD-PARTY-LICENSES.html: $n crate entries"
           Compress-Archive -Path $d -DestinationPath dist\EidDownload-windows-x64.zip -Force
+      # ---- v0.1: NSIS installer (ADR-0005). `cargo tauri bundle` packs the binaries built and
+      # smoke-tested above (no recompile, --no-binary-patching), then the installer is verified
+      # for real on this runner: silent per-user install, files, HKCU keys, app start, uninstall.
+      - name: One version in Cargo.toml, Cargo.lock, tauri.conf.json (and the tag)
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') { python scripts/windows/check_version.py --tag $env:GITHUB_REF_NAME } else { python scripts/windows/check_version.py }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: taiki-e/install-action@v2
+        with: { tool: tauri-cli@2.12.6 }   # pinned, = the tauri crate version in Cargo.lock; prebuilt release binary
+      - name: Build the NSIS installer (tag builds refuse placeholder extension IDs)
+        shell: pwsh
+        run: |
+          cargo tauri --version
+          if ($env:GITHUB_REF -like 'refs/tags/v*') { scripts\windows\build_installer.ps1 -Release } else { scripts\windows\build_installer.ps1 }
+      - name: Verify the installer (silent install, files, HKCU Native Messaging keys, app start, silent uninstall, cleanup)
+        shell: pwsh
+        run: |
+          $i = @(Get-ChildItem dist\EidDownload-*-windows-x64-setup.exe)
+          if ($i.Count -ne 1) { throw "expected one installer in dist, found $($i.Count)" }
+          scripts\windows\verify_installer.ps1 -Installer $i[0].FullName -Bin target\release
+      # Measurement, not a gate: GitHub runner numbers (shared VM), labelled as such in the file.
+      - name: Startup time and memory of EidDownload.exe (5 runs, runner numbers)
+        shell: pwsh
+        continue-on-error: true
+        run: scripts\windows\perf_startup.ps1 -Bin target\release -Out perf-windows -Runs 5 -IdleSeconds 10
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: perf-windows
+          retention-days: 30
+          path: perf-windows/
+          if-no-files-found: warn
+      # Measurement of the download engine on Windows (eid only; the IDM side is an owner step,
+      # docs/OWNER-ACTIONS.md). Every file is checked by SHA-256 against the server: a wrong file fails.
+      - name: Engine speed on Windows (loopback, 64 MiB, 4 MiB/s per connection, runner numbers)
+        shell: pwsh
+        run: scripts\windows\compare_idm.ps1 -SkipIdm -Bin target\release -Out engine-windows -Size 67108864 -ThrottlePerConn 4194304 -Connections 1,8,16 -Runs 3
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: engine-windows
+          retention-days: 30
+          path: engine-windows/results.*
+          if-no-files-found: warn
       - name: SHA-256 checksums
         shell: pwsh
         run: |
-          $files = 'target\release\EidDownload.exe', 'target\release\eid.exe', 'target\release\eid-native-host.exe', 'dist\EidDownload-windows-x64.zip'
+          $setup = @(Get-ChildItem dist\EidDownload-*-windows-x64-setup.exe)
+          if ($setup.Count -ne 1) { throw "expected one installer in dist, found $($setup.Count)" }
+          $files = 'target\release\EidDownload.exe', 'target\release\eid.exe', 'target\release\eid-native-host.exe', 'dist\EidDownload-windows-x64.zip', $setup[0].FullName
           $files | ForEach-Object { $h = Get-FileHash $_ -Algorithm SHA256; "$($h.Hash.ToLower())  $(Split-Path $_ -Leaf)" } | Tee-Object -FilePath SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
@@ -155,14 +202,18 @@ jobs:
           retention-days: 14
           path: |
             dist/EidDownload-windows-x64.zip
+            dist/EidDownload-*-windows-x64-setup.exe
             target/release/EidDownload.exe
             target/release/eid.exe
             target/release/eid-native-host.exe
             SHA256SUMS.txt
   # Releases are built by CI only (AGENTS §3.7): a `v*` tag runs the whole Windows job above
-  # (tests, GUI smoke, package) and only then publishes exactly that job's artifact. The notes
-  # come from docs/releases/<tag>.md (must exist and carry the "not tested by hand" section);
-  # the SHA-256 lines are appended from the artifact itself.
+  # (tests, GUI smoke, package, installer build + verification) and only then publishes exactly
+  # that job's artifact. The notes come from docs/releases/<tag>.md (must exist and carry the
+  # "not tested by hand" section); the SHA-256 lines are appended from the artifact itself.
+  # Release kind: a PRE-release by default. It is published as a full (latest) release only
+  # when docs/releases/<tag>.md contains the exact line `release-kind: final` (the owner's
+  # decision, made in the reviewed notes file; the line itself is not shown in the notes).
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     needs: windows
@@ -176,8 +227,19 @@ jobs:
       - name: Check the artifact against its SHA256SUMS
         working-directory: rel
         run: |
-          cp dist/EidDownload-windows-x64.zip target/release/EidDownload.exe target/release/eid.exe target/release/eid-native-host.exe .
+          cp dist/EidDownload-windows-x64.zip dist/EidDownload-*-windows-x64-setup.exe target/release/EidDownload.exe target/release/eid.exe target/release/eid-native-host.exe .
+          test "$(ls EidDownload-*-windows-x64-setup.exe | wc -l)" -eq 1
+          grep -q 'windows-x64-setup.exe$' SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Browser extension packages (store + sideload), added to SHA256SUMS
+        run: |
+          node --test extension/test/
+          node scripts/ext/package.mjs --out ext-pkg
+          cp ext-pkg/*.zip rel/
+          cat ext-pkg/SHA256SUMS.txt >> rel/SHA256SUMS.txt
+          (cd rel && sha256sum -c SHA256SUMS.txt)
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -186,7 +248,11 @@ jobs:
           notes="docs/releases/$TAG.md"
           test -f "$notes" || { echo "missing $notes"; exit 1; }
           grep -q 'لم يُختبر يدوياً' "$notes" || { echo "$notes has no 'not tested by hand' section"; exit 1; }
-          { cat "$notes"; printf '\n## SHA-256\n```\n'; cat rel/SHA256SUMS.txt; printf '```\n'; } > notes.md
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --verify-tag \
+          if grep -q '<<FILL>>' "$notes"; then echo "$notes still has <<FILL>> placeholders"; exit 1; fi
+          kind=(--prerelease)
+          if grep -qx 'release-kind: final' "$notes"; then kind=(--latest); fi
+          echo "release kind: ${kind[*]}"
+          { grep -vx 'release-kind: final' "$notes"; printf '\n## SHA-256\n```\n'; cat rel/SHA256SUMS.txt; printf '```\n'; } > notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${kind[@]}" --verify-tag \
             --title "Eid Download $TAG (Windows x64)" --notes-file notes.md \
-            rel/EidDownload-windows-x64.zip rel/SHA256SUMS.txt
+            rel/EidDownload-windows-x64.zip rel/EidDownload-*-windows-x64-setup.exe rel/eid-download-*.zip rel/SHA256SUMS.txt

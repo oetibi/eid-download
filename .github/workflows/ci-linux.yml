@@ -47,3 +47,44 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+  # Cheap checks without Rust: release scripts and the JS tests of the extension and of the
+  # desktop UI (written on parallel v0.1 branches; each step runs only when such tests exist,
+  # and fails if node found zero tests: no silent skip).
+  scripts-js:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release scripts (manifest generator, version check) unit tests
+        run: python3 -m unittest discover -s scripts/windows -v
+      - name: One version in Cargo.toml, Cargo.lock and tauri.conf.json
+        run: python3 scripts/windows/check_version.py
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Extension JS tests (node --test, default test-file discovery inside extension/)
+        if: ${{ hashFiles('extension/**/*.test.js', 'extension/**/*.test.mjs', 'extension/**/*.test.cjs', 'extension/**/*_test.js', 'extension/**/*-test.js', 'extension/**/test/**/*.js', 'extension/**/test/**/*.mjs') != '' }}
+        working-directory: extension
+        run: |
+          node --test 2>&1 | tee "$RUNNER_TEMP/ext-tests.txt"
+          test "${PIPESTATUS[0]}" -eq 0
+          if grep -Eq '^(ℹ|#) tests 0$' "$RUNNER_TEMP/ext-tests.txt"; then echo "node found zero tests in extension/"; exit 1; fi
+      - name: Desktop UI JS tests (node --test inside crates/eid-gui/ui)
+        if: ${{ hashFiles('crates/eid-gui/ui/**/*.test.js', 'crates/eid-gui/ui/**/*.test.mjs', 'crates/eid-gui/ui/**/*.test.cjs', 'crates/eid-gui/ui/**/*_test.js', 'crates/eid-gui/ui/**/*-test.js', 'crates/eid-gui/ui/**/test/**/*.js', 'crates/eid-gui/ui/**/test/**/*.mjs') != '' }}
+        working-directory: crates/eid-gui/ui
+        run: |
+          node --test 2>&1 | tee "$RUNNER_TEMP/ui-tests.txt"
+          test "${PIPESTATUS[0]}" -eq 0
+          if grep -Eq '^(ℹ|#) tests 0$' "$RUNNER_TEMP/ui-tests.txt"; then echo "node found zero tests in crates/eid-gui/ui/"; exit 1; fi
+      - name: Desktop UI end-to-end in headless Chrome (Blink = WebView2's engine; mock backend)
+        run: |
+          google-chrome --version
+          node scripts/ui/ui_e2e.mjs --chrome google-chrome --json "$RUNNER_TEMP/ui-e2e.json"
+      - name: Browser extension end-to-end in headless Chrome (button over a real <video>)
+        run: node scripts/ext/ext_e2e.mjs --chrome google-chrome
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: ui-e2e
+          retention-days: 30
+          path: ${{ runner.temp }}/ui-e2e.json
+          if-no-files-found: ignore

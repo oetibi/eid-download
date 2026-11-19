@@ -2,6 +2,7 @@
 #![windows_subsystem = "windows"]
 
 use eid_gui::app::{self, AppState, Boot};
+use eid_gui::video;
 use eid_platform::ui::{fatal_message, fatal_text};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
@@ -48,6 +49,20 @@ fn main() {
             app::clear_finished,
             app::pick_folder,
             app::reveal,
+            app::open_file,
+            app::settings_get,
+            app::settings_set,
+            video::video_probe,
+            video::tools_status,
+            video::tools_consent_text,
+            video::tools_install,
+            video::video_add,
+            video::playlist_add,
+            video::video_jobs,
+            video::video_pause,
+            video::video_resume,
+            video::video_retry,
+            video::video_remove,
         ])
         .setup(move |a| {
             a.manage(state.take().expect("setup runs once"));

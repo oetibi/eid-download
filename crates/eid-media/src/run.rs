@@ -86,6 +86,13 @@ impl Runner {
         info::parse_playlist(&f.stdout, PLAYLIST_STDOUT_LIMIT)
     }
 
+    /// One `--flat-playlist -J` of an address that may be a video or a playlist (probe).
+    pub async fn probe(&self, url: &MediaUrl, cwd: &Path) -> Result<info::Probed, MediaError> {
+        let a = args::build(&self.tools, url, &Action::PlaylistInfo)?;
+        let f = self.run(self.spec(cwd, a, PLAYLIST_STDOUT_LIMIT)).await?;
+        info::parse_probe(&f.stdout, PLAYLIST_STDOUT_LIMIT)
+    }
+
     /// Download one item into `staging` (the working directory). Progress samples are sent
     /// to `progress` (lossy). Returns the finished run; publishing is the caller's job.
     pub async fn download(

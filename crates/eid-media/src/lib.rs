@@ -27,6 +27,7 @@ pub mod progress;
 pub mod redact;
 pub mod run;
 pub mod settings;
+pub mod stage;
 pub mod tools;
 pub mod zipx;
 

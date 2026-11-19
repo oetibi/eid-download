@@ -320,9 +320,13 @@ fn a_damaged_or_planted_settings_file_keeps_video_off() {
 
 #[test]
 fn ipc_and_native_messaging_cannot_grant_consent() {
-    // D7: video commands are not part of IPC / Native Messaging in P4, and nothing reachable
-    // from them can write the consent record. Checked structurally: neither crate depends on
-    // eid-media, and their sources never mention consent.
+    // D7 (P4), narrowed in v0.1 by the owner's request (browser "download this video" button):
+    // IPC / Native Messaging may now ask for video JOBS (probe, add_video, add_playlist), served
+    // by eid-cli's `media_jobs`, which runs `eid video ...` children WITHOUT the agreement flag.
+    // Still nothing reachable from IPC can write the consent record or pass --yes-i-agree:
+    // neither eid-ipc nor eid-native-host depends on eid-media or mentions consent, and every
+    // eid-cli module reachable from `serve`/`remote` (media_jobs included) is scanned below.
+    // The window's setup lives in `video_setup`, which IPC code never reaches.
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for c in ["eid-ipc", "eid-native-host"] {
         let toml = std::fs::read_to_string(crates.join(c).join("Cargo.toml")).unwrap();
@@ -347,16 +351,18 @@ fn ipc_and_native_messaging_cannot_grant_consent() {
     // must stay free of the video and consent code.
     let cli_src = crates.join("eid-cli").join("src");
     let reachable = cli_modules_reachable_from(&cli_src, &["serve", "remote"]);
-    for m in ["serve", "remote", "args"] {
+    for m in ["serve", "remote", "args", "media_jobs"] {
         assert!(
             reachable.iter().any(|r| r == m),
             "the scan did not reach {m}: {reachable:?}"
         );
     }
-    assert!(
-        !reachable.iter().any(|r| r == "video"),
-        "`eid serve` or the remote commands reach the video module: {reachable:?}"
-    );
+    for m in ["video", "video_setup"] {
+        assert!(
+            !reachable.iter().any(|r| r == m),
+            "`eid serve` or the remote commands reach the {m} module: {reachable:?}"
+        );
+    }
     for m in &reachable {
         let hits =
             ipc_forbidden_words(&std::fs::read_to_string(cli_module_file(&cli_src, m)).unwrap());

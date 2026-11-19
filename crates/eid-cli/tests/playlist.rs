@@ -216,7 +216,11 @@ async fn playlist_selects_every_item_by_default_with_one_quality_and_a_deselecte
         .collect();
     assert_eq!(
         formats,
-        ["--format=bv*[height<=720]+ba/b[height<=720]".to_string()].into()
+        [format!(
+            "--format={}",
+            eid_media::args::height_selector(720)
+        )]
+        .into()
     );
     // the deselected item keeps its number and is downloaded when it is no longer skipped
     assert_eq!(item_state(&folder, "b")["number"], 2);
