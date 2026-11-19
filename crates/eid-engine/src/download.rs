@@ -1159,46 +1159,6 @@ impl Ramp {
     }
 }
 
-#[cfg(test)]
-mod ramp_tests {
-    use super::Ramp;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn doubles_while_throughput_grows_and_falls_back_to_one_when_it_does_not() {
-        let t0 = Instant::now();
-        let ms = |n| t0 + Duration::from_millis(n);
-        let mut r = Ramp::default();
-        assert_eq!(r.burst(0, ms(0)), 1);
-        // 4 MB/s, then 12, 28, 60, 124, 252: keeps growing -> 2, 4, 8, 8 (capped)
-        assert_eq!(r.burst(1_200_000, ms(300)), 2);
-        assert_eq!(r.burst(4_800_000, ms(600)), 4);
-        assert_eq!(r.burst(13_200_000, ms(900)), 8);
-        assert_eq!(r.burst(31_200_000, ms(1200)), 8);
-        // saturated: same rate as before -> one per tick
-        assert_eq!(r.burst(49_200_000, ms(1500)), 1);
-        assert_eq!(r.burst(67_200_000, ms(1800)), 1);
-        // nothing moving (stall, server not answering): never a burst
-        assert_eq!(r.burst(67_200_000, ms(2100)), 1);
-        assert_eq!(r.burst(67_200_000, ms(2400)), 1);
-    }
-
-    #[test]
-    fn a_saturated_single_connection_never_gets_a_burst() {
-        let t0 = Instant::now();
-        let mut r = Ramp::default();
-        r.burst(0, t0);
-        let mut done = 0;
-        for i in 1..20u64 {
-            done += 30_000_000; // flat 100 MB/s from the start
-            let b = r.burst(done, t0 + Duration::from_millis(300 * i));
-            if i > 1 {
-                assert_eq!(b, 1, "tick {i}");
-            }
-        }
-    }
-}
-
 async fn run_ranged(
     ctx: Arc<Ctx>,
     info: &JobInfo,
@@ -2090,5 +2050,45 @@ async fn resume_inner(
             .await
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod ramp_tests {
+    use super::Ramp;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn doubles_while_throughput_grows_and_falls_back_to_one_when_it_does_not() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut r = Ramp::default();
+        assert_eq!(r.burst(0, ms(0)), 1);
+        // 4 MB/s, then 12, 28, 60, 124, 252: keeps growing -> 2, 4, 8, 8 (capped)
+        assert_eq!(r.burst(1_200_000, ms(300)), 2);
+        assert_eq!(r.burst(4_800_000, ms(600)), 4);
+        assert_eq!(r.burst(13_200_000, ms(900)), 8);
+        assert_eq!(r.burst(31_200_000, ms(1200)), 8);
+        // saturated: same rate as before -> one per tick
+        assert_eq!(r.burst(49_200_000, ms(1500)), 1);
+        assert_eq!(r.burst(67_200_000, ms(1800)), 1);
+        // nothing moving (stall, server not answering): never a burst
+        assert_eq!(r.burst(67_200_000, ms(2100)), 1);
+        assert_eq!(r.burst(67_200_000, ms(2400)), 1);
+    }
+
+    #[test]
+    fn a_saturated_single_connection_never_gets_a_burst() {
+        let t0 = Instant::now();
+        let mut r = Ramp::default();
+        r.burst(0, t0);
+        let mut done = 0;
+        for i in 1..20u64 {
+            done += 30_000_000; // flat 100 MB/s from the start
+            let b = r.burst(done, t0 + Duration::from_millis(300 * i));
+            if i > 1 {
+                assert_eq!(b, 1, "tick {i}");
+            }
+        }
     }
 }
