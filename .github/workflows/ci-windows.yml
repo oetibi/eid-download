@@ -177,6 +177,18 @@ jobs:
           retention-days: 30
           path: perf-windows/
           if-no-files-found: warn
+      # Measurement of the download engine on Windows (eid only; the IDM side is an owner step,
+      # docs/OWNER-ACTIONS.md). Every file is checked by SHA-256 against the server: a wrong file fails.
+      - name: Engine speed on Windows (loopback, 64 MiB, 4 MiB/s per connection, runner numbers)
+        shell: pwsh
+        run: scripts\windows\compare_idm.ps1 -SkipIdm -Bin target\release -Out engine-windows -Size 67108864 -ThrottlePerConn 4194304 -Connections 1,8,16 -Runs 3
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: engine-windows
+          retention-days: 30
+          path: engine-windows/results.*
+          if-no-files-found: warn
       - name: SHA-256 checksums
         shell: pwsh
         run: |
