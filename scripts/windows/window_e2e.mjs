@@ -56,7 +56,7 @@ const assert = (c, m) => { if (!c) throw new Error(m); };
 async function until(fn, ms, what) {
   const t0 = Date.now();
   let last;
-  while (Date.now() - t0 < ms) { try { last = await fn(); if (last) return last; } catch (e) { last = e; } await sleep(250); }
+  while (Date.now() - t0 < ms) { try { last = await fn(); if (last) return last; } catch (e) { if (e?.fatal) throw e; last = e; } await sleep(250); }
   throw new Error(`timed out after ${ms} ms: ${what} (last: ${last?.message ?? JSON.stringify(last)})`);
 }
 const sha = (f) => createHash("sha256").update(fs.readFileSync(f)).digest("hex");
@@ -83,16 +83,41 @@ async function testServer() {
 
 // ---------------------------------------------------------------- the app and its WebView2
 let port = 9300 + Math.floor(Math.random() * 400);
+// The app (Tauri/wry) passes its own WebView2 browser arguments, which take the place of the
+// WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS variable (first CI run: no DevTools port opened). The
+// WebView2 per-user policy "AdditionalBrowserArguments" (value name = the exe file name) is
+// applied over what the app asks for; it is set only for this test and removed at the end.
+const POLICY = "HKCU\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments";
+const reg = (...a) => execFileSync("reg", a, { encoding: "utf8", windowsHide: true });
+let policyBefore = null;
+try { policyBefore = /REG_SZ\s+(.+)/.exec(reg("query", POLICY, "/v", "EidDownload.exe"))?.[1].trim() ?? null; } catch {}
+function setPolicy(p) { reg("add", POLICY, "/v", "EidDownload.exe", "/t", "REG_SZ", "/d", `--remote-debugging-port=${p}`, "/f"); }
+function restorePolicy() {
+  try {
+    if (policyBefore) reg("add", POLICY, "/v", "EidDownload.exe", "/t", "REG_SZ", "/d", policyBefore, "/f");
+    else reg("delete", POLICY, "/v", "EidDownload.exe", "/f");
+  } catch {}
+}
 async function startApp(exe, extraArgs = ["--endpoint", ENDPOINT]) {
   port++;
+  setPolicy(port);
   const env = { ...ENV, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` };
-  const p = spawn(exe, extraArgs, { env, stdio: "ignore" });
+  const p = spawn(exe, extraArgs, { env, stdio: ["ignore", "ignore", "pipe"] });
   procs.push(p);
+  let stderr = "";
+  p.stderr.on("data", (d) => { stderr += d; });
   const target = await until(async () => {
+    if (p.exitCode !== null) throw Object.assign(new Error(`the app exited with code ${p.exitCode}: ${stderr.slice(-2000)}`), { fatal: true });
     const r = await fetch(`http://127.0.0.1:${port}/json/list`);
     const list = await r.json();
     return list.find((t) => t.type === "page" && /tauri|localhost/.test(t.url));
-  }, 90000, "the app's WebView2 page over CDP");
+  }, 90000, "the app's WebView2 page over CDP").catch((e) => {
+    // say what is known: is the app alive, has WebView2 written its DevTools port anywhere?
+    const found = [];
+    const walk = (d, depth = 0) => { if (depth > 6) return; for (const x of fs.readdirSync(d, { withFileTypes: true })) { const q = path.join(d, x.name); if (x.isDirectory()) { try { walk(q, depth + 1); } catch {} } else if (x.name === "DevToolsActivePort") found.push(`${q}: ${fs.readFileSync(q, "utf8").split(/\r?\n/)[0]}`); } };
+    try { walk(path.join(PROFILE, "AppData")); } catch {}
+    throw new Error(`${e.message}; app ${p.exitCode === null ? "still running" : "exited " + p.exitCode}; DevToolsActivePort: ${found.join(", ") || "none"}; stderr: ${stderr.slice(-1000)}`);
+  });
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let seq = 0;
@@ -298,6 +323,7 @@ try {
   try { await w?.shot?.("final.png"); } catch {}
   if (w) await stopApp(w).catch(() => {});
   for (const p of procs) { try { if (p.exitCode === null) p.kill(); } catch {} }
+  restorePolicy();
   fs.writeFileSync(path.join(OUT, "window-e2e.json"), JSON.stringify(results, null, 1));
   await sleep(1000);
   try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch {}
