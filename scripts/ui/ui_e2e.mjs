@@ -398,6 +398,40 @@ try {
     if (arg("--shots")) { await ev("document.querySelector('[data-cmd=settings]').click()"); await sleep(300); await shot("settings-desktop-ar.png"); await ev("document.querySelector('#dlg-settings').close()"); }
   });
 
+  await check("queues, per-download limit and the 'when finished' countdown with Cancel", async () => {
+    await open("");
+    // queues dialog from the Downloads menu
+    await ev("document.querySelector('#menu-downloads [data-cmd=queues]').click()");
+    await until("document.querySelector('#dlg-queues').open && document.querySelectorAll('.q-row').length === 2", 3000, "two queues");
+    assert(/الرئيسية/.test(await ev("document.querySelector('.q-row .q-name').textContent")), "main queue first, named");
+    await ev("(() => { const r = document.querySelectorAll('.q-row')[1]; r.querySelector('.q-par').value = '4'; r.querySelector('.q-after').value = 'shutdown'; r.querySelector('.q-save').click(); })()");
+    await until("document.querySelectorAll('.q-row')[1]?.querySelector('.q-after').value === 'shutdown' && document.querySelectorAll('.q-row')[1].querySelector('.q-par').value === '4'", 3000, "saved and read back");
+    await ev("document.querySelectorAll('.q-row')[1].querySelector('.q-toggle').click()");
+    await until("/متوقفة/.test(document.querySelectorAll('.q-row')[1]?.querySelector('.q-name').textContent ?? '')", 3000, "queue stopped");
+    // a bad value is refused in the window
+    await ev("(() => { const r = document.querySelectorAll('.q-row')[0]; r.querySelector('.q-par').value = '99'; r.querySelector('.q-save').click(); })()");
+    assert(!(await ev("document.querySelector('#q-error').hidden")), "99 accepted");
+    if (arg("--shots")) await shot("queues-ar.png");
+    await ev("document.querySelector('#dlg-queues').close()");
+    // per-download limit from the details window
+    const id = await ev("[...window.__eid.store.values()].find(i => i.status === 'paused').id");
+    await ev(`window.__eid.select([${id}])`);
+    await ev("document.querySelector('#menu-downloads [data-cmd=properties]').click()");
+    await until("document.querySelector('#dlg-props').open", 2000, "details");
+    await ev("document.querySelector('#p-limit').value = '500'; document.querySelector('#p-limit-set').click()");
+    await until(`window.__eidMockLimit(${id}) === 500`, 2000, "limit 500 sent");
+    await ev("document.querySelector('#p-limit').value = '0'; document.querySelector('#p-limit-set').click()");
+    await until(`window.__eidMockLimit(${id}) === null`, 2000, "0 = no limit");
+    await ev("document.querySelector('#dlg-props').close()");
+    // the countdown: bar with the action and seconds, Cancel stops it and resets the choice
+    await ev("window.__eidMockCountdown(42, 'shutdown'); window.__eid.poll()");
+    await until("!document.querySelector('#powerbar').hidden && /42/.test(document.querySelector('#power-text').textContent) && /إيقاف تشغيل الجهاز/.test(document.querySelector('#power-text').textContent)", 4000, "countdown bar");
+    if (arg("--shots")) await shot("countdown-ar.png");
+    await ev("document.querySelector('#power-cancel').click()");
+    await until("document.querySelector('#powerbar').hidden", 2000, "bar hidden");
+    await until("/أُلغي/.test(document.querySelector('#toast').textContent)", 4000, "cancelled message");
+  });
+
   for (const n of [100, 1000, 3000]) {
     for (const old of [false, true]) {
       await check(`responsive with ${n} downloads (${old ? "v0.0.1 full list" : "revisioned list"})`, async () => {

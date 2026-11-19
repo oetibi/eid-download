@@ -61,6 +61,8 @@ pub struct RunJob {
     pub subdir: Option<String>,
     /// Last known/requested file name (names the engine sidecars).
     pub file_name: Option<String>,
+    /// v0.2: this download's own limit in bytes/s (under the global limiter), `None` = none.
+    pub limit_bps: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,6 +454,7 @@ impl Inner {
                     base_dir,
                     subdir: it.subdir.clone(),
                     file_name: it.file_name.clone(),
+                    limit_bps: it.limit_kib.map(|k| k.saturating_mul(1024)),
                 },
                 qname,
             )

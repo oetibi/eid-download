@@ -94,6 +94,10 @@ impl JobRunner for EngineRunner {
                 cfg.connections = n.min(crate::config::MAX_CONNECTIONS);
             }
         }
+        if let Some(b) = job.limit_bps {
+            // v0.2 per-download limit, a child of the global limiter when there is one
+            cfg.job_limit_bps = Some(b.max(1));
+        }
         let progress = self.progress.clone();
         Box::pin(async move {
             let dir = match ensure_job_dir(&job.base_dir, job.subdir.as_deref()) {

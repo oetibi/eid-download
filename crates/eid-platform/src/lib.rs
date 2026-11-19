@@ -11,6 +11,7 @@ pub mod fs;
 pub mod ipc;
 pub mod native_host;
 pub mod net;
+pub mod power;
 pub mod process;
 pub mod time;
 pub mod ui;

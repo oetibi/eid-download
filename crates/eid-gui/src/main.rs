@@ -52,6 +52,10 @@ fn main() {
             app::open_file,
             app::segments,
             app::tray_texts,
+            app::queues,
+            app::queue_set,
+            app::item_limit,
+            app::cancel_countdown,
             app::settings_get,
             app::settings_set,
             video::video_probe,
@@ -81,6 +85,8 @@ fn main() {
             match window {
                 Ok(_) => {
                     app::focus_on_show(&h);
+                    // v0.2: "quit when finished" needs the app handle
+                    let _ = h.state::<AppState>().power.app.set(h.clone());
                     // v0.2: tray icon (if on) and the clipboard watcher (idle unless on)
                     let tray_on = h
                         .state::<AppState>()

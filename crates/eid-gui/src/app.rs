@@ -11,7 +11,7 @@ use eid_cli::serve::{self, ServeArgs, APP_GUI};
 use eid_cli::video_setup::VideoSetup;
 use eid_engine::queue::Queue;
 use eid_engine::queue_runner::EngineRunner;
-use eid_engine::scheduler::{NoPower, Scheduler, SchedulerConfig, SystemClock};
+use eid_engine::scheduler::{Scheduler, SchedulerConfig, SystemClock};
 use eid_engine::{CancellationToken, Limiter};
 use eid_ipc::{Client, ClientError, Command, Endpoint, ServeOptions, StartError};
 use serde::Serialize;
@@ -44,6 +44,9 @@ pub struct AppState {
     settings_file: Option<PathBuf>,
     limiter: Arc<Limiter>,
     connections: Arc<AtomicUsize>,
+    /// v0.2: "when the downloads are finished" (one-shot, with a cancellable countdown).
+    pub power: Arc<crate::power::GuiPower>,
+    pub power_view: Arc<Mutex<crate::power::PowerView>>,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<Result<(), String>>>>,
 }
 
@@ -142,14 +145,19 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
             Arc::new(move |item, done, total| p.record(item, done, total, Instant::now()))
         }),
     };
+    let power = Arc::new(crate::power::GuiPower::default());
+    let power_view = Arc::new(Mutex::new(crate::power::PowerView::default()));
+    let sched_cell = Arc::new(std::sync::OnceLock::new());
     let sched = Scheduler::open(
         SchedulerConfig::new(&qfile),
         Arc::new(runner),
         Arc::new(SystemClock),
-        Arc::new(NoPower),
-        Arc::new(|_| {}),
+        power.clone(),
+        crate::power::sink(power_view.clone(), sched_cell.clone()),
     )
     .map_err(|e| e.to_string())?;
+    let _ = sched_cell.set(sched.clone());
+    let _ = power.sched.set(sched.clone());
     let main_dir = default_dir.clone();
     sched
         .edit(|qs| {
@@ -205,6 +213,8 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         settings_file,
         limiter,
         connections,
+        power,
+        power_view,
         task: Mutex::new(Some(task)),
     }))
 }
@@ -237,6 +247,8 @@ pub struct Snapshot {
     items: Vec<ItemView>,
     removed: Vec<u64>,
     default_dir: String,
+    /// v0.2: the "when finished" countdown and its last outcome.
+    power: crate::power::PowerView,
 }
 
 fn unix_now() -> i64 {
@@ -264,6 +276,13 @@ pub fn list(st: State<'_, AppState>, since: Option<u64>) -> Snapshot {
         items: d.items,
         removed: d.removed,
         default_dir: st.default_dir.clone(),
+        power: {
+            // the outcome message is sent once
+            let mut g = st.power_view.lock().unwrap_or_else(|p| p.into_inner());
+            let v = g.clone();
+            g.last = None;
+            v
+        },
     }
 }
 
@@ -340,6 +359,72 @@ pub async fn segments(
     tauri::async_runtime::spawn_blocking(move || crate::segmap::for_item(&qs, id, live))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// v0.2: the queues (main first) with their counts and settings.
+#[tauri::command]
+pub fn queues(st: State<'_, AppState>) -> Vec<core::QueueView> {
+    core::queues_view(&st.sched.snapshot())
+}
+
+/// v0.2: change one queue (simultaneous downloads, stop/start, "when finished"). Stopping a
+/// queue pauses its running downloads (they stay resumable); starting it resumes its paused ones.
+#[tauri::command]
+pub fn queue_set(st: State<'_, AppState>, patch: core::QueuePatch) -> Result<(), String> {
+    let (stop, start) = st
+        .sched
+        .edit(|qs| core::apply_queue_patch(qs, &patch))
+        .map_err(|e| e.to_string())?;
+    // the main queue's simultaneous downloads is also the Settings value: keep them equal
+    if patch.name == MAIN_QUEUE {
+        if let Some(n) = patch.max_parallel {
+            let mut s = st.settings.lock().unwrap_or_else(|p| p.into_inner());
+            s.max_parallel = n;
+            if let Some(f) = &st.settings_file {
+                gui_settings::save(f, &s)?;
+            }
+        }
+    }
+    for id in stop {
+        let _ = st.sched.pause_item(id);
+    }
+    for id in start {
+        let _ = st.sched.resume_item(id);
+    }
+    Ok(())
+}
+
+/// v0.2: one download's own speed limit in KiB/s (`null` = none). A running download is
+/// paused and resumed so the new limit applies at once (it continues where it was).
+#[tauri::command]
+pub fn item_limit(st: State<'_, AppState>, id: u64, limit_kib: Option<u64>) -> Result<(), String> {
+    if limit_kib.is_some_and(|l| l == 0 || l > eid_engine::queue::MAX_ITEM_LIMIT_KIB) {
+        return Err("invalid input: speed limit".into());
+    }
+    let running = st
+        .sched
+        .edit(|qs| {
+            let it = qs
+                .queues
+                .iter_mut()
+                .flat_map(|q| q.items.iter_mut())
+                .find(|i| i.id == id)
+                .ok_or("no_such_item")?;
+            it.limit_kib = limit_kib;
+            Ok(it.status == eid_engine::queue::Status::Running)
+        })
+        .map_err(|e| e.to_string())?;
+    if running {
+        st.sched.pause_item(id).map_err(|e| e.to_string())?;
+        st.sched.resume_item(id).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// v0.2: stop the "when finished" countdown (the choice is reset, nothing happens).
+#[tauri::command]
+pub fn cancel_countdown(st: State<'_, AppState>) -> bool {
+    st.sched.cancel_countdown()
 }
 
 /// v0.1: the download settings the window shows.

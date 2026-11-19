@@ -280,3 +280,14 @@ table.segs tr.full td:last-child { color: var(--ok); }
 .clipbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--accent-soft); border-top: 1px solid var(--line); }
 .clipbar bdi { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 #set-desktop { margin-top: 10px; }
+.powerbar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--warn); color: #fff; font-weight: 600; }
+.powerbar button { background: #fff; color: var(--warn); border-color: #fff; }
+.q-list { display: grid; gap: 8px; margin: 8px 0; max-height: 50vh; overflow: auto; }
+.q-row { border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.q-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
+.q-dir { color: var(--muted); font-size: 12px; }
+.q-row .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.q-row input.q-par { width: 64px; }
+.limit-row { display: flex; gap: 6px; align-items: center; margin-top: 10px; }
+.limit-row input { width: 120px; }
+.q-row select.q-after { width: auto; flex: 1; min-width: 160px; }

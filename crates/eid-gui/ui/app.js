@@ -129,7 +129,9 @@ let pollAgain = false;
 let pollCount = 0;
 let gotList = false;
 
+let powerActive = false;
 function anyBusy() {
+  if (powerActive) return true;
   for (const it of store.values()) if (BUSY.has(it.status)) return true;
   return jobs.some((j) => j.state === "queued" || j.state === "running");
 }
@@ -163,6 +165,7 @@ async function refresh() {
     const fin = gotList && settings.notify ? finishedNow(store, s) : [];
     const r = mergeList(store, s);
     if (fin.length) notify(fin);
+    if (s && "power" in s) applyPower(s.power);
     rev = r.rev;
     if (r.changed || !gotList) invalidate(true);
     gotList = true;
@@ -447,6 +450,7 @@ const commands = {
   add_video: { run: () => openVideo() },
   columns: { run: () => { const r = $("#thead").getBoundingClientRect(); showColsMenu(document.documentElement.dir === "rtl" ? r.right - 20 : r.left + 20, r.bottom); } },
   customize_toolbar: { run: () => openToolbarDialog() },
+  queues: { run: () => openQueues() },
   find: { run: () => { $("#search").focus(); $("#search").select(); } },
   settings: { run: () => openSettings() },
   resume: {
@@ -736,6 +740,8 @@ function openProps(id) {
   if (id == null || !store.has(id)) return;
   propsId = id;
   renderProps();
+  const lim = store.get(id)?.limit_kib;
+  $("#p-limit").value = lim ? String(lim) : "0";
   $("#dlg-props").showModal();
   drawMap(segmentView(null));
   refreshMap();
@@ -1563,3 +1569,69 @@ $("#clip-add").addEventListener("click", () => {
   if (kind === "video") openVideo(url); else openAdd(url);
 });
 sendTrayTexts();
+
+// ---------------------------------------------------------------- v0.2: per-download speed limit
+$("#p-limit-set").addEventListener("click", async () => {
+  const id = propsId;
+  const v = Number($("#p-limit").value);
+  if (!Number.isInteger(v) || v < 0 || v > 12500000) { toast(`${t("p_limit")} 0–12500000`); return; }
+  try { await api.call("item_limit", { id, limit_kib: v === 0 ? null : v }); toast(t("saved")); kick(); } catch (e) { failure(e); }
+});
+
+// ---------------------------------------------------------------- v0.2: "when finished" countdown
+const AD_KEY = { none: "ad_none", exit: "ad_exit", sleep: "ad_sleep", hibernate: "ad_hibernate", shutdown: "ad_shutdown" };
+function applyPower(p) {
+  const c = Array.isArray(p?.countdown) && Number.isFinite(p.countdown[0]) && AD_KEY[p.countdown[1]] ? p.countdown : null;
+  powerActive = !!c;
+  const bar = $("#powerbar");
+  if (c) {
+    setText($("#power-text"), t("pw_count", t(AD_KEY[c[1]]), Math.max(0, Math.round(c[0]))));
+    if (bar.hidden) { bar.hidden = false; $("#power-cancel").focus(); }
+  } else if (!bar.hidden) bar.hidden = true;
+  const last = typeof p?.last === "string" ? p.last : null;
+  if (last === "cancelled") toast(t("pw_cancelled"));
+  else if (last === "aborted") toast(t("pw_aborted"));
+  else if (last?.startsWith("failed:") && AD_KEY[last.slice(7)]) toast(t("pw_failed", t(AD_KEY[last.slice(7)])));
+}
+$("#power-cancel").addEventListener("click", async () => {
+  try { await api.call("cancel_countdown"); } catch (e) { failure(e); }
+  $("#powerbar").hidden = true;
+  powerActive = false;
+  kick();
+});
+
+// ---------------------------------------------------------------- v0.2: queues dialog
+const queueLabel = (q) => (q.name === "main" ? t("q_main") : q.dir.split(/[\\/]/).filter(Boolean).pop() || q.name);
+async function openQueues() {
+  await fillQueues();
+  $("#dlg-queues").showModal();
+}
+async function fillQueues() {
+  let list;
+  try { list = await api.call("queues"); } catch (e) { failure(e); return; }
+  $("#q-error").hidden = true;
+  const tpl = $("#q-row");
+  $("#q-list").replaceChildren(...list.map((q) => {
+    const row = tpl.content.firstElementChild.cloneNode(true);
+    for (const n of row.querySelectorAll("[data-t]")) n.textContent = t(n.dataset.t);
+    row.dataset.queue = q.name;
+    row.querySelector(".q-name").textContent = `${queueLabel(q)}${q.paused ? ` ${t("q_stopped")}` : ""}`;
+    row.querySelector(".q-dir").textContent = q.dir;
+    row.querySelector(".q-counts").textContent = t("q_counts", q.total, q.done, q.running, q.failed);
+    row.querySelector(".q-par").value = q.max_parallel;
+    row.querySelector(".q-after").value = AD_KEY[q.after_done] ? q.after_done : "none";
+    const tg = row.querySelector(".q-toggle");
+    tg.textContent = q.paused ? t("q_start") : t("q_stop");
+    const send = async (patch) => {
+      try { await api.call("queue_set", { patch: { name: q.name, ...patch } }); await fillQueues(); kick(); }
+      catch (e) { $("#q-error").textContent = errMessage(e); $("#q-error").hidden = false; }
+    };
+    row.querySelector(".q-save").addEventListener("click", () => {
+      const n = Number(row.querySelector(".q-par").value);
+      if (!Number.isInteger(n) || n < 1 || n > 8) { $("#q-error").textContent = `${t("s_parallel")}: 1–8`; $("#q-error").hidden = false; return; }
+      send({ max_parallel: n, after_done: row.querySelector(".q-after").value });
+    });
+    tg.addEventListener("click", () => send({ paused: !q.paused }));
+    return row;
+  }));
+}

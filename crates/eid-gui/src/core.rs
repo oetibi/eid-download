@@ -2,7 +2,7 @@
 //! of the queue the window shows, byte progress with speed and time left, adding links into the
 //! folder the user picked, removing items, and plain-language error categories.
 
-use eid_engine::queue::{Item, Queue, QueueSet, Status};
+use eid_engine::queue::{Item, PowerAction, Queue, QueueSet, Status};
 use eid_engine::scheduler::Scheduler;
 use eid_engine::urlsafe;
 use eid_ipc::Command;
@@ -201,6 +201,8 @@ pub struct ItemView {
     /// The engine's own text, for the details line.
     pub error: Option<String>,
     pub rate: Option<Rate>,
+    /// v0.2: this download's own speed limit (KiB/s), if any.
+    pub limit_kib: Option<u64>,
 }
 
 /// Name shown for an item whose file name is not known yet: the last path segment of the URL.
@@ -266,6 +268,7 @@ pub fn view(qs: &QueueSet, progress: &Progress, now: Instant, unix_now: i64) -> 
                 error_kind: error.as_deref().map(error_kind),
                 error,
                 rate,
+                limit_kib: it.limit_kib,
             }
         })
         .collect();
@@ -290,6 +293,139 @@ pub fn finished_file(qs: &QueueSet, id: u64) -> Option<PathBuf> {
             .find(|i| i.id == id && i.status == Status::Done)
             .and_then(|i| i.file_name.as_ref().map(|n| item_dir(q, i).join(n)))
     })
+}
+
+/// v0.2 queue management: one queue as the window lists it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct QueueView {
+    pub name: String,
+    pub dir: String,
+    pub max_parallel: u32,
+    pub paused: bool,
+    /// none | exit | sleep | hibernate | shutdown
+    pub after_done: &'static str,
+    pub total: usize,
+    pub done: usize,
+    pub running: usize,
+    pub failed: usize,
+}
+
+pub const AFTER_DONE: &[&str] = &["none", "exit", "sleep", "hibernate", "shutdown"];
+
+pub fn power_name(a: PowerAction) -> &'static str {
+    match a {
+        PowerAction::None => "none",
+        PowerAction::Exit => "exit",
+        PowerAction::Sleep => "sleep",
+        PowerAction::Hibernate => "hibernate",
+        PowerAction::Shutdown => "shutdown",
+    }
+}
+
+pub fn power_from_name(s: &str) -> Result<PowerAction, String> {
+    Ok(match s {
+        "none" => PowerAction::None,
+        "exit" => PowerAction::Exit,
+        "sleep" => PowerAction::Sleep,
+        "hibernate" => PowerAction::Hibernate,
+        "shutdown" => PowerAction::Shutdown,
+        _ => {
+            return Err(format!(
+                "after_done must be one of {}",
+                AFTER_DONE.join(", ")
+            ))
+        }
+    })
+}
+
+/// Every queue, main first, then in creation order.
+pub fn queues_view(qs: &QueueSet) -> Vec<QueueView> {
+    let mut v: Vec<QueueView> = qs
+        .queues
+        .iter()
+        .map(|q| QueueView {
+            name: q.name.clone(),
+            dir: q.dir.clone(),
+            max_parallel: q.max_parallel,
+            paused: q.paused,
+            after_done: power_name(q.after_done),
+            total: q.items.len(),
+            done: q.items.iter().filter(|i| i.status == Status::Done).count(),
+            running: q
+                .items
+                .iter()
+                .filter(|i| i.status == Status::Running)
+                .count(),
+            failed: q
+                .items
+                .iter()
+                .filter(|i| i.status == Status::Failed)
+                .count(),
+        })
+        .collect();
+    v.sort_by_key(|q| q.name != MAIN_QUEUE);
+    v
+}
+
+/// A change to one queue from the window. Absent fields are kept.
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct QueuePatch {
+    pub name: String,
+    #[serde(default)]
+    pub max_parallel: Option<u32>,
+    #[serde(default)]
+    pub paused: Option<bool>,
+    #[serde(default)]
+    pub after_done: Option<String>,
+}
+
+/// Validate and apply `p` (all or nothing). Returns the ids of the queue's running items when
+/// the queue was just stopped (the caller pauses them: a stopped queue starts nothing and keeps
+/// nothing running) and of its paused items when it was just started (the caller resumes them).
+pub fn apply_queue_patch(
+    qs: &mut QueueSet,
+    p: &QueuePatch,
+) -> Result<(Vec<u64>, Vec<u64>), String> {
+    let max = eid_cli::gui_settings::MAX_PARALLEL;
+    if let Some(n) = p.max_parallel {
+        if !(1..=max).contains(&n) {
+            return Err(format!("simultaneous downloads must be 1..={max}"));
+        }
+    }
+    let after = p.after_done.as_deref().map(power_from_name).transpose()?;
+    let q = qs
+        .queues
+        .iter_mut()
+        .find(|q| q.name == p.name)
+        .ok_or_else(|| "no_such_queue".to_string())?;
+    if let Some(n) = p.max_parallel {
+        q.max_parallel = n;
+    }
+    if let Some(a) = after {
+        q.after_done = a;
+    }
+    let (mut stop, mut start) = (vec![], vec![]);
+    if let Some(pz) = p.paused {
+        if pz && !q.paused {
+            stop = q
+                .items
+                .iter()
+                .filter(|i| i.status == Status::Running)
+                .map(|i| i.id)
+                .collect();
+        }
+        if !pz && q.paused {
+            start = q
+                .items
+                .iter()
+                .filter(|i| i.status == Status::Paused)
+                .map(|i| i.id)
+                .collect();
+        }
+        q.paused = pz;
+    }
+    Ok((stop, start))
 }
 
 /// v0.2 clipboard monitoring: the copied text, if it is exactly one http(s) link worth
@@ -897,6 +1033,92 @@ mod tests {
     }
 
     #[test]
+    fn queues_are_listed_main_first_and_patches_are_validated_all_or_nothing() {
+        let it = |id: u64, status: Status| Item {
+            id,
+            url: format!("http://h/{id}.zip"),
+            subdir: None,
+            file_name: None,
+            status,
+            attempts: 0,
+            not_before: None,
+            last_error: None,
+            limit_kib: None,
+        };
+        let mut a = Queue::new("folder-1", "/d1");
+        a.items = vec![
+            it(1, Status::Running),
+            it(2, Status::Paused),
+            it(3, Status::Done),
+        ];
+        let mut m = Queue::new(MAIN_QUEUE, "/m");
+        m.items = vec![it(4, Status::Failed)];
+        let mut qs = QueueSet {
+            queues: vec![a, m],
+            next_id: 10,
+        };
+        let v = queues_view(&qs);
+        assert_eq!(v[0].name, MAIN_QUEUE);
+        assert_eq!(
+            (v[1].total, v[1].done, v[1].running, v[1].failed),
+            (3, 1, 1, 0)
+        );
+        assert_eq!(v[0].after_done, "none");
+        // stop: running items are reported to be paused
+        let p = QueuePatch {
+            name: "folder-1".into(),
+            paused: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(apply_queue_patch(&mut qs, &p).unwrap(), (vec![1], vec![]));
+        assert!(qs.queues[0].paused);
+        // start: its paused items are reported to be resumed
+        let p = QueuePatch {
+            name: "folder-1".into(),
+            paused: Some(false),
+            max_parallel: Some(4),
+            after_done: Some("shutdown".into()),
+        };
+        assert_eq!(apply_queue_patch(&mut qs, &p).unwrap(), (vec![], vec![2]));
+        assert_eq!(
+            (qs.queues[0].max_parallel, qs.queues[0].after_done),
+            (4, PowerAction::Shutdown)
+        );
+        // invalid: nothing changes
+        let before = qs.clone();
+        for bad in [
+            QueuePatch {
+                name: "folder-1".into(),
+                max_parallel: Some(0),
+                paused: Some(true),
+                ..Default::default()
+            },
+            QueuePatch {
+                name: "folder-1".into(),
+                max_parallel: Some(99),
+                ..Default::default()
+            },
+            QueuePatch {
+                name: "folder-1".into(),
+                after_done: Some("reboot".into()),
+                paused: Some(true),
+                ..Default::default()
+            },
+            QueuePatch {
+                name: "nope".into(),
+                paused: Some(true),
+                ..Default::default()
+            },
+        ] {
+            assert!(apply_queue_patch(&mut qs, &bad).is_err(), "{bad:?}");
+            assert_eq!(qs, before);
+        }
+        for n in AFTER_DONE {
+            assert_eq!(power_name(power_from_name(n).unwrap()), *n);
+        }
+    }
+
+    #[test]
     fn display_names_fall_back_to_the_url() {
         let it = |u: &str| Item {
             id: 1,
@@ -907,6 +1129,7 @@ mod tests {
             attempts: 0,
             not_before: None,
             last_error: None,
+            limit_kib: None,
         };
         assert_eq!(
             display_name(&it("http://h/dir/%D9%85%D9%84%D9%81.zip")),

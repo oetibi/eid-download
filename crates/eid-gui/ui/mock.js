@@ -112,6 +112,12 @@ export function mockApi(params = new URLSearchParams()) {
   setInterval(jobTick, 500);
   const job = (id) => { const j = jobs.find((x) => x.job === id); if (!j) throw "no_such_job"; return j; };
 
+  // v0.2 queues + "when finished" (a stand-in; the real countdown is the engine's)
+  const queues = [{ name: "main", dir: DIR, max_parallel: 3, paused: false, after_done: "none" }, { name: "folder-1", dir: "D:\\Apps", max_parallel: 2, paused: false, after_done: "none" }];
+  const power = { countdown: null, last: null };
+  window.__eidMockCountdown = (secs, action) => { power.countdown = secs ? [secs, action] : null; };
+  const limits = new Map();
+  window.__eidMockLimit = (id) => limits.get(id);
   const handlers = {
     list: ({ since }) => {
       tick();
@@ -120,7 +126,8 @@ export function mockApi(params = new URLSearchParams()) {
       const tooOld = since == null || since < rev - 100000 || (removed.length && since < removed[0][0] - 1 && removed.length >= 2000);
       if (tooOld) return { rev, full: true, items: sorted(), removed: [], default_dir: DIR };
       const changed = [...items.values()].filter((e) => e.rev > since).map((e) => e.item);
-      return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR };
+      const pw = { ...power }; power.last = null;
+      return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR, power: pw };
     },
     add: ({ links, name, folder }) => {
       const ls = String(links).split(/\s+/).filter(Boolean);
@@ -174,6 +181,26 @@ export function mockApi(params = new URLSearchParams()) {
       });
       return { source: "checkpoint", total: r.total, done: rows.reduce((a, x) => a + x.done, 0), segments: S, cells, rows };
     },
+    queues: () => queues.map((q) => {
+      const its = [...items.values()].map((e) => e.item).filter((i) => (q.name === "main" ? i.folder !== "D:\\Apps" : i.folder === "D:\\Apps"));
+      return { ...q, total: its.length, done: its.filter((i) => i.status === "done").length, running: its.filter((i) => i.status === "running").length, failed: its.filter((i) => i.status === "failed").length };
+    }),
+    queue_set: ({ patch }) => {
+      const keys = ["name", "max_parallel", "paused", "after_done"];
+      if (!patch || Object.keys(patch).some((k) => !keys.includes(k))) throw "invalid input: unknown field";
+      const q = queues.find((x) => x.name === patch.name);
+      if (!q) throw "no_such_queue";
+      if (patch.max_parallel != null && !(patch.max_parallel >= 1 && patch.max_parallel <= 8)) throw "invalid input: max_parallel";
+      if (patch.after_done != null && !["none", "exit", "sleep", "hibernate", "shutdown"].includes(patch.after_done)) throw "invalid input: after_done";
+      Object.assign(q, Object.fromEntries(Object.entries(patch).filter(([k, v]) => k !== "name" && v != null)));
+    },
+    item_limit: ({ id, limit_kib }) => {
+      find(id);
+      if (limit_kib != null && !(Number.isInteger(limit_kib) && limit_kib >= 1 && limit_kib <= 12500000)) throw "invalid input: speed limit";
+      limits.set(id, limit_kib);
+      touch({ ...find(id), limit_kib });
+    },
+    cancel_countdown: () => { const had = !!power.countdown; power.countdown = null; if (had) { power.last = "cancelled"; for (const q of queues) q.after_done = "none"; } return had; },
     settings_get: () => ({ ...engineSettings }),
     settings_set: ({ settings: s }) => {
       const keys = ["max_parallel", "connections", "speed_limit_kib", "schedule", "tray", "close_to_tray", "clipboard"];
