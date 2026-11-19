@@ -228,6 +228,8 @@ jobs:
         working-directory: rel
         run: |
           cp dist/EidDownload-windows-x64.zip dist/EidDownload-*-windows-x64-setup.exe target/release/EidDownload.exe target/release/eid.exe target/release/eid-native-host.exe .
+          # SHA256SUMS.txt is written on Windows (CRLF): normalise to LF so grep/sha256sum and the notes read it exactly
+          sed -i 's/\r$//' SHA256SUMS.txt
           test "$(ls EidDownload-*-windows-x64-setup.exe | wc -l)" -eq 1
           grep -q 'windows-x64-setup.exe$' SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt

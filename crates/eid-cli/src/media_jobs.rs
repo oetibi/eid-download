@@ -538,7 +538,12 @@ impl VideoJobs {
                 child.wait().await.ok().and_then(|s| s.code())
             }
         };
-        let last = errs.await.ok().flatten();
+        // a tool the child started may still hold the stderr pipe open (Windows inherits handles):
+        // never let that keep the job "running" after the child itself has exited
+        let last = match tokio::time::timeout(Duration::from_secs(5), errs).await {
+            Ok(r) => r.ok().flatten(),
+            Err(_) => None,
+        };
         (code, end_err.or(last))
     }
 
