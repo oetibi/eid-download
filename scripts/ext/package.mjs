@@ -6,6 +6,8 @@
 //                                 the stores refuse it and give the listing its own id, which must
 //                                 then be added to extension/native-host-ids.json.
 //   eid-download-firefox-<v>.zip  addons.mozilla.org (gecko id kept: it is the AMO id).
+//   eid-download-chrome-sideload-<v>.zip  NOT for a store: keeps `key`, so an unpacked install in
+//                                 Chrome/Edge gets the pinned id the installer already registers.
 //   SHA256SUMS.txt
 // Plain, unminified sources, so no separate source archive is needed for AMO review.
 // Deterministic: fixed timestamps and sorted entries, so the same source gives the same bytes.
@@ -66,8 +68,8 @@ export function packageAll(outDir) {
     const built = build(tmp);
     fs.mkdirSync(outDir, { recursive: true });
     const sums = [];
-    for (const target of ["chrome", "firefox"]) {
-      const dir = built[target];
+    for (const target of ["chrome", "firefox", "chrome-sideload"]) {
+      const dir = built[target === "chrome-sideload" ? "chrome" : target];
       const man = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
       if (target === "chrome") delete man.key;
       const entries = files(dir).map((name) => ({

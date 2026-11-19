@@ -14,14 +14,14 @@
 
 ## Native Messaging (إضافة المتصفح)
 - **مصدر واحد للمعرّفات:** `extension/native-host-ids.json` — قوائم `chrome` و`edge` و`firefox` واسم المضيف `com.eid.download`.
-- **القيم الحالية وهمية (`"placeholder": true`).** معرّفات الإضافة غير نهائية. قبل الإصدار: ضع المعرّفات الحقيقية (Chrome/Edge: 32 حرفاً من a إلى p؛ Firefox: `name@domain` أو `{uuid}`) و`"placeholder": false`. **بناء الوسم يرفض الملف الوهمي** (`build_installer.ps1 -Release`). قائمة فارغة = لا يُسجَّل ذلك المتصفح.
+- **القيم الحالية حقيقية (`"placeholder": false`):** Chrome/Edge `ambokeecedpgicighhcpdfjphdnphgaa` (مثبّت بالمفتاح العام في `scripts/ext/build.mjs`، للتثبيت اليدوي)، وFirefox `eid-download@eid-download`. معرّفات متاجر Chrome/Edge تُضاف عند النشر (`docs/OWNER-ACTIONS.md` §5). **بناء الوسم يرفض أي ملف وهمي** (`build_installer.ps1 -Release`). قائمة فارغة = لا يُسجَّل ذلك المتصفح.
 - `scripts/windows/native_host_manifests.py` يكتب `com.eid.download.chrome.json` و`.edge.json` و`.firefox.json` بنفس قواعد التحقق في `crates/eid-platform/src/native_host.rs`. `path` فيها اسم الملف فقط `eid-native-host.exe`: على Windows يحلّ Chrome وEdge وFirefox المسار النسبي من مجلد ملف الـmanifest نفسه، فلا يعتمد الملف على مكان التثبيت. Edge يقبل معرّفات `edge` ومعرّفات `chrome` (لأن Edge يثبّت إضافات Chrome Web Store بمعرّفها).
 - `installer/hooks.nsh`: بعد التثبيت يكتب `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.eid.download` و`...\Microsoft\Edge\...` و`...\Mozilla\NativeMessagingHosts\...` (القيمة الافتراضية = مسار الـmanifest) لكل manifest موجود؛ عند الإزالة يحذف المفتاح **فقط إن كان يشير إلى هذا التثبيت**.
 
 ## ما لم يُختبر
 - التثبيت على Windows 10/11 حقيقي بحساب مستخدم عادي (CI: Windows Server على GitHub).
 - جهاز بلا WebView2 فعلاً (مسار `embedBootstrapper`).
-- اتصال إضافة متصفح حقيقية بالمضيف المثبَّت (المعرّفات وهمية).
+- اتصال إضافة متصفح حقيقية بالمضيف **المثبَّت بالمثبّت على Windows** (مختبر على Linux في Chrome حقيقي: `scripts/ext/ext_e2e.mjs`).
 - الترقية فوق نسخة سابقة مثبّتة (لا مثبّت قبل v0.1).
 - SmartScreen: المثبّت غير موقّع (التوقيع يحتاج شهادة المالك).
 </div>
