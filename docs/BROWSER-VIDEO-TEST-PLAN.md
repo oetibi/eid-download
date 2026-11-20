@@ -10,7 +10,7 @@
 | Firefox | `browser_e2e.mjs --browser firefox` (8 فحوص)، تثبيت مؤقت كما في `about:debugging` | ci-windows، مهمة `browsers (firefox)` | التثبيت المؤقت على جهاز المالك (Firefox 160)؛ التثبيت الدائم يحتاج توقيع AMO (لم يُفعل) |
 | Chrome | `browser_e2e.mjs --browser chrome` | ci-windows + محلياً على Linux | «تحميل إضافة غير مضغوطة» على جهاز المالك |
 | Edge | `browser_e2e.mjs --browser edge` | ci-windows | نفسه |
-| Brave، Opera، Vivaldi | `scripts/ext/more_browsers.ps1`: يثبّت المتصفح على المشغّل، ويجرّب مفاتيح Native Messaging المرشّحة كلاً وحده، ثم الفحوص كلها بالمفتاح الذي وصل فعلاً | ci-windows، مهمة `browsers-more` | التثبيت على جهاز المالك |
+| Brave، Opera (Vivaldi: لم يُختبر، انظر BROWSER-COMPATIBILITY) | `scripts/ext/more_browsers.ps1`: يثبّت المتصفح على المشغّل، ويجرّب مفاتيح Native Messaging المرشّحة كلاً وحده، ثم الفحوص كلها بالمفتاح الذي وصل فعلاً | ci-windows، مهمة `browsers-more` | التثبيت على جهاز المالك |
 | ربط التطبيق بكل متصفح | `window_e2e.mjs` الفحوص 6 و7 و9 (مفاتيح HKCU)، `verify_installer.ps1` (المثبّت يكتبها ويزيلها) | ci-windows | — |
 
 ## 2. اكتشاف الفيديو والزر

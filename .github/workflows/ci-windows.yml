@@ -52,15 +52,19 @@ jobs:
           retention-days: 14
           path: browser-e2e/*
           if-no-files-found: warn
-  # Brave, Opera and Vivaldi: installed on the runner, and the Native Messaging registry key each
-  # one really reads is found by trying candidates one at a time (scripts/ext/more_browsers.ps1).
+  # Brave and Opera: installed on the runner, and the Native Messaging registry key each one
+  # really reads is found by trying candidates one at a time (scripts/ext/more_browsers.ps1).
+  # Vivaldi is NOT in the list: on windows-latest the test could not drive Vivaldi 8.3 at all
+  # (DevTools pipe and port, headless and windowed: runs 44730555746, 44736436260, 44741042501),
+  # so it is reported as not tested (docs/BROWSER-COMPATIBILITY.md), not hidden; the script still
+  # takes -Browser vivaldi for a manual run.
   browsers-more:
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        browser: [brave, opera, vivaldi]
+        browser: [brave, opera]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
