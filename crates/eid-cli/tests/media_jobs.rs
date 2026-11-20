@@ -140,8 +140,8 @@ async fn body() {
     assert_eq!(p["kind"], "playlist");
     assert_eq!(p["items"].as_array().unwrap().len(), 3);
     assert!(
-        v.add(Kind::Playlist, &purl, "4320p", None, None).is_err(),
-        "no 8K"
+        v.add(Kind::Playlist, &purl, "8640p", None, None).is_err(),
+        "nothing above 8K"
     );
     assert!(v
         .add(Kind::Video, &purl, "720p", Some(vec![1]), None)
@@ -162,9 +162,9 @@ async fn body() {
         .collect();
     assert_eq!(states, ["done", "skipped", "done"]);
     let folder = e.out().join("Mix");
-    assert!(folder.join("01 - Alpha.mp4").is_file());
-    assert!(folder.join("03 - Gamma.mp4").is_file());
-    assert!(!folder.join("02 - Beta.mp4").exists());
+    assert!(folder.join("001 - Alpha.mp4").is_file());
+    assert!(folder.join("003 - Gamma.mp4").is_file());
+    assert!(!folder.join("002 - Beta.mp4").exists());
 
     phase("pause/resume");
     // a long-running job: pause stops the child, resume starts it again, remove stops it

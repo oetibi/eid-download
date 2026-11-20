@@ -286,10 +286,11 @@ try {
     assert(sha(path.join(DOWNLOADS, "w-slow.bin")) === expected, "SHA-256 after pause/resume");
   });
 
+  const KEYS = { chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.eid.download", edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.eid.download", firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts\\com.eid.download" };
   await check("6. Settings -> Connect the browsers is refused here with the 'extract the ZIP' message", async () => {
     await w.ev(click("[data-cmd=settings]"));
     await w.ev(click("#dlg-settings [data-tab=desktop]"));
-    await until(() => w.ev("document.querySelectorAll('#browser-list li').length === 3"), 10000, "browser list");
+    await until(() => w.ev(`document.querySelectorAll('#browser-list li').length === ${Object.keys(KEYS).length}`), 10000, "browser list");
     await w.ev(click("#browser-connect"));
     await until(() => w.ev("!document.querySelector('#browser-error').hidden"), 10000, "refusal");
     const t = await w.ev("document.querySelector('#browser-error').textContent");
@@ -306,11 +307,10 @@ try {
   fs.mkdirSync(dir, { recursive: true });
   for (const f of ["EidDownload.exe", "eid-native-host.exe", "eid.exe"]) fs.copyFileSync(path.join(BIN, f), path.join(dir, f));
   w = await startApp(path.join(dir, "EidDownload.exe"));
-  const KEYS = { chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.eid.download", edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.eid.download", firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts\\com.eid.download" };
   const regValue = (k) => { try { return /REG_SZ\s+(.+)/.exec(execFileSync("reg", ["query", k, "/ve"], { encoding: "utf8", windowsHide: true }))?.[1].trim() ?? null; } catch { return null; } };
   const saved = Object.fromEntries(Object.entries(KEYS).map(([b, k]) => [b, regValue(k)]));
 
-  await check("7. extracted copy: no startup bar; Connect -> all three browsers point at this copy", async () => {
+  await check("7. extracted copy: no startup bar; Connect -> every browser points at this copy", async () => {
     await sleep(3000);
     assert(await w.ev("document.querySelector('#checkbar').hidden"), "startup bar shown for an extracted copy");
     await w.ev(click("[data-cmd=settings]"));
@@ -340,6 +340,27 @@ try {
     p.stdin.end();
     log(`     native host answered: ${JSON.stringify(resp)}`);
     assert(resp.ok === true && resp.result?.app === "gui", JSON.stringify(resp));
+  });
+
+  await check("8b. 'Open in Eid Download' from the browser: the real host -> the real window opens its Video window with the link and both choices", async () => {
+    await w.ev("(() => { for (const d of document.querySelectorAll('dialog[open]')) d.close(); return true; })()");
+    const m = regValue(KEYS.chrome);
+    const host = JSON.parse(fs.readFileSync(m, "utf8")).path;
+    const p = spawn(host, ["chrome-extension://ambokeecedpgicighhcpdfjphdnphgaa/"], { env: { ...ENV, EID_IPC_ENDPOINT: ENDPOINT }, windowsHide: true });
+    procs.push(p);
+    const link = "https://www.youtube.com/watch?v=aqz-KE-bpKQ&list=PLtestlist01";
+    const body = Buffer.from(JSON.stringify({ v: 1, id: "ext-e2e2", command: { cmd: "open_video", url: link } }));
+    const len = Buffer.alloc(4); len.writeUInt32LE(body.length);
+    let out = Buffer.alloc(0);
+    p.stdout.on("data", (d) => { out = Buffer.concat([out, d]); });
+    p.stdin.write(Buffer.concat([len, body]));
+    const resp = await until(() => { if (out.length < 4) return null; const n = out.readUInt32LE(0); return out.length >= 4 + n ? JSON.parse(out.subarray(4, 4 + n).toString("utf8")) : null; }, 30000, "native host answer");
+    p.stdin.end();
+    log(`     native host answered: ${JSON.stringify(resp)}`);
+    assert(resp.ok === true && resp.result?.opened === true, JSON.stringify(resp));
+    await until(() => w.ev(`document.querySelector('#dlg-video').open && document.querySelector('#in-vurl').value === ${JSON.stringify(link)}`), 15000, "the Video window with the link");
+    await w.shot("B8b-open-from-browser.png");
+    await w.ev(click("#v-cancel"));
   });
 
   await check("9. Disconnect removes this copy's registration", async () => {

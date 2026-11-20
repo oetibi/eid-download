@@ -55,7 +55,7 @@ function trustedSender(sender) {
   return true;
 }
 
-const ACTIONS = new Set(["ping", "probe", "add", "add_video", "add_playlist"]);
+const ACTIONS = new Set(["ping", "probe", "add", "add_video", "add_playlist", "open_video"]);
 
 async function handle(msg) {
   if (!msg || typeof msg !== "object" || msg.eid !== 1 || !ACTIONS.has(msg.cmd)) {
@@ -67,6 +67,7 @@ async function handle(msg) {
   if (msg.quality !== undefined) action.quality = msg.quality;
   if (msg.items !== undefined) action.items = msg.items;
   if (msg.if_missing !== undefined) action.if_missing = msg.if_missing;
+  if (msg.format !== undefined) action.format = msg.format;
   const r = await nativeCall(action);
   // results of add* are opaque to the page ({job}); never forward more than ok/code
   return r.ok ? { ok: true } : { ok: false, code: r.code };

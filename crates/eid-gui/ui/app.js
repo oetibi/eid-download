@@ -8,8 +8,9 @@
 import { TEXT } from "./i18n.js";
 import {
   ACTIVE, BUSY, CATEGORIES, mergeList, buildView, inView, categoryOf, fraction, clickSelect,
-  pollDelay, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
+  pollDelay, safeQualities, QUALITIES, optionFor, optionDetails, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
   COLUMNS, TOOLS, normalizeCols, gridTemplate, moveCol, normalizeToolbar, linksFromText, finishedNow, videoPage,
+  linkPlaylist, parseRange,
 } from "./logic.js";
 
 const tauri = window.__TAURI__;
@@ -169,6 +170,20 @@ async function refresh() {
     // engine warnings (e.g. a resume point that could not be saved): shown once each
     if (Array.isArray(s?.warnings)) for (const w of s.warnings.slice(0, 5)) {
       if (Array.isArray(w) && typeof w[1] === "string") toast(t("w_checkpoint", store.get(w[0])?.name ?? `#${w[0]}`, w[1].slice(0, 300)));
+    }
+    // v0.2: "Open in Eid Download" from the browser: the Video window with that link (the
+    // window was brought to the front by the app); the newest request wins
+    if (Array.isArray(s?.open_video) && s.open_video.length) {
+      const o = s.open_video[s.open_video.length - 1];
+      const u = typeof o === "string" ? o : o?.url;
+      const q = typeof o === "object" && safeQualities([o?.quality]).length ? o.quality : null;
+      if (typeof u === "string" && u.length <= 8192 && /^https?:\/\/\S+$/i.test(u)) openFromBrowser(u, q);
+    }
+    // a browser link that waited for the user to finish a dialog
+    if (pendingOpen && !document.querySelector("dialog[open]")) {
+      const p = pendingOpen;
+      pendingOpen = null;
+      openFromBrowser(p.url, p.quality);
     }
     rev = r.rev;
     if (r.changed || !gotList) invalidate(true);
@@ -924,10 +939,20 @@ function openInfo(title, body) {
 
 // ---------------------------------------------------------------- settings dialog
 function qualityLabel(q) {
-  return q === "best" ? t("q_best") : q === "audio" ? t("q_audio") : q === "2160p" ? t("q_2160p") : q;
+  return q === "best" ? t("q_best") : q === "audio" ? t("q_audio") : q === "m4a" ? t("q_m4a") : q === "2160p" ? t("q_2160p") : q === "4320p" ? t("q_4320p") : q;
 }
-function fillQualitySelect(sel, list, pick) {
-  sel.replaceChildren(...list.map((q) => { const o = el("option", null, qualityLabel(q)); o.value = q; return o; }));
+/** v0.2: "1080p — 60 fps · H.264 · with audio · ≈ 52 MB" from the probe's own details. */
+const OPT_WORDS = () => ({
+  fps: (n) => t("vd_opt_fps", n), audio: t("vd_opt_audio"), noaudio: t("vd_opt_noaudio"),
+  original: t("vd_opt_original"), converted: t("vd_opt_converted"), kbps: (n) => t("vd_opt_kbps", n), size: (s) => t("vd_opt_size", s),
+});
+function fillQualitySelect(sel, list, pick, result) {
+  sel.replaceChildren(...list.map((q) => {
+    const d = result ? optionDetails(optionFor(result, q), OPT_WORDS(), size) : [];
+    const o = el("option", null, d.length ? `${qualityLabel(q)} — ${d.join(" · ")}` : qualityLabel(q));
+    o.value = q;
+    return o;
+  }));
   sel.value = list.includes(pick) ? pick : list.includes("best") ? "best" : list[0] ?? "";
 }
 function showSettingsFolder() {
@@ -952,7 +977,7 @@ function openSettings() {
   $("#set-missing").value = settings.missing;
   $("#set-lang").value = settings.lang;
   $("#set-theme").value = settings.theme;
-  fillQualitySelect($("#set-quality"), ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"], settings.quality);
+  fillQualitySelect($("#set-quality"), QUALITIES, settings.quality);
   showSettingsFolder();
   showTools($("#set-tools"), $("#set-tools-install"));
   api.call("app_info").then((i) => setText($("#about-text"), t("about", i.version, i.commit, i.program))).catch(() => {});
@@ -971,7 +996,7 @@ $("#set-lang").addEventListener("change", (e) => {
   openSettingsTexts();
 });
 function openSettingsTexts() {
-  fillQualitySelect($("#set-quality"), ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"], settings.quality);
+  fillQualitySelect($("#set-quality"), QUALITIES, settings.quality);
   $("#set-theme").value = settings.theme;
   showSettingsFolder();
   showTools($("#set-tools"), $("#set-tools-install"));
@@ -1031,12 +1056,32 @@ $("#set-tools-install").addEventListener("click", async () => {
 
 // ---------------------------------------------------------------- video / playlist dialog
 let probe = null; // { url, result }
+// v0.2: a link with list= : both probes, and which one the dialog shows
+let scope = null; // { ctx: linkPlaylist(), video: {url,result}|null, list: {url,result}|null }
 let probeSeq = 0;
 let videoFolder = null;
 const vStatus = (msg) => { const s = $("#v-status"); s.hidden = !msg; s.textContent = msg ?? ""; };
 const vError = (msg) => { const s = $("#v-error"); s.hidden = !msg; s.textContent = msg ?? ""; };
 
-function openVideo(prefill) {
+/**
+ * v0.2: a link sent by the browser's button opens the Video window. A dialog the user is
+ * working in (links being typed, settings, the tools agreement, another video) is never closed
+ * under them: the link waits, says so, and opens when that dialog is closed.
+ */
+let pendingOpen = null;
+let pickedQuality = null;
+function openFromBrowser(url, quality) {
+  if (document.querySelector("dialog[open]")) {
+    pendingOpen = { url, quality: quality ?? null };
+    toast(t("from_browser_waiting"));
+    return;
+  }
+  openVideo(url, quality);
+  toast(t("from_browser"));
+}
+
+function openVideo(prefill, quality) {
+  pickedQuality = quality ?? null;
   probe = null;
   probeSeq++;
   videoFolder = null;
@@ -1067,14 +1112,21 @@ async function doProbe() {
   if (!/^https?:\/\/\S+$/i.test(url)) { vError(errText("bad_url")); return; }
   const seq = ++probeSeq;
   probe = null;
+  scope = { ctx: linkPlaylist(url), video: null, list: null };
   $("#v-result").hidden = true;
   updateVideoStart();
   $("#btn-probe").disabled = true;
   vStatus(t("vd_probing"));
   try {
-    const r = await api.call("video_probe", { url });
+    // a video link that carries a playlist (watch?v=…&list=…): the backend reads such a link as
+    // the whole playlist (--yes-playlist), so "this video" is probed from the video alone and the
+    // playlist when the user asks for it (review of PR #9)
+    const both = scope.ctx?.videoUrl && scope.ctx?.playlistUrl;
+    const target = both ? scope.ctx.videoUrl : url;
+    const r = await api.call("video_probe", { url: target });
     if (seq !== probeSeq) return;
-    probe = { url, result: r };
+    probe = { url: target, result: r };
+    if (r.kind === "playlist") scope.list = probe; else scope.video = probe;
     renderProbe();
   } catch (e) {
     if (seq !== probeSeq) return;
@@ -1088,13 +1140,21 @@ async function doProbe() {
 function renderProbe() {
   const r = probe.result;
   $("#v-result").hidden = false;
+  // v0.2: a video link that carries a playlist (watch?v=…&list=…): offer both; a bare video
+  // link: say how to get a whole playlist (never guessed)
+  const ctx = scope?.ctx;
+  $("#v-scope").hidden = !(ctx?.playlistUrl && (scope.video || r.kind === "video"));
+  if (!$("#v-scope").hidden) $(`#v-scope input[value=${r.kind === "playlist" ? "list" : "video"}]`).checked = true;
+  $("#v-list-hint").hidden = !(r.kind === "video" && ctx?.videoUrl && !ctx.playlistUrl);
+  $("#v-range").value = "";
+  $("#v-range-error").hidden = true;
   setText($("#v-name"), r.title ?? "");
   const meta = [r.kind === "playlist" ? t("vd_kind_playlist") : t("vd_kind_video")];
   if (r.uploader) meta.push(`${t("vd_by")}: ${r.uploader}`);
   if (r.duration != null) meta.push(`${t("vd_duration")}: ${fmtDur(r.duration)}`);
   if (r.kind === "playlist") meta.push(t("vd_items", r.items?.length ?? 0));
   $("#v-meta").textContent = meta.join(" · ");
-  fillQualitySelect($("#v-quality"), safeQualities(r.qualities), settings.quality);
+  fillQualitySelect($("#v-quality"), safeQualities(r.qualities), pickedQuality ?? settings.quality, r.kind === "video" ? r : null);
   $("#v-missing").value = settings.missing;
   showMissingRow();
   const isList = r.kind === "playlist";
@@ -1133,6 +1193,49 @@ function updateVideoStart() {
   $("#v-start").disabled = !ok;
 }
 
+// v0.2: "this video only" / "the whole playlist"
+$("#v-scope").addEventListener("change", async (e) => {
+  if (!scope?.ctx?.playlistUrl) return;
+  vError(null);
+  // any switch makes a playlist probe still on its way stale (it must not switch back later)
+  if (e.target.value === "video") ++probeSeq;
+  if (e.target.value === "video" && scope.video) { probe = scope.video; renderProbe(); vStatus(null); updateVideoStart(); return; }
+  if (e.target.value === "list") {
+    if (scope.list) { probe = scope.list; renderProbe(); return; }
+    const seq = ++probeSeq;
+    const url = scope.ctx.playlistUrl;
+    vStatus(t("vd_probing"));
+    $("#v-start").disabled = true;
+    try {
+      const r = await api.call("video_probe", { url });
+      if (seq !== probeSeq) return;
+      scope.list = { url, result: r };
+      probe = scope.list;
+      renderProbe();
+    } catch (err) {
+      if (seq !== probeSeq) return;
+      vError(errMessage(String(err?.message ?? err).replace(/^[A-Z_]+:\s*/, "")));
+      $("#v-scope input[value=video]").checked = true;
+    } finally {
+      if (seq === probeSeq) vStatus(null);
+      updateVideoStart();
+    }
+  }
+});
+// v0.2: select a range of episodes ("1-10, 15, 20-25")
+function applyRange() {
+  if (!probe || probe.result.kind !== "playlist") return;
+  const boxes = [...document.querySelectorAll("#v-items input")];
+  const r = parseRange($("#v-range").value, boxes.map((c) => Number(c.dataset.index)));
+  const errEl = $("#v-range-error");
+  if (r.error) { errEl.textContent = TEXT[settings.lang].vd_range_err[r.error]; errEl.hidden = false; return; }
+  errEl.hidden = true;
+  const want = new Set(r.items);
+  for (const c of boxes) c.checked = want.has(Number(c.dataset.index));
+  updateVideoStart();
+}
+$("#v-range-apply").addEventListener("click", applyRange);
+$("#v-range").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); applyRange(); } });
 $("#btn-probe").addEventListener("click", doProbe);
 $("#in-vurl").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doProbe(); } });
 $("#in-vurl").addEventListener("input", () => {
@@ -1165,7 +1268,9 @@ $("#form-video").addEventListener("submit", async (e) => {
       const if_missing = /^\d+p$/.test(quality) ? $("#v-missing").value : undefined;
       await api.call("playlist_add", all ? { url: probe.url, quality, dir, if_missing } : { url: probe.url, quality, items: idx, dir, if_missing });
     } else {
-      await api.call("video_add", { url: probe.url, quality, dir });
+      // v0.2: the exact formats the line showed (the quality alone if the probe gave none)
+      const format = optionFor(probe.result, quality)?.format ?? undefined;
+      await api.call("video_add", format ? { url: probe.url, quality, dir, format } : { url: probe.url, quality, dir });
     }
     $("#dlg-video").close();
     toast(t("video_added"));
@@ -1576,7 +1681,8 @@ function sendTrayTexts() {
 api.on?.("tray", (action) => { if (action === "pause_all" || action === "resume_all") run(action); });
 
 // v0.2: browser extension connection (Settings > Desktop)
-const BR_NAME = { chrome: "Chrome", edge: "Edge", firefox: "Firefox" };
+// v0.2: Brave and Opera on Windows read Chrome's registration (ci-windows, browsers-more)
+const BR_NAME = { chrome: "Chrome · Brave · Opera", edge: "Edge", firefox: "Firefox" };
 function showBrowsers(list) {
   const ul = $("#browser-list");
   ul.replaceChildren(...(Array.isArray(list) ? list : []).filter((s) => Object.hasOwn(BR_NAME, s?.browser)).map((s) => {

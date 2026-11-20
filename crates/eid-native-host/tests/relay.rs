@@ -352,6 +352,7 @@ fn the_launcher_refuses_a_missing_program_whether_overridden_or_looked_up_next_t
     let l = AppLauncher {
         exe: Some(d.path().join("missing")),
         endpoint: ep.clone(),
+        custom_token: false,
     };
     assert_eq!(
         l.resolve().unwrap_err().kind(),
@@ -362,6 +363,7 @@ fn the_launcher_refuses_a_missing_program_whether_overridden_or_looked_up_next_t
     let l = AppLauncher {
         exe: Some(d.path().to_path_buf()),
         endpoint: ep.clone(),
+        custom_token: false,
     };
     assert_eq!(
         l.resolve().unwrap_err().kind(),
@@ -372,6 +374,7 @@ fn the_launcher_refuses_a_missing_program_whether_overridden_or_looked_up_next_t
     let l = AppLauncher {
         exe: None,
         endpoint: ep,
+        custom_token: false,
     };
     let sibling = std::env::current_exe()
         .unwrap()

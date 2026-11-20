@@ -1,7 +1,7 @@
 // Unit tests of the window's pure logic (node --test, no browser).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeList, categoryOf, inView, buildView, clickSelect, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, pollDelay, segmentView, matchesQuery, normalizeCols, gridTemplate, moveCol, COLUMNS, normalizeToolbar, linksFromText, finishedNow, videoPage } from "../logic.js";
+import { mergeList, categoryOf, inView, buildView, clickSelect, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, pollDelay, segmentView, matchesQuery, normalizeCols, gridTemplate, moveCol, COLUMNS, normalizeToolbar, linksFromText, finishedNow, videoPage, linkPlaylist, parseRange } from "../logic.js";
 
 const it = (id, o = {}) => ({ id, status: "pending", name: `f${id}.zip`, url: "", folder: "D", attempts: 0, error_kind: null, error: null, rate: null, ...o });
 
@@ -35,8 +35,10 @@ test("sorting is stable newest-first on ties; selection with ctrl/shift", () => 
   assert.deepEqual([...r.selected].sort(), [1, 3]);
 });
 
-test("quality policy never offers more than 2160p", () => {
-  assert.deepEqual(safeQualities(["4320p", "2880p", "2160p", "best", "audio", "junk"]), ["2160p", "best", "audio"]);
+test("quality policy: 144p to 4320p tallest first, nothing taller, only known choices", () => {
+  assert.deepEqual(safeQualities(["8640p", "2880p", "144p", "audio", "4320p", "best", "2160p", "junk", "240p"]),
+    ["4320p", "2160p", "240p", "144p", "best", "audio"]);
+  assert.deepEqual(safeQualities(["audio", "m4a", "best"]), ["best", "m4a", "audio"]);
 });
 
 test("formatting and job progress", () => {
@@ -135,4 +137,64 @@ test("video pages: the same rule as eid_engine::links::video_page", () => {
     ["https://u:p@www.youtube.com/watch?v=abc", null], ["ftp://www.youtube.com/watch?v=abc", null],
     ["javascript:alert(1)//youtube.com/watch?v=a", null], ["https://example.com/video.mp4", null], ["not a link", null], [null, null],
   ]) assert.equal(videoPage(l), want, String(l));
+});
+
+test("playlist of a link: watch&list offers both, playlist?list the list, bare watch nothing (never guessed)", () => {
+  assert.deepEqual(linkPlaylist("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist0123&index=1"),
+    { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", listId: "PLtestlist0123", playlistUrl: "https://www.youtube.com/playlist?list=PLtestlist0123" });
+  assert.deepEqual(linkPlaylist("https://youtu.be/dQw4w9WgXcQ?list=PLx_1-2"),
+    { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", listId: "PLx_1-2", playlistUrl: "https://www.youtube.com/playlist?list=PLx_1-2" });
+  assert.deepEqual(linkPlaylist("https://m.youtube.com/playlist?list=PLabc"), { listId: "PLabc", playlistUrl: "https://www.youtube.com/playlist?list=PLabc" });
+  assert.deepEqual(linkPlaylist("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" });
+  // personal or generated lists are not offered; the video still is
+  for (const l of ["WL", "LL", "LM", "RDdQw4w9WgXcQ"]) {
+    assert.deepEqual(linkPlaylist(`https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=${l}`), { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }, l);
+  }
+  for (const no of ["https://example.com/watch?v=dQw4w9WgXcQ&list=PL1", "https://www.youtube.com/playlist?list=a/b", "https://u:p@www.youtube.com/playlist?list=PL1", "not a link", null]) {
+    assert.equal(linkPlaylist(no), null, String(no));
+  }
+});
+
+test("episode ranges: lists, ranges, Arabic separators, only existing numbers", () => {
+  const all = Array.from({ length: 87 }, (_, i) => i + 1);
+  assert.deepEqual(parseRange("1-3, 15, 20-22", all), { items: [1, 2, 3, 15, 20, 21, 22] });
+  assert.deepEqual(parseRange("5–7، 9", all), { items: [5, 6, 7, 9] });
+  assert.deepEqual(parseRange("10-8", all), { items: [8, 9, 10] });
+  assert.deepEqual(parseRange("85-200", all), { items: [85, 86, 87] });
+  assert.deepEqual(parseRange(" 3 , 3 ,", all), { items: [3] });
+  assert.deepEqual(parseRange("", all), { error: "empty" });
+  assert.deepEqual(parseRange("1-x", all), { error: "syntax" });
+  assert.deepEqual(parseRange("abc", all), { error: "syntax" });
+  assert.deepEqual(parseRange("200-300", all), { error: "none" });
+  assert.deepEqual(parseRange("1-999999", [2, 5]), { error: "syntax" });
+});
+
+test("v0.2 download menu: the probe's exact option and its details, nothing invented", async () => {
+  const { optionFor, optionDetails } = await import("../logic.js");
+  const r = {
+    options: [
+      { quality: "1080p", format: "299+140", fps: 60, codec: "H.264", hdr: null, audio: true, size: 52428800 },
+      { quality: "2160p", format: "337+140", fps: 60, codec: "VP9", hdr: "HDR10", audio: true, size: null },
+      { quality: "720p", format: "bv*+ba/b", fps: 30, codec: "H.264", audio: true },
+      { quality: "360p", format: "18", fps: 30, codec: "H.264", audio: false },
+    ],
+    audio_options: [
+      { quality: "m4a", original: true, format: "140", codec: "AAC", kbps: 129.4, size: 3000000 },
+      { quality: "audio", original: false, format: null, codec: "MP3", kbps: 129, size: null },
+    ],
+  };
+  assert.equal(optionFor(r, "1080p").format, "299+140");
+  assert.equal(optionFor(r, "720p"), null, "a selector is never passed on as a format");
+  assert.equal(optionFor(r, "480p"), null);
+  assert.equal(optionFor({}, "1080p"), null);
+  assert.equal(optionFor(r, "m4a").format, "140");
+  assert.equal(optionFor({ audio_options: [{ quality: "m4a", format: "137+140" }] }, "m4a"), null);
+  const w = { fps: (n) => `${n} fps`, audio: "with audio", noaudio: "no audio", original: "original", converted: "converted", kbps: (n) => `${n} kb/s`, size: (s) => `≈ ${s}` };
+  const sz = (n) => `${Math.round(n / 1048576)} MB`;
+  assert.deepEqual(optionDetails(optionFor(r, "1080p"), w, sz), ["60 fps", "H.264", "with audio", "≈ 50 MB"]);
+  assert.deepEqual(optionDetails(optionFor(r, "2160p"), w, sz), ["60 fps", "VP9", "HDR10", "with audio"], "no size: none shown");
+  assert.deepEqual(optionDetails(optionFor(r, "360p"), w, sz), ["30 fps", "H.264", "no audio"], "never 'with audio' when it has none");
+  assert.deepEqual(optionDetails(optionFor(r, "m4a"), w, sz), ["AAC", "original", "129 kb/s", "≈ 3 MB"]);
+  assert.deepEqual(optionDetails(optionFor(r, "audio"), w, sz), ["MP3", "converted", "129 kb/s"]);
+  assert.deepEqual(optionDetails(null, w, sz), []);
 });

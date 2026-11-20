@@ -26,3 +26,4 @@ secrets/
 .DS_Store
 Thumbs.db
 __pycache__/
+/browser-e2e/

@@ -59,6 +59,11 @@ export function manifest(target) {
     m.background = { service_worker: "background.js" };
   } else if (target === "firefox") {
     m.background = { scripts: ["lib/core.js", "background.js"] };
+    // Firefox MV3: a content script's matches are NOT granted by being listed; declared host
+    // permissions are (since Firefox 127, at install). Without them the button needs the user to
+    // allow each site from the extensions menu. Chrome/Edge/Brave grant content-script matches
+    // themselves, so their build asks for nothing more.
+    m.host_permissions = CONTENT_MATCHES.slice();
     m.browser_specific_settings = {
       gecko: {
         id: FIREFOX_ID,

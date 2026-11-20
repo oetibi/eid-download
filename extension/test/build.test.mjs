@@ -19,10 +19,15 @@ test("manifests: MV3, least privilege, per-browser background", () => {
   for (const m of [c, f]) {
     assert.equal(m.manifest_version, 3);
     assert.deepEqual(m.permissions, ["nativeMessaging", "storage"]);
-    assert.equal(m.host_permissions, undefined);
     assert.deepEqual(m.content_scripts[0].js, ["lib/core.js", "content.js"]);
     assert.equal(m.default_locale, "en");
   }
+  // Chrome/Edge/Brave grant content-script matches themselves: no host permissions asked.
+  // Firefox MV3 grants only declared host permissions, so it declares exactly the content
+  // script's matches (no more than the content script already needs; owner's report: no button
+  // on Firefox 160).
+  assert.equal(c.host_permissions, undefined);
+  assert.deepEqual(f.host_permissions, f.content_scripts[0].matches);
   assert.equal(c.background.service_worker, "background.js");
   assert.equal(c.key, CHROME_KEY);
   assert.equal(c.browser_specific_settings, undefined);

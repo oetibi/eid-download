@@ -300,3 +300,6 @@ table.segs tr.full td:last-child { color: var(--ok); }
 .q-row select.q-after { width: auto; flex: 1; min-width: 160px; }
 .row.two { gap: 12px; margin-top: 10px; }
 .row.two > label { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.v-range label { white-space: nowrap; }
+.v-range input { flex: 1; min-width: 0; }
+.v-scope { display: flex; gap: 16px; flex-wrap: wrap; margin: 4px 0 8px; }

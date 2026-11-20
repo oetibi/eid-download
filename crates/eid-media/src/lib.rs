@@ -14,6 +14,7 @@
 //! * tool output is bounded and every text we show is redacted first ([`redact`]).
 
 pub mod args;
+pub mod choice;
 pub mod consent;
 pub mod container;
 pub mod env;

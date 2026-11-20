@@ -69,6 +69,10 @@ pub struct Job {
     pub kind: Kind,
     pub url: String,
     pub quality: String,
+    /// v0.2 (the download menu): the exact formats shown for a single video (`299+140`);
+    /// `quality` (with `fallback`) applies if the site no longer offers them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
     /// v0.2: what to do when the chosen height is missing (`lower` | `higher` | `skip`).
     /// Jobs saved by v0.1 have none: `lower`, the v0.1 behaviour.
     #[serde(default = "default_fallback")]
@@ -192,7 +196,7 @@ pub fn check_fallback(f: &str) -> Result<(), String> {
     }
 }
 
-/// Quality strings accepted everywhere (no 8K): [`eid_ipc::VIDEO_QUALITIES`].
+/// Quality strings accepted everywhere (up to 8K): [`eid_ipc::VIDEO_QUALITIES`].
 pub fn check_quality(q: &str) -> Result<(), String> {
     if eid_ipc::VIDEO_QUALITIES.contains(&q) {
         Ok(())
@@ -328,9 +332,40 @@ impl VideoJobs {
         items: Option<Vec<u32>>,
         dir: Option<&Path>,
     ) -> Result<u64, String> {
+        self.add_full(kind, url, quality, fallback, items, dir, None)
+    }
+
+    /// [`Self::add_with`] with the exact formats the download menu showed (single videos with
+    /// a fixed height or `m4a` only; every id checked).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_full(
+        &self,
+        kind: Kind,
+        url: &str,
+        quality: &str,
+        fallback: &str,
+        items: Option<Vec<u32>>,
+        dir: Option<&Path>,
+        format: Option<&str>,
+    ) -> Result<u64, String> {
         check_url(url)?;
         check_quality(quality)?;
         check_fallback(fallback)?;
+        if let Some(spec) = format {
+            // the protocol's rule (this module never touches the media crate: the child
+            // `eid video get --format` checks the same again)
+            if kind != Kind::Video {
+                return Err("exact formats only apply to one video".into());
+            }
+            if !eid_ipc::format_quality_ok(quality)
+                || !eid_ipc::format_spec_ok(spec)
+                || (quality == "m4a" && spec.contains('+'))
+            {
+                return Err(format!(
+                    "bad exact formats {spec:?}: one or two format ids with a fixed height (or one with m4a)"
+                ));
+            }
+        }
         if kind == Kind::Video && items.is_some() {
             return Err("items only apply to a playlist".into());
         }
@@ -354,6 +389,7 @@ impl VideoJobs {
             kind,
             url: url.to_owned(),
             quality: quality.to_owned(),
+            format: format.map(str::to_owned),
             fallback: fallback.to_owned(),
             items_sel: items,
             dir,
@@ -743,6 +779,10 @@ pub fn job_args(j: &Job) -> Vec<OsString> {
     a.push(j.dir.clone().into_os_string());
     a.push("--quality".into());
     a.push(j.quality.clone().into());
+    if let (Some(f), Kind::Video) = (&j.format, j.kind) {
+        a.push("--format".into());
+        a.push(f.clone().into());
+    }
     if j.fallback != "lower" {
         a.push("--if-missing".into());
         a.push(j.fallback.clone().into());
@@ -814,6 +854,7 @@ mod tests {
             kind,
             url: "https://www.youtube.com/playlist?list=PL1".into(),
             quality: "720p".into(),
+            format: None,
             fallback: "lower".into(),
             items_sel: Some(vec![1, 3]),
             dir: PathBuf::from("/d"),
@@ -851,11 +892,58 @@ mod tests {
             .map(|s| s.into_string().unwrap())
             .collect();
         assert!(a.windows(2).any(|w| w == ["--if-missing", "skip"]));
+        assert!(!a.iter().any(|x| x == "--format"));
+        // v0.2: the exact formats of a single video go to the child; a playlist never has any
+        j.format = Some("299+140".into());
+        let a: Vec<String> = job_args(&j)
+            .into_iter()
+            .map(|s| s.into_string().unwrap())
+            .collect();
+        assert!(a.windows(2).any(|w| w == ["--format", "299+140"]));
+        let mut p = job(Kind::Playlist);
+        p.format = Some("299+140".into());
+        assert!(!job_args(&p).iter().any(|x| x == "--format"));
         assert_eq!(a[a.len() - 2], "--");
         assert_eq!(
             a.last().unwrap(),
             "https://www.youtube.com/playlist?list=PL1"
         );
+    }
+
+    /// v0.2: exact formats only for one video, with a fixed height or m4a, every id checked;
+    /// a job saved without them (v0.1, or "best") loads with none.
+    #[tokio::test]
+    async fn exact_formats_are_checked_when_a_job_is_added_and_optional_when_loaded() {
+        let d = tempfile::tempdir().unwrap();
+        // nothing runs (max_running 0): only what is accepted is checked
+        let v = VideoJobs::start(JobsConfig {
+            eid_exe: d.path().join("eid"),
+            worker_args: vec![],
+            state_file: d.path().join("jobs.json"),
+            default_dir: d.path().to_path_buf(),
+            max_running: 0,
+            env: vec![],
+        });
+        let u = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        let add = |kind, q: &str, f: Option<&str>| v.add_full(kind, u, q, "lower", None, None, f);
+        assert!(add(Kind::Video, "1080p", Some("299+140")).is_ok());
+        assert!(add(Kind::Video, "m4a", Some("140")).is_ok());
+        assert!(add(Kind::Video, "1080p", None).is_ok());
+        for (k, q, f) in [
+            (Kind::Video, "best", "299+140"),
+            (Kind::Video, "audio", "140"),
+            (Kind::Video, "1080p", "bv*+ba"),
+            (Kind::Video, "1080p", "1+2+3"),
+            (Kind::Video, "m4a", "137+140"),
+            (Kind::Playlist, "1080p", "299+140"),
+        ] {
+            assert!(add(k, q, Some(f)).is_err(), "{q} {f}");
+        }
+        let mut j = serde_json::to_value(job(Kind::Video)).unwrap();
+        assert!(j.get("format").is_none(), "absent stays absent: {j}");
+        j.as_object_mut().unwrap().remove("format");
+        let j: Job = serde_json::from_value(j).unwrap();
+        assert_eq!(j.format, None);
     }
 
     #[test]
@@ -875,11 +963,12 @@ mod tests {
     #[test]
     fn quality_is_only_the_fixed_list() {
         for q in [
-            "360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio",
+            "144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best",
+            "audio",
         ] {
             assert!(check_quality(q).is_ok(), "{q}");
         }
-        for q in ["4320p", "8k", "", "bv*", "720", "1080p60"] {
+        for q in ["8640p", "4321p", "8k", "", "bv*", "720", "1080p60"] {
             assert!(check_quality(q).is_err(), "{q}");
         }
     }

@@ -197,11 +197,109 @@ try {
     await open("");
   });
 
+  await check("playlist link: watch&list offers 'this video' or 'the whole playlist'; a range picks episodes; bare watch says how to get a list", async () => {
+    await open("");
+    const probeUrl = async (u) => {
+      await ev("document.querySelector('.tool[data-cmd=add_video]').click()");
+      await until("document.querySelector('#dlg-video').open", 3000, "video dialog");
+      await ev(`(() => { const i = document.querySelector('#in-vurl'); i.value = ${JSON.stringify(u)}; i.dispatchEvent(new Event('input', {bubbles:true})); document.querySelector('#btn-probe').click(); })()`);
+      await until("!document.querySelector('#v-result').hidden", 8000, "probe result");
+    };
+    await probeUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01&index=1");
+    assert(!(await ev("document.querySelector('#v-scope').hidden")), "both choices offered for watch&list");
+    assert(await ev("document.querySelector('#v-scope input[value=video]').checked"), "'this video' first");
+    assert(await ev("document.querySelector('#v-playlist').hidden"), "no episode list for one video");
+    await ev("(() => { const r = document.querySelector('#v-scope input[value=list]'); r.checked = true; r.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    await until("!document.querySelector('#v-playlist').hidden && document.querySelectorAll('#v-items input').length === 12", 8000, "the playlist's episodes");
+    if (arg("--shots")) await shot("playlist-scope-ar.png");
+    // a wrong range is explained, a good one selects exactly those episodes
+    await ev("document.querySelector('#v-range').value = '1-x'; document.querySelector('#v-range-apply').click()");
+    assert(!(await ev("document.querySelector('#v-range-error').hidden")), "bad range not explained");
+    await ev("document.querySelector('#v-range').value = '2-4، 7'; document.querySelector('#v-range-apply').click()");
+    const picked = await ev("[...document.querySelectorAll('#v-items input:checked')].map((c) => Number(c.dataset.index))");
+    assert(JSON.stringify(picked) === "[2,3,4,7]", JSON.stringify(picked));
+    await ev("document.querySelector('#v-start').click()");
+    await until("window.__eidMockLastPlaylist?.items?.length === 4", 5000, "playlist sent");
+    const sent = await ev("window.__eidMockLastPlaylist");
+    assert(sent.url === "https://www.youtube.com/playlist?list=PLtestlist01" && JSON.stringify(sent.items) === "[2,3,4,7]", JSON.stringify(sent));
+    // back to 'this video' shows the video again (no second probe of the list needed)
+    await probeUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    assert(await ev("document.querySelector('#v-scope').hidden"), "no playlist choice without list=");
+    assert(!(await ev("document.querySelector('#v-list-hint').hidden")), "the hint about list= links");
+    await ev("document.querySelector('#v-cancel').click()");
+  });
+
+  await check("a link from the browser ('Open in Eid Download') waits for an open dialog, then opens the Video window with both choices", async () => {
+    await open("");
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await until("document.querySelector('#dlg-settings').open", 3000, "a dialog the user is working in");
+    await ev("window.__eidMockOpenVideo('https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01')");
+    // never closed under the user: the link waits and says so
+    await sleep(1500);
+    assert(await ev("document.querySelector('#dlg-settings').open && !document.querySelector('#dlg-video').open"), "the settings were closed under the user");
+    await ev("document.querySelector('#dlg-settings').close()");
+    await until("document.querySelector('#dlg-video').open", 5000, "the Video window once the settings are closed");
+    assert((await ev("document.querySelector('#in-vurl').value")) === "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01", "link");
+    await until("!document.querySelector('#v-result').hidden && !document.querySelector('#v-scope').hidden", 8000, "probed, with 'this video' / 'the whole playlist'");
+    // the backend reads a watch&list link as the playlist: "this video" is probed from the video alone
+    assert(await ev("document.querySelector('#v-scope input[value=video]').checked && document.querySelector('#v-playlist').hidden"), "'this video' shown first, as a video");
+    await ev("document.querySelector('#v-cancel').click()");
+  });
+
+  await check("a whole playlist from the browser opens with the quality chosen there; switching scope fast never flips back", async () => {
+    await open("");
+    await ev("window.__eidMockOpenVideo('https://www.youtube.com/playlist?list=PLtestlist01', '720p')");
+    await until("document.querySelector('#dlg-video').open && !document.querySelector('#v-result').hidden", 8000, "the playlist in the Video window");
+    assert((await ev("document.querySelector('#v-quality').value")) === "720p", `quality ${await ev("document.querySelector('#v-quality').value")}`);
+    assert(!(await ev("document.querySelector('#v-playlist').hidden")), "the episode list");
+    await ev("document.querySelector('#v-cancel').click()");
+    // a list probe still on its way when the user goes back to "this video" must not switch back
+    await ev("document.querySelector('.tool[data-cmd=add_video]').click()");
+    await until("document.querySelector('#dlg-video').open", 3000, "video dialog");
+    await ev(`(() => { const i = document.querySelector('#in-vurl'); i.value = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01'; i.dispatchEvent(new Event('input', {bubbles:true})); document.querySelector('#btn-probe').click(); })()`);
+    await until("!document.querySelector('#v-result').hidden && !document.querySelector('#v-scope').hidden", 8000, "probed");
+    await ev("(() => { const l = document.querySelector('#v-scope input[value=list]'); l.checked = true; l.dispatchEvent(new Event('change', { bubbles: true })); const v = document.querySelector('#v-scope input[value=video]'); v.checked = true; v.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    await sleep(2500);
+    assert(await ev("document.querySelector('#v-scope input[value=video]').checked && document.querySelector('#v-playlist').hidden"), "the late playlist probe switched the dialog back");
+    await ev("document.querySelector('#v-cancel').click()");
+  });
+
   await check("switches to English (left-to-right) and back", async () => {
     await ev("document.querySelector('#btn-lang').click()");
     await until("document.documentElement.dir === 'ltr'", 3000, "ltr");
     await ev("document.querySelector('#btn-lang').click()");
     await until("document.documentElement.dir === 'rtl'", 3000, "rtl");
+  });
+
+  await check("video window: each quality shows the probe's own details, tallest first; Start sends the exact formats shown", async () => {
+    await open("");
+    await ev("document.querySelector('.tool[data-cmd=add_video]').click()");
+    await until("document.querySelector('#dlg-video').open", 3000, "video dialog");
+    await ev(`(() => { const i = document.querySelector('#in-vurl'); i.value = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'; i.dispatchEvent(new Event('input', {bubbles:true})); document.querySelector('#btn-probe').click(); })()`);
+    await until("!document.querySelector('#v-result').hidden", 8000, "probe result");
+    const opts = await ev("[...document.querySelectorAll('#v-quality option')].map(o => [o.value, o.textContent])");
+    const vals = opts.map((o) => o[0]);
+    assert(JSON.stringify(vals) === JSON.stringify(["1080p", "720p", "480p", "360p", "best", "m4a", "audio"]), `order: ${vals}`);
+    const label = (q) => opts.find((o) => o[0] === q)[1];
+    assert(/H\.264/.test(label("1080p")) && /60/.test(label("1080p")) && /≈/.test(label("1080p")), `1080p: ${label("1080p")}`);
+    assert(!/≈/.test(label("480p")), `no size from the probe: none shown: ${label("480p")}`);
+    assert(/AAC/.test(label("m4a")) && /129/.test(label("m4a")), `m4a: ${label("m4a")}`);
+    assert(/MP3/.test(label("audio")) && !/≈/.test(label("audio")), `mp3: ${label("audio")}`);
+    const start = async (q) => {
+      await ev(`(() => { const s = document.querySelector('#v-quality'); s.value = ${JSON.stringify(q)}; s.dispatchEvent(new Event('change')); document.querySelector('#v-start').click(); })()`);
+      await until("!document.querySelector('#dlg-video').open", 5000, "dialog closes on start");
+      return ev("window.__eidMockLastVideo");
+    };
+    let sent = await start("1080p");
+    assert(sent.quality === "1080p" && sent.format === "299+140", `sent ${JSON.stringify(sent)}`);
+    for (const [q, f] of [["best", null], ["m4a", "140"], ["audio", null]]) {
+      await ev("document.querySelector('.tool[data-cmd=add_video]').click()");
+      await until("document.querySelector('#dlg-video').open", 3000, "video dialog");
+      await ev(`(() => { const i = document.querySelector('#in-vurl'); i.value = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'; i.dispatchEvent(new Event('input', {bubbles:true})); document.querySelector('#btn-probe').click(); })()`);
+      await until("!document.querySelector('#v-result').hidden", 8000, "probe result");
+      sent = await start(q);
+      assert(sent.quality === q && sent.format === f, `${q}: sent ${JSON.stringify(sent)}`);
+    }
   });
 
   await check("video tools: the agreement text is shown and must be accepted before any install", async () => {
@@ -239,7 +337,7 @@ try {
     const n = await ev("document.querySelectorAll('#v-items input').length");
     assert(n === 12, `items: ${n}`);
     const qs = await ev("[...document.querySelectorAll('#v-quality option')].map(o => o.value)");
-    assert(!qs.includes("4320p") && qs.includes("2160p") && qs.includes("best") && qs.includes("audio"), `qualities ${qs}`);
+    assert(!qs.includes("8640p") && qs[0] === "4320p" && qs.indexOf("2160p") === 1 && qs.includes("144p") && qs.at(-2) === "best" && qs.at(-1) === "audio", `qualities, tallest first: ${qs}`);
     await ev("document.querySelector('#v-none').click()");
     await ev("const b = document.querySelectorAll('#v-items input'); b[0].checked = true; b[3].checked = true; b[0].dispatchEvent(new Event('change', {bubbles:true}))");
     assert(!(await ev("document.querySelector('#v-start').disabled")), "start disabled with 2 items");

@@ -2,7 +2,8 @@
 "use strict";
 (function () {
   const api = typeof browser !== "undefined" ? browser : chrome;
-  const Core = window.EidCore;
+  // eslint-disable-next-line no-undef
+  const Core = typeof EidCore !== "undefined" ? EidCore : window.EidCore;
   const t = (k, s) => api.i18n.getMessage(k, s) || k;
   const lang = (api.i18n.getUILanguage && api.i18n.getUILanguage()) || "en";
   const rtl = /^(ar|fa|he|ur)\b/i.test(lang);
@@ -121,6 +122,32 @@
     out.textContent = r && r.ok ? t("optTestOk") : t(keys[r && r.code] || "errFailed");
     out.className = r && r.ok ? "ok" : "err";
   });
+
+  // v0.2: site access. Without it the content script never runs and no button appears; Firefox
+  // MV3 may leave it to the user (owner's report, Firefox 160): say so and offer to grant it.
+  const ORIGINS = { origins: ["https://*/*", "http://*/*"] };
+  const access = document.getElementById("access");
+  async function checkAccess() {
+    try {
+      const ok = api.permissions && (await api.permissions.contains(ORIGINS));
+      access.hidden = !!ok || !api.permissions;
+    } catch (_) {
+      access.hidden = true;
+    }
+  }
+  document.getElementById("grant").addEventListener("click", async () => {
+    const out = document.getElementById("accessmsg");
+    try {
+      const ok = await api.permissions.request(ORIGINS);
+      out.textContent = ok ? t("optAccessOk") : t("optAccessMissing");
+      out.className = ok ? "ok" : "err";
+    } catch (e) {
+      out.textContent = String((e && e.message) || e);
+      out.className = "err";
+    }
+    checkAccess();
+  });
+  checkAccess();
 
   Promise.resolve(api.storage.sync.get(null)).then((s) => fill(Core.normalizeSettings(s)));
 })();

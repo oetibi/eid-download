@@ -92,20 +92,20 @@ test("classifyUrl: non-video YouTube pages, other sites, junk", () => {
   }
 });
 
-test("filterQualities: policy order, 2160p cap, no 8K, no unknowns, no duplicates", () => {
+test("filterQualities: tallest first, 4320p cap, nothing above 8K, no unknowns, no duplicates", () => {
   assert.deepEqual(
-    C.filterQualities(["audio", "720p", "4320p", "2160p", "best", "720p", "8k", "2880p", "144p", 1080, null, "1080p"]),
-    ["2160p", "1080p", "720p", "best", "audio"],
+    C.filterQualities(["audio", "720p", "4320p", "2160p", "best", "720p", "8k", "2880p", "144p", 1080, null, "1080p", "240p"]),
+    ["4320p", "2160p", "1080p", "720p", "240p", "144p", "best", "audio"],
   );
-  assert.deepEqual(C.filterQualities(["4320p", "2880p", "8K", "8640p"]), []);
+  assert.deepEqual(C.filterQualities(["2880p", "8K", "8640p", "4321p"]), []);
   assert.deepEqual(C.filterQualities("1080p"), []);
   assert.deepEqual(C.filterQualities(undefined), []);
   for (const q of C.ALL_QUALITIES) {
     const h = C.heightOf(q);
     assert.ok(h === null || h <= C.MAX_HEIGHT, q);
   }
-  assert.equal(C.MAX_HEIGHT, 2160);
-  assert.deepEqual(C.ALL_QUALITIES, ["2160p", "1440p", "1080p", "720p", "480p", "360p", "best", "audio"]);
+  assert.equal(C.MAX_HEIGHT, 4320);
+  assert.deepEqual(C.ALL_QUALITIES, ["4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p", "best", "m4a", "audio"]);
 });
 
 test("normalizeProbe: validates shape, filters qualities, cleans text, bounds items", () => {
@@ -117,10 +117,10 @@ test("normalizeProbe: validates shape, filters qualities, cleans text, bounds it
     title: "  Hello\u202e\u0000 world\n ",
     uploader: 7,
     duration: -1,
-    qualities: ["4320p", "1080p", "best", "audio"],
+    qualities: ["8640p", "4320p", "1080p", "best", "audio"],
     extra: "ignored",
   });
-  assert.deepEqual(v, { kind: "video", title: "Hello world", qualities: ["1080p", "best", "audio"] });
+  assert.deepEqual(v, { kind: "video", title: "Hello world", qualities: ["4320p", "1080p", "best", "audio"] });
   const long = C.normalizeProbe({ kind: "video", title: "x".repeat(1000), qualities: [] });
   assert.ok(long.title.length <= 300);
   const p = C.normalizeProbe({
@@ -192,7 +192,7 @@ test("buildRequest: rejects everything outside the browser allow-list and policy
     [{ cmd: "probe", url: "https://h/" + "a".repeat(9000) }, "bad_url"],
     [{ cmd: "probe" }, "bad_url"],
     [{ cmd: "add", url: "data:video/mp4;base64,AAAA" }, "bad_url"],
-    [{ cmd: "add_video", url: WATCH, quality: "4320p" }, "bad_quality"],
+    [{ cmd: "add_video", url: WATCH, quality: "8640p" }, "bad_quality"],
     [{ cmd: "add_video", url: WATCH, quality: "8k" }, "bad_quality"],
     [{ cmd: "add_video", url: WATCH, quality: "2160" }, "bad_quality"],
     [{ cmd: "add_video", url: WATCH }, "bad_quality"],
@@ -410,4 +410,74 @@ test("v0.2 if-missing: playlist only, a fixed height only, default not sent, bad
   assert.equal(C.normalizeSettings({ ifMissing: "skip" }).ifMissing, "skip");
   assert.equal(C.normalizeSettings({ ifMissing: "evil" }).ifMissing, "lower");
   assert.equal(C.normalizeSettings(null).ifMissing, "lower");
+});
+
+test("v0.2 open_video: one checked address; 'Open in Eid Download' sends the video with its playlist", () => {
+  const id = "ext-0123456789abcdef01234567";
+  const w = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01";
+  assert.deepEqual(C.buildRequest({ cmd: "open_video", url: w, quality: "best" }, id), { v: 1, id, command: { cmd: "open_video", url: w, quality: "best" } });
+  assert.throws(() => C.buildRequest({ cmd: "open_video", url: "javascript:alert(1)" }, id), /bad_url/);
+  assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01&index=3&t=10s&si=x")), w);
+  assert.equal(C.openInAppUrl(C.classifyUrl("https://youtu.be/dQw4w9WgXcQ?si=tracker")), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/playlist?list=PLtestlist01")), "https://www.youtube.com/playlist?list=PLtestlist01");
+  // a Mix (RD…) is not a playlist we offer: the video alone
+  assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ")), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/")), null);
+  assert.equal(C.openInAppUrl(C.classifyUrl("https://example.com/v.mp4")), null);
+  assert.equal(C.classifyError("no window: this is the background server; open Eid Download and use Video"), "no_window");
+});
+
+test("v0.2 download menu: options validated, tallest first, only real details; add_video carries the exact formats", () => {
+  const o = C.normalizeOptions([
+    { quality: "360p", format: "18", fps: 30, codec: "H.264", audio: true, size: 9000000 },
+    { quality: "4320p", format: "402+140", fps: 60, codec: "AV1", hdr: null, audio: true, size: 603000000 },
+    { quality: "2160p", format: "337+140", fps: 60, codec: "VP9", hdr: "HDR10", audio: true },
+    { quality: "1080p", format: "bv*+ba/b", fps: 60 },
+    { quality: "720p", format: "298+140", fps: -1, codec: "<b>x</b>\u202e", audio: "yes", size: NaN },
+    { quality: "8640p", format: "1" },
+    { quality: "360p", format: "134+140" },
+    null, 7, "x",
+  ]);
+  assert.deepEqual(o.map((x) => x.quality), ["4320p", "2160p", "720p", "360p"]);
+  assert.deepEqual(o[0], { quality: "4320p", format: "402+140", fps: 60, codec: "AV1", audio: true, size: 603000000 });
+  assert.equal(o[1].hdr, "HDR10");
+  assert.equal(o[1].size, undefined, "no size from the app: none shown");
+  assert.deepEqual(o[2], { quality: "720p", format: "298+140", codec: "<b>x</b>", audio: false }, "bad fps/size dropped; 'audio' only when true");
+  assert.equal(o[3].format, "18", "the first line of a quality wins");
+  assert.deepEqual(C.normalizeOptions("x"), []);
+  const a = C.normalizeAudioOptions([
+    { quality: "audio", original: false, format: null, codec: "MP3", kbps: 129, size: 5 },
+    { quality: "m4a", original: true, format: "140", codec: "AAC", kbps: 129.4, size: 3000000 },
+  ]);
+  assert.deepEqual(a, [
+    { quality: "m4a", original: true, codec: "AAC", format: "140", kbps: 129, size: 3000000 },
+    { quality: "audio", original: false, codec: "MP3", kbps: 129 },
+  ], "MP3 never shows a size (unknown before converting)");
+  assert.deepEqual(C.normalizeAudioOptions([{ quality: "m4a", format: "137+140" }]), []);
+  const p = C.normalizeProbe({ kind: "video", title: "T", qualities: ["1080p", "m4a", "audio"], options: [{ quality: "1080p", format: "299+140", audio: true }], audio_options: [{ quality: "m4a", format: "140" }] });
+  assert.deepEqual(p.qualities, ["1080p", "m4a", "audio"]);
+  assert.equal(p.options[0].format, "299+140");
+  assert.equal(p.audioOptions[0].format, "140");
+  assert.equal(C.normalizeProbe({ kind: "playlist", title: "L", qualities: [], items: [], options: [{ quality: "1080p", format: "1" }] }).options, undefined);
+  // the request
+  const W = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  assert.deepEqual(C.buildRequest({ cmd: "add_video", url: W, quality: "1080p", format: "299+140" }, "ext-1").command,
+    { cmd: "add_video", url: W, quality: "1080p", format: "299+140" });
+  assert.deepEqual(C.buildRequest({ cmd: "add_video", url: W, quality: "m4a", format: "140" }, "ext-1").command,
+    { cmd: "add_video", url: W, quality: "m4a", format: "140" });
+  assert.deepEqual(C.buildRequest({ cmd: "add_video", url: W, quality: "720p" }, "ext-1").command,
+    { cmd: "add_video", url: W, quality: "720p" }, "no format: the field is not sent (older apps)");
+  for (const [q, f] of [["best", "299+140"], ["audio", "140"], ["1080p", "bv*+ba"], ["m4a", "137+140"], ["1080p", "1+2+3"], ["1080p", 7]]) {
+    assert.throws(() => C.buildRequest({ cmd: "add_video", url: W, quality: q, format: f }, "ext-1"), /bad_format/, `${q} ${f}`);
+  }
+  assert.equal(C.fmtBytes(52428800), "52.4 MB");
+  assert.equal(C.fmtBytes(3000000), "3.00 MB");
+  assert.equal(C.fmtBytes(0), "");
+});
+
+test("v0.2 review: open_video may carry the menu's quality (policy values only)", () => {
+  const P = "https://www.youtube.com/playlist?list=PLtestlist01";
+  assert.deepEqual(C.buildRequest({ cmd: "open_video", url: P, quality: "720p" }, "ext-1").command, { cmd: "open_video", url: P, quality: "720p" });
+  assert.deepEqual(C.buildRequest({ cmd: "open_video", url: P }, "ext-1").command, { cmd: "open_video", url: P });
+  for (const q of ["8640p", "bv*+ba", 7]) assert.throws(() => C.buildRequest({ cmd: "open_video", url: P, quality: q }, "ext-1"), /bad_quality/, String(q));
 });

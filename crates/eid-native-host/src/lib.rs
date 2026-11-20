@@ -21,44 +21,86 @@ pub trait Launcher: Send + Sync {
     fn launch(&self) -> std::io::Result<()>;
 }
 
-/// Launches the Eid Download program as `<exe> serve --endpoint NAME --token-file PATH`.
-/// `exe` is the `eid` executable next to this host, or `EID_NATIVE_HOST_APP` when set (portable
-/// installs and tests; the variable is as trusted as the rest of the user's own environment).
+/// Starts Eid Download when the browser needs it and it is not running.
+///
+/// v0.2 (owner's request 2026-11-20: the button and the app work together, no duplicate windows
+/// or processes): the DESKTOP APP next to this host (`EidDownload.exe --endpoint NAME`) is
+/// started, so a click in the browser opens the window where the job shows (and "Open in Eid
+/// Download" has a window to open). The app is single-instance on its endpoint. Without it next
+/// to the host (a command-line-only setup), or with `EID_NATIVE_HOST_APP` / a token file set
+/// (portable setups and tests: as trusted as the rest of the user's environment), it is
+/// `<eid> serve --endpoint NAME --token-file PATH` as before.
 pub struct AppLauncher {
     pub exe: Option<std::path::PathBuf>,
     pub endpoint: Endpoint,
+    /// A token file other than the endpoint's default (`EID_IPC_TOKEN_FILE`): the desktop app
+    /// has no option for it, so `eid serve` is used.
+    pub custom_token: bool,
+}
+
+/// What [`AppLauncher`] starts: the program and its arguments. Pure (unit tested).
+pub fn launch_plan(
+    here: &std::path::Path,
+    exe: Option<&std::path::Path>,
+    endpoint: &Endpoint,
+    custom_token: bool,
+    is_file: &dyn Fn(&std::path::Path) -> bool,
+) -> std::io::Result<(std::path::PathBuf, Vec<std::ffi::OsString>)> {
+    let sfx = std::env::consts::EXE_SUFFIX;
+    let serve = |p: std::path::PathBuf| {
+        (
+            p,
+            vec![
+                std::ffi::OsString::from("serve"),
+                "--endpoint".into(),
+                endpoint.name.clone().into(),
+                "--token-file".into(),
+                endpoint.token_path.clone().into(),
+            ],
+        )
+    };
+    if let Some(p) = exe {
+        return if is_file(p) {
+            Ok(serve(p.to_path_buf()))
+        } else {
+            Err(not_found())
+        };
+    }
+    let gui = here.with_file_name(format!("EidDownload{sfx}"));
+    if !custom_token && is_file(&gui) {
+        return Ok((gui, vec!["--endpoint".into(), endpoint.name.clone().into()]));
+    }
+    let cli = here.with_file_name(format!("eid{sfx}"));
+    if is_file(&cli) {
+        Ok(serve(cli))
+    } else {
+        Err(not_found())
+    }
+}
+
+fn not_found() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "the Eid Download program was not found",
+    )
 }
 
 impl AppLauncher {
-    pub fn resolve(&self) -> std::io::Result<std::path::PathBuf> {
-        let exe = match &self.exe {
-            Some(p) => p.clone(),
-            None => std::env::current_exe()?
-                .with_file_name(format!("eid{}", std::env::consts::EXE_SUFFIX)),
-        };
-        if exe.is_file() {
-            Ok(exe)
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "the Eid Download program was not found",
-            ))
-        }
+    pub fn resolve(&self) -> std::io::Result<(std::path::PathBuf, Vec<std::ffi::OsString>)> {
+        launch_plan(
+            &std::env::current_exe()?,
+            self.exe.as_deref(),
+            &self.endpoint,
+            self.custom_token,
+            &|p| p.is_file(),
+        )
     }
 }
 
 impl Launcher for AppLauncher {
     fn launch(&self) -> std::io::Result<()> {
-        eid_platform::process::spawn_detached(
-            self.resolve()?,
-            [
-                std::ffi::OsString::from("serve"),
-                "--endpoint".into(),
-                self.endpoint.name.clone().into(),
-                "--token-file".into(),
-                self.endpoint.token_path.clone().into(),
-            ],
-        )
+        let (exe, args) = self.resolve()?;
+        eid_platform::process::spawn_detached(exe, args)
     }
 }
 
@@ -86,6 +128,7 @@ impl HostConfig {
                 None => return Err(e),
             },
         };
+        let custom_token = token_file.is_some();
         if let Some(p) = token_file {
             endpoint.token_path = p.into();
         }
@@ -93,6 +136,7 @@ impl HostConfig {
             launcher: Some(Box::new(AppLauncher {
                 exe: std::env::var_os("EID_NATIVE_HOST_APP").map(Into::into),
                 endpoint: endpoint.clone(),
+                custom_token,
             })),
             endpoint,
             // `EID_NATIVE_HOST_READY_MS` (1..=60000) shortens/lengthens the wait for a launched app
@@ -211,5 +255,58 @@ where
         if !reply(output, &resp).await {
             return Exit::ProtocolError;
         }
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// v0.2: the browser starts the desktop app when it is next to the host (one window, no
+    /// second process); `eid serve` only without it, or when the setup overrides the program or
+    /// the token file; nothing is started when neither exists.
+    #[test]
+    fn the_desktop_app_next_to_the_host_is_started_first() {
+        let sfx = std::env::consts::EXE_SUFFIX;
+        let dir = PathBuf::from("inst");
+        let here = dir.join(format!("eid-native-host{sfx}"));
+        let gui = dir.join(format!("EidDownload{sfx}"));
+        let cli = dir.join(format!("eid{sfx}"));
+        let ep = Endpoint {
+            name: "main".into(),
+            token_path: dir.join("tok"),
+        };
+        let has = |l: Vec<PathBuf>| move |p: &Path| l.iter().any(|x| x == p);
+        let (exe, args) = launch_plan(
+            &here,
+            None,
+            &ep,
+            false,
+            &has(vec![gui.clone(), cli.clone()]),
+        )
+        .unwrap();
+        assert_eq!(exe, gui);
+        assert_eq!(args, ["--endpoint", "main"]);
+        // no desktop app: eid serve, as before
+        let (exe, args) = launch_plan(&here, None, &ep, false, &has(vec![cli.clone()])).unwrap();
+        assert_eq!(exe, cli);
+        assert_eq!(args[0], "serve");
+        // a custom token file: the desktop app has no option for it, so eid serve
+        let (exe, _) =
+            launch_plan(&here, None, &ep, true, &has(vec![gui.clone(), cli.clone()])).unwrap();
+        assert_eq!(exe, cli);
+        // EID_NATIVE_HOST_APP: exactly that program, as `serve`
+        let custom = PathBuf::from("elsewhere").join("eid");
+        let (exe, args) = launch_plan(
+            &here,
+            Some(&custom),
+            &ep,
+            false,
+            &has(vec![custom.clone(), gui]),
+        )
+        .unwrap();
+        assert_eq!((exe, args[0].clone()), (custom, "serve".into()));
+        assert!(launch_plan(&here, None, &ep, false, &has(vec![])).is_err());
     }
 }
