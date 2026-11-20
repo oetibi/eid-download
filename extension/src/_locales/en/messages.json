@@ -84,5 +84,9 @@
   "colorBlue": { "message": "Blue" },
   "colorRed": { "message": "Red" },
   "colorPurple": { "message": "Purple" },
-  "colorDark": { "message": "Dark" }
+  "colorDark": { "message": "Dark" },
+  "optAccess": { "message": "Access to web pages" },
+  "optAccessMissing": { "message": "The browser has not allowed Eid Download on web pages, so the \"Download this video\" button cannot appear. Allow it here (or from the browser's extensions menu: Eid Download > Always allow)." },
+  "optAccessGrant": { "message": "Allow on all sites" },
+  "optAccessOk": { "message": "Allowed. Reload the video page." }
 }

@@ -84,5 +84,9 @@
   "colorBlue": { "message": "أزرق" },
   "colorRed": { "message": "أحمر" },
   "colorPurple": { "message": "بنفسجي" },
-  "colorDark": { "message": "داكن" }
+  "colorDark": { "message": "داكن" },
+  "optAccess": { "message": "الوصول إلى صفحات الويب" },
+  "optAccessMissing": { "message": "لم يسمح المتصفح لإضافة Eid Download بالعمل على صفحات الويب، لذلك لا يمكن أن يظهر زر «تنزيل هذا الفيديو». اسمح بذلك من هنا (أو من قائمة الإضافات في المتصفح: Eid Download ← السماح دائماً)." },
+  "optAccessGrant": { "message": "السماح على كل المواقع" },
+  "optAccessOk": { "message": "تم السماح. أعد تحميل صفحة الفيديو." }
 }

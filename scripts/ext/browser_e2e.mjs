@@ -228,7 +228,7 @@ async function firefox() {
     "dom.security.https_first": false,
     "browser.shell.checkDefaultBrowser": false,
   };
-  const opts = { args: ["-headless", "-width=1280", "-height=900"], prefs };
+  const opts = { args: ["-headless", "--window-size=1280,900"], prefs };
   if (arg("--bin")) opts.binary = arg("--bin");
   const sess = await http("POST", "/session", { capabilities: { alwaysMatch: { browserName: "firefox", webSocketUrl: true, acceptInsecureCerts: true, "moz:firefoxOptions": opts } } });
   const sid = sess.sessionId;
@@ -298,11 +298,23 @@ async function firefox() {
       await sleep(300);
     },
     async options(fnSource) {
-      const { context: oc } = await bidi("browsingContext.create", { type: "tab" });
-      await bidi("browsingContext.navigate", { context: oc, url: `moz-extension://${uuid}/options.html`, wait: "complete" });
-      await sleep(800);
+      // WebDriver BiDi refuses to navigate a tab to moz-extension: (run 44717375680), so the tab
+      // is opened from the browser's own (chrome) context through Marionette, like a user would
+      const url = `moz-extension://${uuid}/options.html`;
+      await http("POST", `/session/${sid}/moz/context`, { context: "chrome" });
+      try {
+        await http("POST", `/session/${sid}/execute/sync`, { script: "const w = Services.wm.getMostRecentWindow('navigator:browser'); w.gBrowser.selectedTab = w.gBrowser.addTab(arguments[0], { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() }); return true;", args: [url] });
+      } finally {
+        await http("POST", `/session/${sid}/moz/context`, { context: "content" });
+      }
+      const oc = await until(async () => {
+        const { contexts: cs } = await bidi("browsingContext.getTree", {});
+        return cs.find((c) => c.url === url)?.context;
+      }, 10000, "the options tab");
+      await sleep(1000);
       const v = await evaluate(`(${fnSource})()`, oc);
       await bidi("browsingContext.close", { context: oc });
+      await bidi("browsingContext.activate", { context });
       return v;
     },
     async close() { try { await http("DELETE", `/session/${sid}`); } catch {} try { proc.kill(); } catch {} },
@@ -401,9 +413,12 @@ try {
       document.querySelector('input[name=position][value=top-left]').click();
       document.querySelector('#f button[type=submit]').click();
       await new Promise((r) => setTimeout(r, 800));
-      return document.getElementById('msg').textContent;
+      const access = document.getElementById('access');
+      return { msg: document.getElementById('msg').textContent, accessShown: access ? !access.hidden : null };
     }`);
-    console.log(`     options page said: ${saved}`);
+    console.log(`     options page said: ${JSON.stringify(saved)}`);
+    // the extension may run on web pages (else the options page says so and offers to allow it)
+    assert(saved.accessShown === false, "the options page says the extension is NOT allowed on web pages");
     await B.open("https://www.youtube.com/watch?v=CCCCCCCCCCC");
     await B.hover(3, 3);
     const p = await player();
