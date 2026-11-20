@@ -415,7 +415,7 @@ test("v0.2 if-missing: playlist only, a fixed height only, default not sent, bad
 test("v0.2 open_video: one checked address; 'Open in Eid Download' sends the video with its playlist", () => {
   const id = "ext-0123456789abcdef01234567";
   const w = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01";
-  assert.deepEqual(C.buildRequest({ cmd: "open_video", url: w, quality: "best" }, id), { v: 1, id, command: { cmd: "open_video", url: w } });
+  assert.deepEqual(C.buildRequest({ cmd: "open_video", url: w, quality: "best" }, id), { v: 1, id, command: { cmd: "open_video", url: w, quality: "best" } });
   assert.throws(() => C.buildRequest({ cmd: "open_video", url: "javascript:alert(1)" }, id), /bad_url/);
   assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01&index=3&t=10s&si=x")), w);
   assert.equal(C.openInAppUrl(C.classifyUrl("https://youtu.be/dQw4w9WgXcQ?si=tracker")), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
@@ -473,4 +473,11 @@ test("v0.2 download menu: options validated, tallest first, only real details; a
   assert.equal(C.fmtBytes(52428800), "52.4 MB");
   assert.equal(C.fmtBytes(3000000), "3.00 MB");
   assert.equal(C.fmtBytes(0), "");
+});
+
+test("v0.2 review: open_video may carry the menu's quality (policy values only)", () => {
+  const P = "https://www.youtube.com/playlist?list=PLtestlist01";
+  assert.deepEqual(C.buildRequest({ cmd: "open_video", url: P, quality: "720p" }, "ext-1").command, { cmd: "open_video", url: P, quality: "720p" });
+  assert.deepEqual(C.buildRequest({ cmd: "open_video", url: P }, "ext-1").command, { cmd: "open_video", url: P });
+  for (const q of ["8640p", "bv*+ba", 7]) assert.throws(() => C.buildRequest({ cmd: "open_video", url: P, quality: q }, "ext-1"), /bad_quality/, String(q));
 });

@@ -6,7 +6,7 @@
 // A mock is not proof that the real backend or YouTube works.
 import { videoPage } from "./logic.js";
 
-if (typeof window !== "undefined") window.__eidMockOpenVideo = (u) => { (window.__eidMockOpen ??= []).push(u); };
+if (typeof window !== "undefined") window.__eidMockOpenVideo = (u, quality) => { (window.__eidMockOpen ??= []).push(quality ? { url: u, quality } : u); };
 
 export function mockApi(params = new URLSearchParams()) {
   const DIR = "C:\\Users\\me\\Downloads";
@@ -278,9 +278,9 @@ export function mockApi(params = new URLSearchParams()) {
       if (!toolsInstalled) throw "TOOLS_MISSING: yt-dlp is not installed";
       if (!/^https?:\/\//i.test(url)) throw "bad_url";
       if (/fail/i.test(url)) throw "ERROR: [youtube] This video is unavailable";
-      // like the real backend: watch?v=…&list=… is probed as the video alone (--no-playlist);
-      // the playlist itself is probed at playlist?list=… (--flat-playlist --yes-playlist)
-      if (/[?&]list=/.test(url) && !/[?&]v=/.test(url)) {
+      // like the real backend (--flat-playlist --yes-playlist): any link with list=… is read as
+      // the playlist, a watch?v=…&list=… link included (the window probes the video alone)
+      if (/[?&]list=/.test(url)) {
         const count = /big/.test(url) ? 300 : 12;
         return {
           kind: "playlist", title: "قائمة دروس Rust — Rust lessons", uploader: "Example Channel",
@@ -294,6 +294,7 @@ export function mockApi(params = new URLSearchParams()) {
       if (!["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best", "audio", "m4a"].includes(quality)) throw "bad_quality";
       if (format != null && !/^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63}(\+[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63})?$/.test(format)) throw "invalid input: format";
       window.__eidMockLastVideo = { url, quality, format: format ?? null };
+      (window.__eidMockProbed ??= []).push(url);
       const j = { job: nextJob++, kind: "video", title: "Big Buck Bunny — sample video", url, state: "queued", quality, done_items: 0, total_items: 1, failed_items: 0, bytes: 0, total_bytes: null, speed: 0, items: [{ index: 1, title: "Big Buck Bunny — sample video", state: "queued", progress: 0 }] };
       jobs.unshift(j);
       return { job: j.job };

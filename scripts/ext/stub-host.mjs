@@ -54,6 +54,8 @@ function answer(req) {
     case "open_video":
       // the headless background server has no window (eid serve): list=PLnowindow
       if (/[?&]list=PLnowindow/.test(c.url ?? "")) return reply(req.id, false, "no window: this is the background server; open Eid Download and use Video");
+      // an app from before open_video: list=PLoldapp
+      if (/[?&]list=PLoldapp/.test(c.url ?? "")) return reply(req.id, false, "malformed request: unknown variant `open_video`");
       return reply(req.id, true, { opened: true });
     case "add":
     case "add_video":

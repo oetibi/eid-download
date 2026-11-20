@@ -801,7 +801,15 @@ where
 
 /// v0.2: links the browser asked the window to open (`open_video`), taken by the next `list`.
 /// Bounded: a page cannot queue an unbounded number of windows.
-pub type OpenRequests = Arc<std::sync::Mutex<Vec<String>>>;
+pub type OpenRequests = Arc<std::sync::Mutex<Vec<OpenRequest>>>;
+
+/// One `open_video` for the window: the page and the quality chosen in the browser, if any.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct OpenRequest {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+}
 const MAX_OPEN_REQUESTS: usize = 8;
 
 /// [`with_show`] plus `open_video`: the link is queued for the window, which opens its Video
@@ -820,12 +828,12 @@ where
             show.notify_one();
             Ok(serde_json::json!({}))
         }
-        Command::OpenVideo { url } => {
+        Command::OpenVideo { url, quality } => {
             let mut q = open.lock().unwrap_or_else(|p| p.into_inner());
             if q.len() >= MAX_OPEN_REQUESTS {
                 return Err("too many open requests; finish the ones in the window first".into());
             }
-            q.push(url);
+            q.push(OpenRequest { url, quality });
             drop(q);
             show.notify_one();
             Ok(serde_json::json!({ "opened": true }))
@@ -1168,10 +1176,24 @@ mod tests {
         );
         let u = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01";
         assert_eq!(
-            h(Command::OpenVideo { url: u.into() }).unwrap()["opened"],
+            h(Command::OpenVideo {
+                url: u.into(),
+                quality: Some("720p".into())
+            })
+            .unwrap()["opened"],
             true
         );
-        assert_eq!(*open.lock().unwrap(), [u]);
+        assert_eq!(
+            *open.lock().unwrap(),
+            [OpenRequest {
+                url: u.into(),
+                quality: Some("720p".into())
+            }]
+        );
+        assert_eq!(
+            serde_json::to_value(&open.lock().unwrap()[0]).unwrap(),
+            serde_json::json!({"url": u, "quality": "720p"})
+        );
         // the window got a "come forward" permit
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1185,12 +1207,14 @@ mod tests {
         for i in 1..8 {
             h(Command::OpenVideo {
                 url: format!("https://h/{i}"),
+                quality: None,
             })
             .unwrap();
         }
         assert!(
             h(Command::OpenVideo {
-                url: "https://h/9".into()
+                url: "https://h/9".into(),
+                quality: None
             })
             .is_err(),
             "bounded"

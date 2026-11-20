@@ -72,7 +72,7 @@
   "optAlways": { "message": "دائماً" },
   "optIfMissing": { "message": "قوائم التشغيل: إن لم تتوفر الجودة المختارة في مقطع" },
   "optMissLower": { "message": "خذ أقرب جودة أقل" },
-  "optMissHigher": { "message": "خذ أقرب جودة أعلى (حتى 4K)" },
+  "optMissHigher": { "message": "خذ أقرب جودة أعلى (حتى 8K)" },
   "optMissSkip": { "message": "تخطَّ المقطع" },
   "optExcluded": { "message": "لا تُظهره في هذه المواقع (موقع في كل سطر)" },
   "optSave": { "message": "حفظ" },
@@ -105,5 +105,6 @@
   "optKbps": { "message": "$N$ كيلوبت/ث", "placeholders": { "n": { "content": "$1" } } },
   "optSize": { "message": "≈ $S$", "placeholders": { "s": { "content": "$1" } } },
   "menuEntirePlaylist": { "message": "تنزيل قائمة التشغيل كاملة ($COUNT$ فيديو)", "placeholders": { "count": { "content": "$1" } } },
-  "openedPlaylistInApp": { "message": "فُتحت قائمة التشغيل في Eid Download: راجع المجلد والجودة ثم اضغط «ابدأ»." }
+  "openedPlaylistInApp": { "message": "فُتحت قائمة التشغيل في Eid Download: راجع المجلد والجودة ثم اضغط «ابدأ»." },
+  "optBestMeta": { "message": "أعلى جودة في هذا الفيديو، MP4 مع الصوت" }
 }

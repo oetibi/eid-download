@@ -174,8 +174,16 @@ async function refresh() {
     // v0.2: "Open in Eid Download" from the browser: the Video window with that link (the
     // window was brought to the front by the app); the newest request wins
     if (Array.isArray(s?.open_video) && s.open_video.length) {
-      const u = s.open_video[s.open_video.length - 1];
-      if (typeof u === "string" && u.length <= 8192 && /^https?:\/\/\S+$/i.test(u)) openFromBrowser(u);
+      const o = s.open_video[s.open_video.length - 1];
+      const u = typeof o === "string" ? o : o?.url;
+      const q = typeof o === "object" && safeQualities([o?.quality]).length ? o.quality : null;
+      if (typeof u === "string" && u.length <= 8192 && /^https?:\/\/\S+$/i.test(u)) openFromBrowser(u, q);
+    }
+    // a browser link that waited for the user to finish a dialog
+    if (pendingOpen && !document.querySelector("dialog[open]")) {
+      const p = pendingOpen;
+      pendingOpen = null;
+      openFromBrowser(p.url, p.quality);
     }
     rev = r.rev;
     if (r.changed || !gotList) invalidate(true);
@@ -1055,14 +1063,25 @@ let videoFolder = null;
 const vStatus = (msg) => { const s = $("#v-status"); s.hidden = !msg; s.textContent = msg ?? ""; };
 const vError = (msg) => { const s = $("#v-error"); s.hidden = !msg; s.textContent = msg ?? ""; };
 
-/** v0.2: a link sent by the browser's button: any open dialog gives way to the Video window. */
-function openFromBrowser(url) {
-  for (const d of document.querySelectorAll("dialog[open]")) d.close();
-  openVideo(url);
+/**
+ * v0.2: a link sent by the browser's button opens the Video window. A dialog the user is
+ * working in (links being typed, settings, the tools agreement, another video) is never closed
+ * under them: the link waits, says so, and opens when that dialog is closed.
+ */
+let pendingOpen = null;
+let pickedQuality = null;
+function openFromBrowser(url, quality) {
+  if (document.querySelector("dialog[open]")) {
+    pendingOpen = { url, quality: quality ?? null };
+    toast(t("from_browser_waiting"));
+    return;
+  }
+  openVideo(url, quality);
   toast(t("from_browser"));
 }
 
-function openVideo(prefill) {
+function openVideo(prefill, quality) {
+  pickedQuality = quality ?? null;
   probe = null;
   probeSeq++;
   videoFolder = null;
@@ -1099,9 +1118,14 @@ async function doProbe() {
   $("#btn-probe").disabled = true;
   vStatus(t("vd_probing"));
   try {
-    const r = await api.call("video_probe", { url });
+    // a video link that carries a playlist (watch?v=…&list=…): the backend reads such a link as
+    // the whole playlist (--yes-playlist), so "this video" is probed from the video alone and the
+    // playlist when the user asks for it (review of PR #9)
+    const both = scope.ctx?.videoUrl && scope.ctx?.playlistUrl;
+    const target = both ? scope.ctx.videoUrl : url;
+    const r = await api.call("video_probe", { url: target });
     if (seq !== probeSeq) return;
-    probe = { url, result: r };
+    probe = { url: target, result: r };
     if (r.kind === "playlist") scope.list = probe; else scope.video = probe;
     renderProbe();
   } catch (e) {
@@ -1130,7 +1154,7 @@ function renderProbe() {
   if (r.duration != null) meta.push(`${t("vd_duration")}: ${fmtDur(r.duration)}`);
   if (r.kind === "playlist") meta.push(t("vd_items", r.items?.length ?? 0));
   $("#v-meta").textContent = meta.join(" · ");
-  fillQualitySelect($("#v-quality"), safeQualities(r.qualities), settings.quality, r.kind === "video" ? r : null);
+  fillQualitySelect($("#v-quality"), safeQualities(r.qualities), pickedQuality ?? settings.quality, r.kind === "video" ? r : null);
   $("#v-missing").value = settings.missing;
   showMissingRow();
   const isList = r.kind === "playlist";
@@ -1173,7 +1197,9 @@ function updateVideoStart() {
 $("#v-scope").addEventListener("change", async (e) => {
   if (!scope?.ctx?.playlistUrl) return;
   vError(null);
-  if (e.target.value === "video" && scope.video) { probe = scope.video; renderProbe(); return; }
+  // any switch makes a playlist probe still on its way stale (it must not switch back later)
+  if (e.target.value === "video") ++probeSeq;
+  if (e.target.value === "video" && scope.video) { probe = scope.video; renderProbe(); vStatus(null); updateVideoStart(); return; }
   if (e.target.value === "list") {
     if (scope.list) { probe = scope.list; renderProbe(); return; }
     const seq = ++probeSeq;

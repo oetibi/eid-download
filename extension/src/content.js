@@ -729,7 +729,11 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
         const opts = r.result.options || [];
         const aopts = r.result.audioOptions || [];
         if (opts.length) {
-          // v0.2: each line is an exact pair of formats with its real details, tallest first
+          // "Best": the tallest available (no exact formats: the app picks it), then each line an
+          // exact pair of formats with its real details, tallest first
+          if (r.result.qualities.indexOf("best") !== -1) {
+            vbody.appendChild(choice("best", t("optBestMeta"), () => act({ cmd: "add_video", url: cls.videoUrl, quality: "best" })));
+          }
           for (const o of opts) {
             vbody.appendChild(
               choice(o.quality, videoMeta(o), () => act({ cmd: "add_video", url: cls.videoUrl, quality: o.quality, format: o.format }), { "data-format": o.format }, o.size),
@@ -812,9 +816,12 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
               on: {
                 click: async () => {
                   setStatus("muted", t("sending"));
-                  const r = await send({ cmd: "open_video", url: cls.playlistUrl });
+                  // the window opens with the quality chosen here; an app without a window
+                  // (no_window), or one older than open_video (app_too_old), downloads the
+                  // whole playlist directly with it
+                  const r = await send({ cmd: "open_video", url: cls.playlistUrl, quality: sel.value });
                   if (r.ok) setStatus("ok", t("openedPlaylistInApp"));
-                  else if (r.code === "no_window") await act({ cmd: "add_playlist", url: cls.playlistUrl, quality: sel.value, if_missing: settings.ifMissing });
+                  else if (r.code === "no_window" || r.code === "app_too_old") await act({ cmd: "add_playlist", url: cls.playlistUrl, quality: sel.value, if_missing: settings.ifMissing });
                   else setStatus("err", errText(r.code));
                 },
               },

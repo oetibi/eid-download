@@ -72,7 +72,7 @@
   "optAlways": { "message": "Always" },
   "optIfMissing": { "message": "Playlists: if an item lacks the chosen quality" },
   "optMissLower": { "message": "Take the nearest lower one" },
-  "optMissHigher": { "message": "Take the nearest higher one (up to 4K)" },
+  "optMissHigher": { "message": "Take the nearest higher one (up to 8K)" },
   "optMissSkip": { "message": "Skip that item" },
   "optExcluded": { "message": "Do not show on these sites (one per line)" },
   "optSave": { "message": "Save" },
@@ -105,5 +105,6 @@
   "optKbps": { "message": "$N$ kb/s", "placeholders": { "n": { "content": "$1" } } },
   "optSize": { "message": "≈ $S$", "placeholders": { "s": { "content": "$1" } } },
   "menuEntirePlaylist": { "message": "Download Entire Playlist ($COUNT$ videos)", "placeholders": { "count": { "content": "$1" } } },
-  "openedPlaylistInApp": { "message": "The playlist is open in Eid Download: check the folder and quality, then Start." }
+  "openedPlaylistInApp": { "message": "The playlist is open in Eid Download: check the folder and quality, then Start." },
+  "optBestMeta": { "message": "the tallest this video has, MP4 with audio" }
 }

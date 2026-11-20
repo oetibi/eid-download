@@ -89,6 +89,10 @@ pub enum Command {
     /// `eid serve` has no window and refuses it.
     OpenVideo {
         url: String,
+        /// v0.2 (review of PR #9): the quality already chosen in the browser's menu, so the
+        /// window opens with it selected ([`VIDEO_QUALITIES`]); absent = the app's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
     },
 }
 
@@ -197,7 +201,16 @@ impl Request {
             }
         }
         let video_url = match &self.command {
-            Command::Probe { url } | Command::OpenVideo { url } => Some(url),
+            Command::Probe { url } => Some(url),
+            Command::OpenVideo { url, quality } => {
+                if quality
+                    .as_deref()
+                    .is_some_and(|q| !VIDEO_QUALITIES.contains(&q))
+                {
+                    return Err("invalid quality".into());
+                }
+                Some(url)
+            }
             Command::AddVideo {
                 url,
                 quality,
@@ -470,7 +483,11 @@ mod tests {
         assert!(!Command::Pause { item: 1 }.allowed_from_browser());
         assert!(!Command::Resume { item: 1 }.allowed_from_browser());
         assert!(!Command::Show {}.allowed_from_browser());
-        assert!(Command::OpenVideo { url: "u".into() }.allowed_from_browser());
+        assert!(Command::OpenVideo {
+            url: "u".into(),
+            quality: None
+        }
+        .allowed_from_browser());
     }
 
     /// v0.2: open_video carries one http(s) page address, nothing else.
@@ -480,9 +497,22 @@ mod tests {
         assert_eq!(
             parse_request(ok).unwrap().command,
             Command::OpenVideo {
-                url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1".into()
+                url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1".into(),
+                quality: None
             }
         );
+        // v0.2: the quality chosen in the browser, one of the policy values
+        let q = br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video","url":"https://www.youtube.com/playlist?list=PL1","quality":"720p"}}"#;
+        assert!(
+            matches!(parse_request(q).unwrap().command, Command::OpenVideo { quality: Some(ref v), .. } if v == "720p")
+        );
+        for bad in [
+            &br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video","url":"https://h/x","quality":"8640p"}}"#[..],
+            br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video","url":"https://h/x","quality":"bv*+ba"}}"#,
+            br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video","url":"https://h/x","quality":7}}"#,
+        ] {
+            assert!(parse_request(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
         for bad in [
             &br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video","url":"file:///C:/x"}}"#[..],
             br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video","url":"javascript:alert(1)"}}"#,

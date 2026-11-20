@@ -342,6 +342,11 @@
         // v0.2: the desktop app's Video window with this page (the user chooses there)
         if (!validHttpUrl(action.url)) throw new Error("bad_url");
         command = { cmd: "open_video", url: action.url };
+        // v0.2 (review of PR #9): the quality chosen in the menu, so the window opens with it
+        if (action.quality !== undefined && action.quality !== null) {
+          if (!isPolicyQuality(action.quality)) throw new Error("bad_quality");
+          command.quality = action.quality;
+        }
         break;
       case "add_video":
         if (!validHttpUrl(action.url)) throw new Error("bad_url");

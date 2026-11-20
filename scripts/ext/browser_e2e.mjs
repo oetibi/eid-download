@@ -437,7 +437,7 @@ try {
     const q720 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-q"] === "720p"), 15000, "the 720p choice (probe through the native host)");
     const bs = (await B.overlay()).buttons;
     const offered = bs.map((x) => x.attrs["data-q"]).filter(Boolean);
-    assert(JSON.stringify(offered) === JSON.stringify(["4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]), `order: ${offered}`);
+    assert(JSON.stringify(offered) === JSON.stringify(["best", "4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]), `order: ${offered}`);
     const text = (q) => bs.find((x) => x.attrs["data-q"] === q).text;
     assert(/4320p/.test(text("4320p")) && /AV1/.test(text("4320p")) && /603/.test(text("4320p")), `8K line: ${text("4320p")}`);
     assert(/HDR10/.test(text("2160p")) && !/≈/.test(text("2160p")), `4K line (HDR, no size from the app): ${text("2160p")}`);
@@ -540,7 +540,8 @@ try {
     await B.click(entire.ref);
     await until(() => hostRequests().slice(before).some((r) => r.cmd === "open_video"), 10000, "open_video at the host");
     const r = hostRequests().slice(before).find((x) => x.cmd === "open_video");
-    assert(r.url === "https://www.youtube.com/playlist?list=PLtestlist01", JSON.stringify(r));
+    // the quality chosen in the menu's playlist part goes with it (the first of the select)
+    assert(r.url === "https://www.youtube.com/playlist?list=PLtestlist01" && r.quality === "best", JSON.stringify(r));
     await until(async () => /The playlist is open in Eid Download/.test((await B.overlay()).texts.join(" ")), 5000, "the confirmation");
     // the headless app ("no window"): the whole playlist is downloaded in one operation
     await B.open("https://www.youtube.com/watch?v=FFFFFFFFFFF&list=PLnowindow");
@@ -553,6 +554,15 @@ try {
     await until(() => hostRequests().slice(n0).some((x) => x.cmd === "add_playlist"), 10000, "add_playlist after 'no window'");
     const ap = hostRequests().slice(n0).find((x) => x.cmd === "add_playlist");
     assert(ap.url === "https://www.youtube.com/playlist?list=PLnowindow" && ap.items === undefined, JSON.stringify(ap));
+    // an app from before open_video: the same, never an error
+    await B.open("https://www.youtube.com/watch?v=GGGGGGGGGGG&list=PLoldapp");
+    await B.hover(3, 3);
+    const s3 = await until(shownButton, 8000, "the button");
+    await B.click(s3.b.ref);
+    const e3 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 15000, "'Download Entire Playlist'");
+    const n1 = hostRequests().length;
+    await B.click(e3.ref);
+    await until(() => hostRequests().slice(n1).some((x) => x.cmd === "add_playlist"), 10000, "add_playlist after 'app too old'");
   });
 
   await check("8. an app from before the details (qualities only) still works: plain lines, no exact formats sent", async () => {

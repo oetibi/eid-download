@@ -276,7 +276,7 @@ pub struct Snapshot {
     /// v0.2: engine warnings `(item, text)` since the previous answer (sent once).
     warnings: Vec<(u64, String)>,
     /// v0.2: links the browser asked to open in the Video window (sent once).
-    open_video: Vec<String>,
+    open_video: Vec<core::OpenRequest>,
 }
 
 fn unix_now() -> i64 {
