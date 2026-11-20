@@ -55,7 +55,7 @@ function trustedSender(sender) {
   return true;
 }
 
-const ACTIONS = new Set(["ping", "probe", "add", "add_video", "add_playlist"]);
+const ACTIONS = new Set(["ping", "probe", "add", "add_video", "add_playlist", "open_video"]);
 
 async function handle(msg) {
   if (!msg || typeof msg !== "object" || msg.eid !== 1 || !ACTIONS.has(msg.cmd)) {

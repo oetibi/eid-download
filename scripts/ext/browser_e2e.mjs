@@ -428,6 +428,19 @@ try {
     const left = leftOf(b);
     assert(left >= p.x && left < p.x + p.w / 2, `button left ${left} is not at the top-left of the player ${JSON.stringify(p)}`);
   });
+
+  await check("6. 'Open in Eid Download' sends the video WITH its playlist to the app's own Video window", async () => {
+    await B.open("https://www.youtube.com/watch?v=DDDDDDDDDDD&list=PLarafta&index=2&si=tracker");
+    await B.hover(3, 3);
+    const { b } = await until(shownButton, 8000, "the button");
+    await B.click(b.ref);
+    const open = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "open-app"), 8000, "'Open in Eid Download' in the menu");
+    await B.click(open.ref);
+    await until(() => hostRequests().some((r) => r.cmd === "open_video"), 10000, "open_video at the host");
+    const r = hostRequests().find((x) => x.cmd === "open_video");
+    assert(r.url === "https://www.youtube.com/watch?v=DDDDDDDDDDD&list=PLarafta", JSON.stringify(r));
+    await until(async () => /Opened in Eid Download/.test((await B.overlay()).texts.join(" ")), 5000, "the confirmation in the menu");
+  });
 } catch (e) {
   failed++;
   console.log(`FAIL (setup) ${e?.stack ?? e}`);

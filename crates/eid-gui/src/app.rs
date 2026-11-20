@@ -49,6 +49,8 @@ pub struct AppState {
     pub power_view: Arc<Mutex<crate::power::PowerView>>,
     /// v0.2: engine warnings not yet shown by the window.
     pub warnings: Arc<Mutex<Vec<(u64, String)>>>,
+    /// v0.2: links the browser asked to open in the Video window (taken by `list`).
+    pub open_requests: core::OpenRequests,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<Result<(), String>>>>,
 }
 
@@ -193,7 +195,8 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         PathBuf::from(&default_dir),
     )?;
     let setup = VideoSetup::new(video.clone()).with_log(Arc::new(|s: &str| crate::diag::log(s)));
-    let handler = Arc::new(core::with_show(
+    let open_requests: core::OpenRequests = Arc::default();
+    let handler = Arc::new(core::with_window(
         serve::handler_with_video(
             sched.clone(),
             MAIN_QUEUE.to_owned(),
@@ -203,6 +206,7 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
             Some(video.clone()),
         ),
         show.clone(),
+        open_requests.clone(),
     ));
     let running = match eid_ipc::start(&ep, handler, ServeOptions::default()) {
         Ok(r) => r,
@@ -234,6 +238,7 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         power,
         power_view,
         warnings,
+        open_requests,
         task: Mutex::new(Some(task)),
     }))
 }
@@ -270,6 +275,8 @@ pub struct Snapshot {
     power: crate::power::PowerView,
     /// v0.2: engine warnings `(item, text)` since the previous answer (sent once).
     warnings: Vec<(u64, String)>,
+    /// v0.2: links the browser asked to open in the Video window (sent once).
+    open_video: Vec<String>,
 }
 
 fn unix_now() -> i64 {
@@ -305,6 +312,9 @@ pub fn list(st: State<'_, AppState>, since: Option<u64>) -> Snapshot {
             v
         },
         warnings: std::mem::take(&mut *st.warnings.lock().unwrap_or_else(|p| p.into_inner())),
+        open_video: std::mem::take(
+            &mut *st.open_requests.lock().unwrap_or_else(|p| p.into_inner()),
+        ),
     }
 }
 

@@ -287,6 +287,9 @@ pub fn handler_with_video(
         // the desktop app answers this itself (eid-gui wraps this handler); the headless
         // server has no window to show
         Command::Show {} => Err("no window: this is the background server".into()),
+        Command::OpenVideo { .. } => {
+            Err("no window: this is the background server; open Eid Download and use Video".into())
+        }
     }
 }
 

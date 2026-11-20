@@ -78,6 +78,13 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_missing: Option<String>,
     },
+    /// v0.2: open the desktop app's Video window with this page address and bring it to the
+    /// front; the user chooses there (this video or the whole playlist, episodes, quality,
+    /// folder). From the browser's button (owner's request 2026-11-20). The headless
+    /// `eid serve` has no window and refuses it.
+    OpenVideo {
+        url: String,
+    },
 }
 
 impl Command {
@@ -90,6 +97,7 @@ impl Command {
                 | Command::Probe { .. }
                 | Command::AddVideo { .. }
                 | Command::AddPlaylist { .. }
+                | Command::OpenVideo { .. }
         )
     }
 
@@ -184,7 +192,7 @@ impl Request {
             }
         }
         let video_url = match &self.command {
-            Command::Probe { url } => Some(url),
+            Command::Probe { url } | Command::OpenVideo { url } => Some(url),
             Command::AddVideo {
                 url,
                 quality,
@@ -385,5 +393,26 @@ mod tests {
         assert!(!Command::Pause { item: 1 }.allowed_from_browser());
         assert!(!Command::Resume { item: 1 }.allowed_from_browser());
         assert!(!Command::Show {}.allowed_from_browser());
+        assert!(Command::OpenVideo { url: "u".into() }.allowed_from_browser());
+    }
+
+    /// v0.2: open_video carries one http(s) page address, nothing else.
+    #[test]
+    fn open_video_is_one_checked_web_address() {
+        let ok = br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1"}}"#;
+        assert_eq!(
+            parse_request(ok).unwrap().command,
+            Command::OpenVideo {
+                url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1".into()
+            }
+        );
+        for bad in [
+            &br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video","url":"file:///C:/x"}}"#[..],
+            br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video","url":"javascript:alert(1)"}}"#,
+            br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video","url":"https://h/x","dir":"C:/"}}"#,
+            br#"{"v":1,"id":"ext-1","command":{"cmd":"open_video"}}"#,
+        ] {
+            assert!(parse_request(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
     }
 }

@@ -120,6 +120,19 @@
     return out;
   }
 
+  /**
+   * v0.2: the address "Open in Eid Download" sends for a classified page: the video with its
+   * playlist (`watch?v=X&list=Y`, so the app offers "this video" or "the whole playlist"), the
+   * video alone, or the playlist alone; null for anything else. Canonical, tracking-free.
+   */
+  function openInAppUrl(cls) {
+    if (!cls || cls.kind !== "youtube") return null;
+    if (cls.videoId && cls.playlistId) {
+      return "https://www.youtube.com/watch?v=" + cls.videoId + "&list=" + cls.playlistId;
+    }
+    return cls.videoUrl || cls.playlistUrl || null;
+  }
+
   /** Height of a quality label ("1080p" -> 1080), or null for best/audio/garbage. */
   function heightOf(q) {
     const m = /^(\d{3,4})p$/.exec(q);
@@ -249,6 +262,11 @@
         if (!validHttpUrl(action.url)) throw new Error("bad_url");
         command = { cmd: "add", url: action.url };
         break;
+      case "open_video":
+        // v0.2: the desktop app's Video window with this page (the user chooses there)
+        if (!validHttpUrl(action.url)) throw new Error("bad_url");
+        command = { cmd: "open_video", url: action.url };
+        break;
       case "add_video":
         if (!validHttpUrl(action.url)) throw new Error("bad_url");
         if (!isPolicyQuality(action.quality)) throw new Error("bad_quality");
@@ -306,6 +324,7 @@
     if (/command not allowed from the browser|malformed request|unsupported protocol/i.test(m)) {
       return "app_too_old";
     }
+    if (/no window/i.test(m)) return "no_window";
     if (/drm|protected/i.test(m)) return "drm";
     if (/unsupported url|unsupported site|no video/i.test(m)) return "unsupported";
     if (/timed? ?out/i.test(m)) return "timeout";
@@ -495,6 +514,7 @@
     SIZES,
     DEFAULT_SETTINGS,
     classifyUrl,
+    openInAppUrl,
     heightOf,
     filterQualities,
     isPolicyQuality,

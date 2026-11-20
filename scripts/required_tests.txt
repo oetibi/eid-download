@@ -470,3 +470,6 @@ a_panic_is_written_with_its_message_and_place
 a_failed_setup_always_says_why
 # ---- v0.2 owner's request 2026-11-20: playlists in full (Arafta, 87 episodes)
 numbering_follows_the_d8_rules
+open_video_is_one_checked_web_address
+open_video_queues_the_link_for_the_window_and_brings_it_forward
+the_desktop_app_next_to_the_host_is_started_first

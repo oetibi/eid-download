@@ -30,6 +30,7 @@ impl Handler for Counting {
                 Ok(json!({"kind": "video"}))
             }
             Command::AddVideo { .. } | Command::AddPlaylist { .. } => Ok(json!({"job": 1})),
+            Command::OpenVideo { .. } => Ok(json!({"opened": true})),
         }
     }
 }

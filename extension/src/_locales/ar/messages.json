@@ -88,5 +88,8 @@
   "optAccess": { "message": "الوصول إلى صفحات الويب" },
   "optAccessMissing": { "message": "لم يسمح المتصفح لإضافة Eid Download بالعمل على صفحات الويب، لذلك لا يمكن أن يظهر زر «تنزيل هذا الفيديو». اسمح بذلك من هنا (أو من قائمة الإضافات في المتصفح: Eid Download ← السماح دائماً)." },
   "optAccessGrant": { "message": "السماح على كل المواقع" },
-  "optAccessOk": { "message": "تم السماح. أعد تحميل صفحة الفيديو." }
+  "optAccessOk": { "message": "تم السماح. أعد تحميل صفحة الفيديو." },
+  "menuOpenInApp": { "message": "فتح في Eid Download (اختيار الحلقات والجودة والمجلد)…" },
+  "openedInApp": { "message": "فُتح في Eid Download: اختر هناك." },
+  "errNoWindow": { "message": "يعمل الجزء الخلفي من Eid Download فقط. افتح نافذة Eid Download ثم حاول مجدداً." }
 }

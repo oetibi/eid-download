@@ -88,5 +88,8 @@
   "optAccess": { "message": "Access to web pages" },
   "optAccessMissing": { "message": "The browser has not allowed Eid Download on web pages, so the \"Download this video\" button cannot appear. Allow it here (or from the browser's extensions menu: Eid Download > Always allow)." },
   "optAccessGrant": { "message": "Allow on all sites" },
-  "optAccessOk": { "message": "Allowed. Reload the video page." }
+  "optAccessOk": { "message": "Allowed. Reload the video page." },
+  "menuOpenInApp": { "message": "Open in Eid Download (choose episodes, quality, folder)…" },
+  "openedInApp": { "message": "Opened in Eid Download: choose there." },
+  "errNoWindow": { "message": "Only the background part of Eid Download is running. Open the Eid Download window and try again." }
 }

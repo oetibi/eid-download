@@ -796,11 +796,39 @@ pub fn with_show<H>(
 where
     H: Fn(Command) -> Result<serde_json::Value, String> + Send + Sync + 'static,
 {
+    with_window(inner, show, Arc::default())
+}
+
+/// v0.2: links the browser asked the window to open (`open_video`), taken by the next `list`.
+/// Bounded: a page cannot queue an unbounded number of windows.
+pub type OpenRequests = Arc<std::sync::Mutex<Vec<String>>>;
+const MAX_OPEN_REQUESTS: usize = 8;
+
+/// [`with_show`] plus `open_video`: the link is queued for the window, which opens its Video
+/// window with it (the user chooses there), and the window comes to the front.
+pub fn with_window<H>(
+    inner: H,
+    show: Arc<Notify>,
+    open: OpenRequests,
+) -> impl Fn(Command) -> Result<serde_json::Value, String> + Send + Sync + 'static
+where
+    H: Fn(Command) -> Result<serde_json::Value, String> + Send + Sync + 'static,
+{
     move |cmd| match cmd {
         Command::Show {} => {
             // stores a permit when the window task is not waiting yet: never lost
             show.notify_one();
             Ok(serde_json::json!({}))
+        }
+        Command::OpenVideo { url } => {
+            let mut q = open.lock().unwrap_or_else(|p| p.into_inner());
+            if q.len() >= MAX_OPEN_REQUESTS {
+                return Err("too many open requests; finish the ones in the window first".into());
+            }
+            q.push(url);
+            drop(q);
+            show.notify_one();
+            Ok(serde_json::json!({ "opened": true }))
         }
         other => inner(other),
     }
@@ -1123,6 +1151,51 @@ mod tests {
         let app = with_show(mk(), Arc::new(Notify::new()));
         assert!(app(Command::Show {}).is_ok());
         assert_eq!(app(Command::Ping {}).unwrap()["app"], "gui");
+    }
+
+    /// v0.2: the browser's "Open in Eid Download": the link is queued for the window (taken
+    /// once by `list`), the window is asked to come forward, the queue is bounded, and every
+    /// other command still reaches the real handler.
+    #[test]
+    fn open_video_queues_the_link_for_the_window_and_brings_it_forward() {
+        use eid_ipc::Command;
+        let show = Arc::new(Notify::new());
+        let open: OpenRequests = Arc::default();
+        let h = with_window(
+            |_c| Ok(serde_json::json!({"inner": true})),
+            show.clone(),
+            open.clone(),
+        );
+        let u = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta";
+        assert_eq!(
+            h(Command::OpenVideo { url: u.into() }).unwrap()["opened"],
+            true
+        );
+        assert_eq!(*open.lock().unwrap(), [u]);
+        // the window got a "come forward" permit
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(1), show.notified())
+                .await
+                .expect("no come-forward permit")
+        });
+        for i in 1..8 {
+            h(Command::OpenVideo {
+                url: format!("https://h/{i}"),
+            })
+            .unwrap();
+        }
+        assert!(
+            h(Command::OpenVideo {
+                url: "https://h/9".into()
+            })
+            .is_err(),
+            "bounded"
+        );
+        assert_eq!(h(Command::Ping {}).unwrap()["inner"], true);
     }
 
     /// v0.2 (owner's Windows test): a YouTube page in the add dialog is never queued as a

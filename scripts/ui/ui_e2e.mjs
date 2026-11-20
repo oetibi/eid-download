@@ -229,6 +229,17 @@ try {
     await ev("document.querySelector('#v-cancel').click()");
   });
 
+  await check("a link from the browser ('Open in Eid Download') opens the Video window with both choices", async () => {
+    await open("");
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await until("document.querySelector('#dlg-settings').open", 3000, "a dialog that must give way");
+    await ev("window.__eidMockOpenVideo('https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta')");
+    await until("document.querySelector('#dlg-video').open && !document.querySelector('#dlg-settings').open", 5000, "the Video window");
+    assert((await ev("document.querySelector('#in-vurl').value")) === "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta", "link");
+    await until("!document.querySelector('#v-result').hidden && !document.querySelector('#v-scope').hidden", 8000, "probed, with 'this video' / 'the whole playlist'");
+    await ev("document.querySelector('#v-cancel').click()");
+  });
+
   await check("switches to English (left-to-right) and back", async () => {
     await ev("document.querySelector('#btn-lang').click()");
     await until("document.documentElement.dir === 'ltr'", 3000, "ltr");

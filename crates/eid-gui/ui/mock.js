@@ -6,6 +6,8 @@
 // A mock is not proof that the real backend or YouTube works.
 import { videoPage } from "./logic.js";
 
+if (typeof window !== "undefined") window.__eidMockOpenVideo = (u) => { (window.__eidMockOpen ??= []).push(u); };
+
 export function mockApi(params = new URLSearchParams()) {
   const DIR = "C:\\Users\\me\\Downloads";
   const oldShape = params.get("old") === "1";
@@ -137,7 +139,9 @@ export function mockApi(params = new URLSearchParams()) {
       const changed = [...items.values()].filter((e) => e.rev > since).map((e) => e.item);
       const pw = { ...power }; power.last = null;
       const ws = warnings.splice(0);
-      return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR, power: pw, warnings: ws };
+      // v0.2: links the browser asked to open (window.__eidMockOpenVideo(url) stands in for it)
+      const ov = (window.__eidMockOpen ?? []).splice(0);
+      return { rev, full: false, items: changed, removed: removed.filter(([r]) => r > since).map(([, id]) => id), default_dir: DIR, power: pw, warnings: ws, open_video: ov };
     },
     // `?check=from_zip,no_native_host`: what the startup self-check reports
     // `?browser=other`: the browsers point at another copy (e.g. the installed one)

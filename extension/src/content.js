@@ -483,6 +483,7 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
     not_allowed: "errNotAllowed",
     app_not_running: "errAppNotRunning",
     app_too_old: "errAppTooOld",
+    no_window: "errNoWindow",
     tools_missing: "errToolsMissing",
     drm: "errDrm",
     unsupported: "errUnsupported",
@@ -623,6 +624,29 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
       pbody = h("div");
       psec = h("div", { class: "sec" }, [h("div", { class: "lbl", text: t("menuPlaylist") }), pbody]);
       m.appendChild(psec);
+    }
+    // v0.2: the same page in the app's own Video window (this video or the whole playlist,
+    // episodes, range, quality, folder): owner's request 2026-11-20
+    const inApp = Core.openInAppUrl(cls);
+    if (inApp) {
+      m.appendChild(
+        h("div", { class: "sec" }, [
+          h("button", {
+            class: "it",
+            type: "button",
+            "data-act": "open-app",
+            text: t("menuOpenInApp"),
+            on: {
+              click: async () => {
+                setStatus("muted", t("sending"));
+                const r = await send({ cmd: "open_video", url: inApp });
+                if (r.ok) setStatus("ok", t("openedInApp"));
+                else setStatus("err", errText(r.code));
+              },
+            },
+          }),
+        ]),
+      );
     }
     m.appendChild(status);
     setStatus("", "");

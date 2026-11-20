@@ -171,6 +171,12 @@ async function refresh() {
     if (Array.isArray(s?.warnings)) for (const w of s.warnings.slice(0, 5)) {
       if (Array.isArray(w) && typeof w[1] === "string") toast(t("w_checkpoint", store.get(w[0])?.name ?? `#${w[0]}`, w[1].slice(0, 300)));
     }
+    // v0.2: "Open in Eid Download" from the browser: the Video window with that link (the
+    // window was brought to the front by the app); the newest request wins
+    if (Array.isArray(s?.open_video) && s.open_video.length) {
+      const u = s.open_video[s.open_video.length - 1];
+      if (typeof u === "string" && u.length <= 8192 && /^https?:\/\/\S+$/i.test(u)) openFromBrowser(u);
+    }
     rev = r.rev;
     if (r.changed || !gotList) invalidate(true);
     gotList = true;
@@ -1038,6 +1044,13 @@ let probeSeq = 0;
 let videoFolder = null;
 const vStatus = (msg) => { const s = $("#v-status"); s.hidden = !msg; s.textContent = msg ?? ""; };
 const vError = (msg) => { const s = $("#v-error"); s.hidden = !msg; s.textContent = msg ?? ""; };
+
+/** v0.2: a link sent by the browser's button: any open dialog gives way to the Video window. */
+function openFromBrowser(url) {
+  for (const d of document.querySelectorAll("dialog[open]")) d.close();
+  openVideo(url);
+  toast(t("from_browser"));
+}
 
 function openVideo(prefill) {
   probe = null;
