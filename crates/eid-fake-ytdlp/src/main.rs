@@ -504,6 +504,59 @@ fn playlist_json(name: &str, url: &url::Url) -> String {
     .to_string()
 }
 
+/// v0.2 (the browser end-to-end test): real YouTube page addresses, as the extension sends them,
+/// answered from `fake-youtube.json` next to this program (the test writes it into the tool
+/// folder after installing):
+/// `{"log": FILE, "videos": {"ID": {"title": T, "heights": "360,720"}},
+///   "playlists": {"LIST": {"title": T, "file": ENTRIES_JSON}}}`.
+/// Like the real yt-dlp, `watch?v=ID&list=LIST` is the playlist with `--yes-playlist` and the
+/// video with `--no-playlist`. Without that file a YouTube address is refused (never online).
+fn youtube_stand_in(url: url::Url, flags: &[String]) -> url::Url {
+    if !matches!(url.host_str(), Some("www.youtube.com" | "youtube.com")) {
+        return url;
+    }
+    let cfg_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("fake-youtube.json")))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| die(9, "fake-yt-dlp: a YouTube address without fake-youtube.json"));
+    let cfg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&cfg_path).unwrap_or_else(|e| die(9, &e.to_string())),
+    )
+    .unwrap_or_else(|e| die(9, &format!("fake-yt-dlp: fake-youtube.json: {e}")));
+    let q = |k: &str| {
+        url.query_pairs()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.into_owned())
+    };
+    let mut out = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(l) = cfg["log"].as_str() {
+        out.append_pair("log", l);
+    }
+    let list = q("list");
+    let as_list = url.path() == "/playlist" || (list.is_some() && flags.iter().any(|f| f == "--yes-playlist"));
+    if as_list {
+        let id = list.unwrap_or_else(|| die(9, "fake-yt-dlp: playlist without list="));
+        let p = &cfg["playlists"][&id];
+        let file = p["file"]
+            .as_str()
+            .unwrap_or_else(|| die(1, &format!("ERROR: [youtube:tab] {id}: The playlist does not exist")));
+        out.append_pair("list", file);
+        out.append_pair("ptitle", p["title"].as_str().unwrap_or("Fake playlist"));
+        let u = format!("https://fake.test/playlist/{id}?{}", out.finish());
+        return url::Url::parse(&u).unwrap();
+    }
+    let id = q("v").unwrap_or_else(|| die(9, "fake-yt-dlp: a YouTube address without v="));
+    let v = &cfg["videos"][&id];
+    if let Some(t) = v["title"].as_str() {
+        out.append_pair("title", t);
+    }
+    if let Some(h) = v["heights"].as_str() {
+        out.append_pair("heights", h);
+    }
+    url::Url::parse(&format!("https://fake.test/video/{id}?{}", out.finish())).unwrap()
+}
+
 /// Append one JSON line per invocation to the file named by the URL's `log` parameter.
 fn log_call(path: &str, argv: &[String], resumed_from: Option<u64>) {
     let line = serde_json::json!({
@@ -543,6 +596,7 @@ fn main() {
         }
     }
     let url = url::Url::parse(&rest[0]).unwrap_or_else(|_| die(9, "fake-yt-dlp: bad URL"));
+    let url = youtube_stand_in(url, flags);
     let segs: Vec<String> = url
         .path_segments()
         .map(|s| s.map(str::to_string).collect())

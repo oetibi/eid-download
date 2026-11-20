@@ -26,6 +26,12 @@
 //        [--cdp-port]     (Chromium-based: DevTools over a local port + --load-extension, for a
 //                          browser that does not serve --remote-debugging-pipe)
 //        [--max-minutes N] (the whole run is stopped with a reason after N minutes; default 10)
+//        [--real]          (the whole chain for real: the REAL eid-native-host and app
+//                          (`eid serve`), video tools installed after consent (yt-dlp is the
+//                          offline stand-in, answering YouTube addresses from a local file),
+//                          and real files checked by name and SHA-256. Needs
+//                          `cargo build -p eid-cli --features test-hooks -p eid-native-host
+//                          -p eid-fake-ytdlp` first.)
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -33,6 +39,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { zip } from "./package.mjs";
+import http from "node:http";
+import { createHash } from "node:crypto";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
@@ -40,6 +48,7 @@ const BROWSER = arg("--browser", "chrome");
 const CHROMIUM = ["chrome", "edge", "brave", "opera", "vivaldi"];
 if (BROWSER !== "firefox" && !CHROMIUM.includes(BROWSER)) throw new Error(`unknown --browser ${BROWSER}`);
 const ONLY = arg("--checks") ? new Set(arg("--checks").split(",").map((x) => x.trim())) : null;
+const REAL = process.argv.includes("--real");
 // Windows: where each browser reads its Native Messaging hosts (HKCU). Brave, Opera and Vivaldi
 // document none: CI tries candidates one at a time with --nm-key (more_browsers.ps1).
 const NM_KEYS = {
@@ -65,10 +74,12 @@ execFileSync(process.execPath, [path.join(ROOT, "scripts", "ext", "build.mjs"), 
 const EXT_DIR = path.join(TMP, "ext", BROWSER === "firefox" ? "firefox" : "chrome");
 
 // ---------------------------------------------------------------- the stand-in native host
-function registerHost() {
+function registerHost(realHost) {
   const stub = path.join(ROOT, "scripts", "ext", "stub-host.mjs");
   let exe;
-  if (IS_WIN) {
+  if (realHost) {
+    exe = realHost;
+  } else if (IS_WIN) {
     exe = path.join(TMP, "stub-host.bat");
     fs.writeFileSync(exe, `@echo off\r\n"${process.execPath}" "${stub}" %*\r\n`);
   } else {
@@ -413,9 +424,176 @@ async function until(fn, ms, what) {
 // the whole run is bounded: a hang anywhere ends with a reason after 10 minutes
 const MAX_MIN = Number(arg("--max-minutes", "10"));
 setTimeout(() => { console.log(`FAIL the run took longer than ${MAX_MIN} minutes (${BROWSER}); stopped`); process.exit(1); }, MAX_MIN * 60000).unref();
-const restoreHost = registerHost();
+
+// ---------------------------------------------------------------- --real: the whole chain
+// The REAL native host and app (`eid serve`), the video tools installed through the app after
+// consent from a local server (yt-dlp is the offline stand-in, which answers YouTube addresses
+// from fake-youtube.json next to it), and the files it really writes.
+const EXE = IS_WIN ? ".exe" : "";
+const BIN = (n) => path.join(ROOT, "target", "debug", n + EXE);
+const sha = (b) => createHash("sha256").update(b).digest("hex");
+const REAL_DIR = path.join(TMP, "real");
+const REAL_OUT = path.join(REAL_DIR, "out");
+const REAL_LOG = path.join(REAL_DIR, "ytdlp-calls.jsonl");
+let realServe = null, toolSrv = null;
+async function realSetup() {
+  for (const n of ["eid", "eid-native-host", "fake-yt-dlp"]) {
+    if (!fs.existsSync(BIN(n))) throw new Error(`${BIN(n)} is missing: cargo build -p eid-cli --features test-hooks -p eid-native-host -p eid-fake-ytdlp`);
+  }
+  for (const d of ["cfg", "data", "out"]) fs.mkdirSync(path.join(REAL_DIR, d), { recursive: true });
+  // the tool assets, served locally (EID_TEST_TOOLS_BASE) and pinned by a test manifest
+  const ytdlp = fs.readFileSync(BIN("fake-yt-dlp"));
+  const ffmpeg = Buffer.alloc(1000, 1), ffprobe = Buffer.alloc(1000, 2), deno = Buffer.alloc(1000, 3);
+  const ffzip = zip([{ name: "b/ffmpeg.exe", data: ffmpeg }, { name: "b/ffprobe.exe", data: ffprobe }]);
+  const dzip = zip([{ name: "deno.exe", data: deno }]);
+  const assets = { "/yt-dlp.exe": ytdlp, "/ffmpeg.zip": ffzip, "/deno.zip": dzip };
+  toolSrv = http.createServer((q, s) => {
+    const b = assets[q.url];
+    if (!b) { s.writeHead(404); s.end(); return; }
+    const etag = `"${sha(b).slice(0, 16)}"`;
+    const m = /^bytes=(\d+)-(\d*)$/.exec(q.headers.range ?? "");
+    if (m) {
+      const from = Number(m[1]), to = m[2] ? Math.min(Number(m[2]), b.length - 1) : b.length - 1;
+      if (from >= b.length || from > to) { s.writeHead(416, { "content-range": `bytes */${b.length}` }); s.end(); return; }
+      s.writeHead(206, { "content-length": to - from + 1, "content-range": `bytes ${from}-${to}/${b.length}`, "accept-ranges": "bytes", etag, "content-type": "application/octet-stream" });
+      s.end(q.method === "HEAD" ? undefined : b.subarray(from, to + 1));
+      return;
+    }
+    s.writeHead(200, { "content-length": b.length, "accept-ranges": "bytes", etag, "content-type": "application/octet-stream" });
+    s.end(q.method === "HEAD" ? undefined : b);
+  });
+  await new Promise((r) => toolSrv.listen(0, "127.0.0.1", r));
+  const base = "https://github.com/test/tools/releases/download/v1";
+  const file = (entry, name, b) => ({ entry, name, size: b.length, sha256: sha(b) });
+  const manifest = path.join(REAL_DIR, "manifest.json");
+  fs.writeFileSync(manifest, JSON.stringify({
+    schema: 1, id: "test-1", allowed_hosts: ["github.com"],
+    tools: [
+      { name: "yt-dlp", version: "fake", license: "test", source: "local", url: `${base}/yt-dlp.exe`, size: ytdlp.length, sha256: sha(ytdlp), files: [file(null, "yt-dlp.exe", ytdlp)] },
+      { name: "ffmpeg", version: "fake", license: "test", source: "local", url: `${base}/ffmpeg.zip`, size: ffzip.length, sha256: sha(ffzip), files: [file("b/ffmpeg.exe", "ffmpeg.exe", ffmpeg), file("b/ffprobe.exe", "ffprobe.exe", ffprobe)] },
+      { name: "deno", version: "fake", license: "test", source: "local", url: `${base}/deno.zip`, size: dzip.length, sha256: sha(dzip), files: [file("deno.exe", "deno.exe", deno)] },
+    ],
+  }));
+  const endpoint = `e2e${process.pid}`;
+  const tokenFile = path.join(REAL_DIR, "token");
+  const env = {
+    APPDATA: path.join(REAL_DIR, "cfg"), LOCALAPPDATA: path.join(REAL_DIR, "data"),
+    XDG_CONFIG_HOME: path.join(REAL_DIR, "cfg"), XDG_DATA_HOME: path.join(REAL_DIR, "data"),
+    EID_TEST_MANIFEST: manifest, EID_TEST_TOOLS_BASE: `http://127.0.0.1:${toolSrv.address().port}`,
+    EID_IPC_ENDPOINT: endpoint, EID_IPC_TOKEN_FILE: tokenFile, EID_NATIVE_HOST_APP: BIN("eid"),
+  };
+  // the browser (and so the native host it starts) gets the same environment
+  Object.assign(process.env, env);
+  // consent + tools, exactly as the app's "Download the tools" does
+  // asynchronously: the tool server above lives in this process (a synchronous call would block it)
+  await new Promise((res, rej) => {
+    const p = spawn(BIN("eid"), ["video", "setup", "--yes-i-agree", "-q"], { env: process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    let o = "";
+    p.stdout.on("data", (d) => { o += d; });
+    p.stderr.on("data", (d) => { o += d; });
+    p.on("exit", (c) => (c === 0 ? res() : rej(new Error(`eid video setup failed (${c}): ${o.slice(-1500)}`))));
+  });
+  // the stand-in's YouTube answers, next to the installed yt-dlp
+  const found = [];
+  const walk = (d) => { for (const x of fs.readdirSync(d, { withFileTypes: true })) { const q = path.join(d, x.name); if (x.isDirectory()) walk(q); else if (/^yt-dlp(\.exe)?$/.test(x.name)) found.push(q); } };
+  walk(path.join(REAL_DIR, "data"));
+  if (!found.length) throw new Error("the video tools were not installed");
+  const list1 = path.join(REAL_DIR, "PLeidtest01.json");
+  fs.writeFileSync(list1, JSON.stringify([
+    { id: "EIDEP000001", title: "Episode one" },
+    { id: "EIDEP000002", title: "Episode two" },
+    { id: "EIDEP000003", title: "Episode three" },
+    { id: "EIDEP000004", title: "Episode four", availability: "private" },
+  ]));
+  const cfg = {
+    log: REAL_LOG,
+    videos: { EIDVIDEO001: { title: "Sample clip", heights: "360,720" }, EIDEP000002: { title: "Episode two", heights: "360,720" } },
+    playlists: { PLeidtest01: { title: "Test playlist", file: list1 } },
+  };
+  for (const f of found) fs.writeFileSync(path.join(path.dirname(f), "fake-youtube.json"), JSON.stringify(cfg));
+  // the app: `eid serve` (no window: "Download Entire Playlist" then downloads directly)
+  realServe = spawn(BIN("eid"), ["serve", "-q", "-d", REAL_OUT, "--queues", path.join(REAL_DIR, "queues.json"), "--endpoint", endpoint, "--token-file", tokenFile], { env: process.env, stdio: ["pipe", "ignore", "pipe"], windowsHide: true });
+  let serr = ""; realServe.stderr.on("data", (d) => { serr += d; });
+  realServe.on("exit", (c) => { if (c) console.log(`     eid serve exited ${c}: ${serr.slice(-800)}`); });
+  await until(() => fs.existsSync(tokenFile), 20000, "eid serve listening (token file)");
+  console.log(`     real chain: eid serve on ${endpoint}, tools from ${env.EID_TEST_TOOLS_BASE}, downloads into ${REAL_OUT}`);
+}
+function realCleanup() {
+  try { realServe?.kill(); } catch {}
+  try { toolSrv?.close(); } catch {}
+}
+const ytCalls = () => (fs.existsSync(REAL_LOG) ? fs.readFileSync(REAL_LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+// a download call of video `id` (logged with the address as the app passed it: the YouTube page
+// for a single video, the playlist entry's address for an episode); listings are not downloads
+const downloads = (id) => ytCalls().filter((c) => !c.argv.includes("--dump-single-json") && (c.argv.at(-1).includes(`/video/${id}`) || c.argv.at(-1).includes(`v=${id}`)));
+const listDir = (d) => (fs.existsSync(d) ? fs.readdirSync(d).sort() : []);
+
+async function realChecks({ shownButton, hoverPlayer }) {
+  const clip = fs.readFileSync(path.join(ROOT, "crates", "eid-fake-ytdlp", "fixtures", "clip.mp4"));
+  const menuOf = async (url) => {
+    await B.open(url);
+    await B.hover(3, 3);
+    await hoverPlayer();
+    const { b } = await until(shownButton, 8000, "the button");
+    await B.click(b.ref);
+  };
+  await check("R1. the real chain: a video page -> its menu (the real app probes it) -> the 360p line -> the file really downloaded, at that quality", async () => {
+    await menuOf("https://www.youtube.com/watch?v=EIDVIDEO001");
+    const q360 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-q"] === "360p"), 30000, "the 360p line from the real probe");
+    const offered = (await B.overlay()).buttons.map((x) => x.attrs["data-q"]).filter(Boolean);
+    assert(JSON.stringify(offered) === JSON.stringify(["best", "720p", "360p", "m4a", "audio"]), `lines: ${offered}`);
+    assert(q360.attrs["data-format"] === "v360+140", JSON.stringify(q360.attrs));
+    await B.click(q360.ref);
+    const f = path.join(REAL_OUT, "Sample clip.mp4");
+    await until(() => fs.existsSync(f), 60000, `the file ${f} (out: ${listDir(REAL_OUT)})`);
+    assert(sha(fs.readFileSync(f)) === sha(clip), "SHA-256 of the downloaded file");
+    const dl = downloads("EIDVIDEO001");
+    assert(dl.length === 1 && dl[0].argv.some((a) => a.startsWith("--format=v360+140/")), `the tool was asked for exactly the 360p line: ${JSON.stringify(dl.map((c) => c.argv.filter((a) => a.startsWith("--format"))))}`);
+  });
+  await check("R2. the original audio line downloads an .m4a (not converted)", async () => {
+    await menuOf("https://www.youtube.com/watch?v=EIDVIDEO001");
+    const m = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-q"] === "m4a"), 30000, "the m4a line");
+    await B.click(m.ref);
+    const f = path.join(REAL_OUT, "Sample clip.m4a");
+    await until(() => fs.existsSync(f), 60000, `the file ${f} (out: ${listDir(REAL_OUT)})`);
+    assert(!downloads("EIDVIDEO001").at(-1).argv.includes("--extract-audio"), "not converted");
+  });
+  await check("R3. a video in a playlist: 'Choose items' -> episodes 1 and 3 -> '001 - Episode one.mp4' and '003 - Episode three.mp4' only", async () => {
+    await menuOf("https://www.youtube.com/watch?v=EIDEP000002&list=PLeidtest01");
+    const choose = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "choose"), 30000, "'Choose items' (the real app listed the playlist)");
+    await B.click(choose.ref);
+    await until(async () => (await B.overlay()).buttons.filter((x) => x.tag === "input").length === 4, 8000, "4 episodes listed");
+    await B.click((await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "none").ref);
+    const boxes = (await B.overlay()).buttons.filter((x) => x.tag === "input");
+    await B.click(boxes[0].ref);
+    await B.click(boxes[2].ref);
+    await B.click((await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "download-selected").ref);
+    const dir = path.join(REAL_OUT, "Test playlist");
+    await until(() => listDir(dir).filter((n) => n.endsWith(".mp4")).length === 2, 90000, `two episodes in ${dir} (now: ${listDir(dir)})`);
+    const got = listDir(dir).filter((n) => n.endsWith(".mp4"));
+    assert(JSON.stringify(got) === JSON.stringify(["001 - Episode one.mp4", "003 - Episode three.mp4"]), `files: ${got}`);
+    for (const n of got) assert(sha(fs.readFileSync(path.join(dir, n))) === sha(clip), `SHA-256 of ${n}`);
+  });
+  await check("R4. 'Download Entire Playlist' (an app without a window downloads it all): episode 2 is added, 1 and 3 are not downloaded again, the private one is skipped", async () => {
+    await menuOf("https://www.youtube.com/watch?v=EIDEP000002&list=PLeidtest01");
+    const entire = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 30000, "'Download Entire Playlist'");
+    assert(/\(4 /.test(entire.text) || /4/.test(entire.text), entire.text);
+    await B.click(entire.ref);
+    const dir = path.join(REAL_OUT, "Test playlist");
+    await until(() => listDir(dir).includes("002 - Episode two.mp4"), 90000, `episode 2 (now: ${listDir(dir)})`);
+    await sleep(3000);
+    const got = listDir(dir).filter((n) => n.endsWith(".mp4"));
+    assert(JSON.stringify(got) === JSON.stringify(["001 - Episode one.mp4", "002 - Episode two.mp4", "003 - Episode three.mp4"]), `files: ${got}`);
+    for (const id of ["EIDEP000001", "EIDEP000003"]) assert(downloads(id).length === 1, `${id} downloaded ${downloads(id).length} times`);
+    assert(downloads("EIDEP000004").length === 0, "the private episode was not attempted");
+  });
+}
+
+let restoreHost = () => {};
 let B = null;
 try {
+  if (REAL) await realSetup();
+  restoreHost = registerHost(REAL ? BIN("eid-native-host") : null);
   B = BROWSER === "firefox" ? await firefox() : await chromium(BROWSER);
   const player = () => B.evaluate("(() => { const r = document.querySelector('video').getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()");
   const hoverPlayer = async () => { const p = await player(); await B.hover(p.x + p.w / 2, p.y + p.h / 2); return p; };
@@ -423,6 +601,8 @@ try {
   const shownButton = async () => { const o = await B.overlay(); const b = mainButton(o); return b && /\bshow\b/.test(b.attrs.class ?? "") ? { o, b } : null; };
   const leftOf = (b) => Number(/left:\s*(-?\d+)/.exec(b.attrs.style ?? "")?.[1]);
 
+  if (REAL) await realChecks({ shownButton, hoverPlayer });
+  else {
   await check("1. YouTube watch page: hovering the player shows the button at its top-right", async () => {
     await B.open("https://www.youtube.com/watch?v=AAAAAAAAAAA");
     const p = await hoverPlayer();
@@ -578,6 +758,7 @@ try {
     const add = hostRequests().slice(n0).find((x) => x.cmd === "add_video");
     assert(add.quality === "720p" && add.format === undefined, JSON.stringify(add));
   });
+  }
 } catch (e) {
   failed++;
   console.log(`FAIL (setup) ${e?.stack ?? e}`);
@@ -587,6 +768,7 @@ try {
   console.log("host requests:", JSON.stringify(hostRequests()).slice(0, 1500));
   await B?.close();
   restoreHost();
+  realCleanup();
   fs.writeFileSync(path.join(OUT, `browser-e2e-${BROWSER}.json`), JSON.stringify(results, null, 1));
 }
 function hoverRequests() { return hostRequests(); }

@@ -26,7 +26,7 @@ jobs:
   # what the extension sent (scripts/ext/browser_e2e.mjs). No Rust build needed.
   browsers:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +44,18 @@ jobs:
         shell: pwsh
         run: |
           node scripts/ext/browser_e2e.mjs --browser ${{ matrix.browser }} --out browser-e2e
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      # the whole chain for real: the REAL native host and app (eid serve), tools installed after
+      # consent (yt-dlp: the offline stand-in), real files checked by name and SHA-256
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { shared-key: browsers-real }
+      - name: build eid (test hooks), the native host and the yt-dlp stand-in
+        run: cargo build -p eid-cli --features test-hooks -p eid-native-host -p eid-fake-ytdlp
+      - name: ${{ matrix.browser }} real chain (page -> menu -> native host -> app -> files, playlists, episodes, names, quality)
+        shell: pwsh
+        run: |
+          node scripts/ext/browser_e2e.mjs --browser ${{ matrix.browser }} --real --out browser-e2e/real
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
@@ -69,9 +81,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
-      - name: ${{ matrix.browser }} installed, its Native Messaging key found, then end-to-end
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { shared-key: browsers-real }
+      - name: build eid (test hooks), the native host and the yt-dlp stand-in
+        run: cargo build -p eid-cli --features test-hooks -p eid-native-host -p eid-fake-ytdlp
+      - name: ${{ matrix.browser }} installed, its Native Messaging key found, end-to-end, then the real chain
         shell: pwsh
-        run: ./scripts/ext/more_browsers.ps1 -Browser ${{ matrix.browser }} -Out browser-e2e
+        run: ./scripts/ext/more_browsers.ps1 -Browser ${{ matrix.browser }} -Out browser-e2e -Real
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:

@@ -4,7 +4,7 @@
 # the host). The first key that works is then used for all six checks. Prints a table of what
 # was tried; fails when no key works or a check fails. Nothing is guessed: a key counts only if
 # the browser really reached the host through it.
-param([Parameter(Mandatory)][ValidateSet('brave', 'opera', 'vivaldi')][string]$Browser, [string]$Out = 'browser-e2e')
+param([Parameter(Mandatory)][ValidateSet('brave', 'opera', 'vivaldi')][string]$Browser, [string]$Out = 'browser-e2e', [switch]$Real)
 $ErrorActionPreference = 'Stop'
 
 $pkg = @{ brave = 'brave'; opera = 'opera'; vivaldi = 'vivaldi' }[$Browser]
@@ -52,3 +52,8 @@ if (-not $works) { throw "$Browser $ver did not reach the native host through an
 Write-Host "NM KEY ($Browser $ver): $works ($(if ($mode.Count) { $mode -join ' ' } else { 'pipe headless' }))"
 node scripts/ext/browser_e2e.mjs --browser $Browser --bin $bin --nm-key $works --out $Out @mode | Out-Host
 if ($LASTEXITCODE -ne 0) { exit 1 }
+# -Real: then the whole chain with the real native host and app, and real files (see browser_e2e)
+if ($Real) {
+  node scripts/ext/browser_e2e.mjs --browser $Browser --bin $bin --nm-key $works --real --out "$Out\real" @mode | Out-Host
+  if ($LASTEXITCODE -ne 0) { exit 1 }
+}
