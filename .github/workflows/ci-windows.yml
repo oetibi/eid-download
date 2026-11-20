@@ -52,6 +52,29 @@ jobs:
           retention-days: 14
           path: browser-e2e/*
           if-no-files-found: warn
+  # Brave, Opera and Vivaldi: installed on the runner, and the Native Messaging registry key each
+  # one really reads is found by trying candidates one at a time (scripts/ext/more_browsers.ps1).
+  browsers-more:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [brave, opera, vivaldi]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: ${{ matrix.browser }} installed, its Native Messaging key found, then end-to-end
+        shell: pwsh
+        run: ./scripts/ext/more_browsers.ps1 -Browser ${{ matrix.browser }} -Out browser-e2e
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: browser-e2e-${{ matrix.browser }}
+          retention-days: 14
+          path: browser-e2e/**
+          if-no-files-found: warn
   windows:
     runs-on: windows-latest
     timeout-minutes: 90

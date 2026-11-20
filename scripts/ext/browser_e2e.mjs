@@ -18,7 +18,10 @@
 //   4. in-page navigation to the home page hides the button; Back (popstate) brings it back;
 //   5. the options page: "always" + "top-left" + Save are applied to the page without hover.
 //
-//   node scripts/ext/browser_e2e.mjs --browser chrome|edge|firefox [--bin PATH]
+//   node scripts/ext/browser_e2e.mjs --browser chrome|edge|brave|opera|vivaldi|firefox [--bin PATH]
+//        [--nm-key HKCU\\...\\NativeMessagingHosts]   (Windows: the ONE registry key the stand-in
+//        host is registered under; default: that browser's known key)
+//        [--checks 1,2]   (only these checks; the others are printed as NOT RUN, never as passed)
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -30,6 +33,17 @@ import { zip } from "./package.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const BROWSER = arg("--browser", "chrome");
+const CHROMIUM = ["chrome", "edge", "brave", "opera", "vivaldi"];
+if (BROWSER !== "firefox" && !CHROMIUM.includes(BROWSER)) throw new Error(`unknown --browser ${BROWSER}`);
+const ONLY = arg("--checks") ? new Set(arg("--checks").split(",").map((x) => x.trim())) : null;
+// Windows: where each browser reads its Native Messaging hosts (HKCU). Opera and Vivaldi have no
+// documented key: CI tries candidates one at a time with --nm-key (see ci-windows.yml).
+const NM_KEYS = {
+  firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts",
+  chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts",
+  edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts",
+  brave: "HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts",
+};
 const IS_WIN = process.platform === "win32";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const CHROME_ID = "ambokeecedpgicighhcpdfjphdnphgaa";
@@ -61,7 +75,10 @@ function registerHost() {
   fs.writeFileSync(manifest, JSON.stringify(m));
   const restore = [];
   if (IS_WIN) {
-    const key = { firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts\\com.eid.download", chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.eid.download", edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.eid.download" }[BROWSER];
+    const base = arg("--nm-key", NM_KEYS[BROWSER]);
+    if (!base) throw new Error(`--nm-key is required for ${BROWSER} on Windows (no known key)`);
+    const key = `${base}\\com.eid.download`;
+    console.log(`     native host registered ONLY under ${key}`);
     let before = null;
     try { before = /REG_SZ\s+(.+)/.exec(execFileSync("reg", ["query", key, "/ve"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }))?.[1].trim() ?? null; } catch {}
     execFileSync("reg", ["add", key, "/ve", "/d", manifest, "/f"], { stdio: "ignore" });
@@ -72,7 +89,7 @@ function registerHost() {
     fs.mkdirSync(d, { recursive: true });
     fs.copyFileSync(manifest, path.join(d, "com.eid.download.json"));
   } else {
-    // Chrome/Edge on Linux read <user-data-dir>/NativeMessagingHosts
+    // Chromium-based browsers on Linux read <user-data-dir>/NativeMessagingHosts
     const d = path.join(TMP, "profile", "NativeMessagingHosts");
     fs.mkdirSync(d, { recursive: true });
     fs.copyFileSync(manifest, path.join(d, "com.eid.download.json"));
@@ -114,7 +131,14 @@ function ytPage(title) {
  *   options(fn)              run `fn` (a function source) in the extension's options page
  */
 async function chromium(kind) {
-  const bin = arg("--bin", kind === "edge" ? (IS_WIN ? "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" : "microsoft-edge") : (IS_WIN ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" : "google-chrome"));
+  const DEFAULT_BIN = {
+    chrome: IS_WIN ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" : "google-chrome",
+    edge: IS_WIN ? "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" : "microsoft-edge",
+    brave: IS_WIN ? "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" : "brave-browser",
+    opera: "opera",
+    vivaldi: "vivaldi",
+  };
+  const bin = arg("--bin", DEFAULT_BIN[kind]);
   const prof = path.join(TMP, "profile");
   fs.mkdirSync(prof, { recursive: true });
   const proc = spawn(bin, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
@@ -328,6 +352,7 @@ async function firefox() {
 let failed = 0;
 const results = [];
 async function check(name, fn) {
+  if (ONLY && !ONLY.has(name.split(".")[0])) { console.log(`NOT RUN ${name} (--checks)`); return; }
   console.log(`...  ${name}`);
   try { await fn(); results.push({ name, ok: true }); console.log(`ok   ${name}`); }
   catch (e) { failed++; results.push({ name, ok: false, error: String(e?.stack ?? e) }); console.log(`FAIL ${name}\n     ${e?.stack ?? e}`); }
@@ -453,5 +478,6 @@ try {
   fs.writeFileSync(path.join(OUT, `browser-e2e-${BROWSER}.json`), JSON.stringify(results, null, 1));
 }
 function hoverRequests() { return hostRequests(); }
-console.log(failed ? `BROWSER E2E (${BROWSER}): ${failed} check(s) FAILED` : `BROWSER E2E (${BROWSER}): all ${results.length} checks passed`);
+if (!failed && results.length === 0) { failed = 1; console.log("FAIL no check ran"); }
+console.log(failed ? `BROWSER E2E (${BROWSER}): ${failed} check(s) FAILED` : `BROWSER E2E (${BROWSER}): all ${results.length} checks passed${ONLY ? ` (only checks ${[...ONLY].join(",")}; the others NOT RUN)` : ""}`);
 process.exit(failed ? 1 : 0);

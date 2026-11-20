@@ -286,10 +286,11 @@ try {
     assert(sha(path.join(DOWNLOADS, "w-slow.bin")) === expected, "SHA-256 after pause/resume");
   });
 
+  const KEYS = { chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.eid.download", edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.eid.download", firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts\\com.eid.download", brave: "HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts\\com.eid.download" };
   await check("6. Settings -> Connect the browsers is refused here with the 'extract the ZIP' message", async () => {
     await w.ev(click("[data-cmd=settings]"));
     await w.ev(click("#dlg-settings [data-tab=desktop]"));
-    await until(() => w.ev("document.querySelectorAll('#browser-list li').length === 3"), 10000, "browser list");
+    await until(() => w.ev(`document.querySelectorAll('#browser-list li').length === ${Object.keys(KEYS).length}`), 10000, "browser list");
     await w.ev(click("#browser-connect"));
     await until(() => w.ev("!document.querySelector('#browser-error').hidden"), 10000, "refusal");
     const t = await w.ev("document.querySelector('#browser-error').textContent");
@@ -306,11 +307,10 @@ try {
   fs.mkdirSync(dir, { recursive: true });
   for (const f of ["EidDownload.exe", "eid-native-host.exe", "eid.exe"]) fs.copyFileSync(path.join(BIN, f), path.join(dir, f));
   w = await startApp(path.join(dir, "EidDownload.exe"));
-  const KEYS = { chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.eid.download", edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.eid.download", firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts\\com.eid.download", brave: "HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts\\com.eid.download" };
   const regValue = (k) => { try { return /REG_SZ\s+(.+)/.exec(execFileSync("reg", ["query", k, "/ve"], { encoding: "utf8", windowsHide: true }))?.[1].trim() ?? null; } catch { return null; } };
   const saved = Object.fromEntries(Object.entries(KEYS).map(([b, k]) => [b, regValue(k)]));
 
-  await check("7. extracted copy: no startup bar; Connect -> all three browsers point at this copy", async () => {
+  await check("7. extracted copy: no startup bar; Connect -> every browser points at this copy", async () => {
     await sleep(3000);
     assert(await w.ev("document.querySelector('#checkbar').hidden"), "startup bar shown for an extracted copy");
     await w.ev(click("[data-cmd=settings]"));
