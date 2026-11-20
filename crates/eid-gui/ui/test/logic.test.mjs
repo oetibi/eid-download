@@ -38,6 +38,7 @@ test("sorting is stable newest-first on ties; selection with ctrl/shift", () => 
 test("quality policy: 144p to 4320p tallest first, nothing taller, only known choices", () => {
   assert.deepEqual(safeQualities(["8640p", "2880p", "144p", "audio", "4320p", "best", "2160p", "junk", "240p"]),
     ["4320p", "2160p", "240p", "144p", "best", "audio"]);
+  assert.deepEqual(safeQualities(["audio", "m4a", "best"]), ["best", "m4a", "audio"]);
 });
 
 test("formatting and job progress", () => {
@@ -166,4 +167,34 @@ test("episode ranges: lists, ranges, Arabic separators, only existing numbers", 
   assert.deepEqual(parseRange("abc", all), { error: "syntax" });
   assert.deepEqual(parseRange("200-300", all), { error: "none" });
   assert.deepEqual(parseRange("1-999999", [2, 5]), { error: "syntax" });
+});
+
+test("v0.2 download menu: the probe's exact option and its details, nothing invented", async () => {
+  const { optionFor, optionDetails } = await import("../logic.js");
+  const r = {
+    options: [
+      { quality: "1080p", format: "299+140", fps: 60, codec: "H.264", hdr: null, audio: true, size: 52428800 },
+      { quality: "2160p", format: "337+140", fps: 60, codec: "VP9", hdr: "HDR10", audio: true, size: null },
+      { quality: "720p", format: "bv*+ba/b", fps: 30, codec: "H.264", audio: true },
+      { quality: "360p", format: "18", fps: 30, codec: "H.264", audio: false },
+    ],
+    audio_options: [
+      { quality: "m4a", original: true, format: "140", codec: "AAC", kbps: 129.4, size: 3000000 },
+      { quality: "audio", original: false, format: null, codec: "MP3", kbps: 129, size: null },
+    ],
+  };
+  assert.equal(optionFor(r, "1080p").format, "299+140");
+  assert.equal(optionFor(r, "720p"), null, "a selector is never passed on as a format");
+  assert.equal(optionFor(r, "480p"), null);
+  assert.equal(optionFor({}, "1080p"), null);
+  assert.equal(optionFor(r, "m4a").format, "140");
+  assert.equal(optionFor({ audio_options: [{ quality: "m4a", format: "137+140" }] }, "m4a"), null);
+  const w = { fps: (n) => `${n} fps`, audio: "with audio", noaudio: "no audio", original: "original", converted: "converted", kbps: (n) => `${n} kb/s`, size: (s) => `≈ ${s}` };
+  const sz = (n) => `${Math.round(n / 1048576)} MB`;
+  assert.deepEqual(optionDetails(optionFor(r, "1080p"), w, sz), ["60 fps", "H.264", "with audio", "≈ 50 MB"]);
+  assert.deepEqual(optionDetails(optionFor(r, "2160p"), w, sz), ["60 fps", "VP9", "HDR10", "with audio"], "no size: none shown");
+  assert.deepEqual(optionDetails(optionFor(r, "360p"), w, sz), ["30 fps", "H.264", "no audio"], "never 'with audio' when it has none");
+  assert.deepEqual(optionDetails(optionFor(r, "m4a"), w, sz), ["AAC", "original", "129 kb/s", "≈ 3 MB"]);
+  assert.deepEqual(optionDetails(optionFor(r, "audio"), w, sz), ["MP3", "converted", "129 kb/s"]);
+  assert.deepEqual(optionDetails(null, w, sz), []);
 });

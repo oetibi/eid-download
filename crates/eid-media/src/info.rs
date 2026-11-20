@@ -28,6 +28,18 @@ pub struct Format {
     pub has_video: bool,
     pub has_audio: bool,
     pub filesize: Option<u64>,
+    /// v0.2 (the download menu's details): frames per second, rounded.
+    pub fps: Option<u32>,
+    /// The codec strings as the tool gives them (`avc1.640028`, `vp09.00.51.08`, `opus`), bounded;
+    /// `None` when the format has no such stream.
+    pub vcodec: Option<String>,
+    pub acodec: Option<String>,
+    /// `SDR`, `HDR10`, `HLG`, ... as the tool gives it.
+    pub dynamic_range: Option<String>,
+    /// Audio bitrate in kbit/s, rounded.
+    pub abr: Option<u32>,
+    /// Total bitrate in kbit/s, rounded (orders formats of the same height).
+    pub tbr: Option<u32>,
 }
 
 /// A flat playlist (`--flat-playlist -J`).
@@ -59,6 +71,10 @@ struct RawFormat {
     acodec: Option<String>,
     filesize: Option<f64>,
     filesize_approx: Option<f64>,
+    fps: Option<f64>,
+    dynamic_range: Option<String>,
+    abr: Option<f64>,
+    tbr: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -95,6 +111,15 @@ fn bounded(s: Option<String>) -> String {
         s.truncate(cut);
     }
     s
+}
+
+/// At most `max` bytes of plain printable ASCII (codec names, ranges): anything else is dropped.
+fn short(s: Option<String>, max: usize) -> String {
+    s.unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_graphic())
+        .take(max)
+        .collect()
 }
 
 fn non_neg(f: Option<f64>) -> Option<u64> {
@@ -161,6 +186,15 @@ fn video_from(mut r: RawInfo) -> Result<MediaInfo, MediaError> {
             let format_id = bounded(f.format_id);
             crate::args::check_format_id(&format_id).ok()?;
             let has = |c: &Option<String>| c.as_deref().is_some_and(|c| c != "none");
+            let codec = |c: &Option<String>| {
+                has(c)
+                    .then(|| short(c.clone(), 40))
+                    .filter(|s| !s.is_empty())
+            };
+            let small = |v: Option<f64>| {
+                v.filter(|v| v.is_finite() && *v >= 0.0 && *v < 1e7)
+                    .map(|v| v.round() as u32)
+            };
             Some(Format {
                 format_id,
                 ext: bounded(f.ext),
@@ -168,6 +202,15 @@ fn video_from(mut r: RawInfo) -> Result<MediaInfo, MediaError> {
                 has_video: has(&f.vcodec),
                 has_audio: has(&f.acodec),
                 filesize: non_neg(f.filesize).or(non_neg(f.filesize_approx)),
+                fps: small(f.fps).filter(|f| *f > 0 && *f <= 1000),
+                vcodec: codec(&f.vcodec),
+                acodec: codec(&f.acodec),
+                dynamic_range: f
+                    .dynamic_range
+                    .map(|d| short(Some(d), 16))
+                    .filter(|d| !d.is_empty()),
+                abr: small(f.abr).filter(|a| *a > 0),
+                tbr: small(f.tbr).filter(|t| *t > 0),
             })
         })
         .collect();

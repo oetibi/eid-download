@@ -247,6 +247,37 @@ try {
     await until("document.documentElement.dir === 'rtl'", 3000, "rtl");
   });
 
+  await check("video window: each quality shows the probe's own details, tallest first; Start sends the exact formats shown", async () => {
+    await open("");
+    await ev("document.querySelector('.tool[data-cmd=add_video]').click()");
+    await until("document.querySelector('#dlg-video').open", 3000, "video dialog");
+    await ev(`(() => { const i = document.querySelector('#in-vurl'); i.value = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'; i.dispatchEvent(new Event('input', {bubbles:true})); document.querySelector('#btn-probe').click(); })()`);
+    await until("!document.querySelector('#v-result').hidden", 8000, "probe result");
+    const opts = await ev("[...document.querySelectorAll('#v-quality option')].map(o => [o.value, o.textContent])");
+    const vals = opts.map((o) => o[0]);
+    assert(JSON.stringify(vals) === JSON.stringify(["1080p", "720p", "480p", "360p", "best", "m4a", "audio"]), `order: ${vals}`);
+    const label = (q) => opts.find((o) => o[0] === q)[1];
+    assert(/H\.264/.test(label("1080p")) && /60/.test(label("1080p")) && /≈/.test(label("1080p")), `1080p: ${label("1080p")}`);
+    assert(!/≈/.test(label("480p")), `no size from the probe: none shown: ${label("480p")}`);
+    assert(/AAC/.test(label("m4a")) && /129/.test(label("m4a")), `m4a: ${label("m4a")}`);
+    assert(/MP3/.test(label("audio")) && !/≈/.test(label("audio")), `mp3: ${label("audio")}`);
+    const start = async (q) => {
+      await ev(`(() => { const s = document.querySelector('#v-quality'); s.value = ${JSON.stringify(q)}; s.dispatchEvent(new Event('change')); document.querySelector('#v-start').click(); })()`);
+      await until("!document.querySelector('#dlg-video').open", 5000, "dialog closes on start");
+      return ev("window.__eidMockLastVideo");
+    };
+    let sent = await start("1080p");
+    assert(sent.quality === "1080p" && sent.format === "299+140", `sent ${JSON.stringify(sent)}`);
+    for (const [q, f] of [["best", null], ["m4a", "140"], ["audio", null]]) {
+      await ev("document.querySelector('.tool[data-cmd=add_video]').click()");
+      await until("document.querySelector('#dlg-video').open", 3000, "video dialog");
+      await ev(`(() => { const i = document.querySelector('#in-vurl'); i.value = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'; i.dispatchEvent(new Event('input', {bubbles:true})); document.querySelector('#btn-probe').click(); })()`);
+      await until("!document.querySelector('#v-result').hidden", 8000, "probe result");
+      sent = await start(q);
+      assert(sent.quality === q && sent.format === f, `${q}: sent ${JSON.stringify(sent)}`);
+    }
+  });
+
   await check("video tools: the agreement text is shown and must be accepted before any install", async () => {
     await open("?notools=1");
     await ev("document.querySelector('.tool[data-cmd=add_video]').click()");

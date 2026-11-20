@@ -39,6 +39,7 @@ pub const MAX_HEIGHT: u32 = 4320;
 /// The fixed quality choices, shortest first (the menus show the heights tallest first).
 pub const QUALITY_CHOICES: &[&str] = &[
     "144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best", "audio",
+    "m4a",
 ];
 
 /// The fixed heights of [`QUALITY_CHOICES`].
@@ -243,6 +244,14 @@ pub enum Quality {
     /// v0.2 fallback "skip": this height class only; nothing else is downloaded (the item
     /// fails with "requested format is not available").
     Exactly(u32),
+    /// v0.2 (the download menu): the exact formats the menu showed (`video+audio` or `video`,
+    /// ids from the tool's own `-J`, [`check_format_spec`]); if the site no longer offers
+    /// them, `then` (a fixed height with its fallback) decides. Single videos only.
+    Pinned { format: String, then: Box<Quality> },
+    /// v0.2: audio only, the original AAC stream in M4A, not converted (`format`: the exact
+    /// stream the menu showed, else the best M4A audio). Nothing else is downloaded: a video
+    /// without an M4A stream fails with "requested format is not available".
+    AudioM4a(Option<String>),
 }
 
 /// What to do when the chosen height is not available (v0.2, chosen by the user).
@@ -288,6 +297,7 @@ impl Quality {
         match s {
             "best" => Ok(Quality::Best),
             "audio" => Ok(Quality::AudioMp3),
+            "m4a" => Ok(Quality::AudioM4a(None)),
             _ => s
                 .strip_suffix('p')
                 .and_then(|n| n.parse::<u32>().ok())
@@ -308,7 +318,31 @@ impl Quality {
         match (self, fb) {
             (Quality::MaxHeight(h), Fallback::Higher) => Quality::AtLeast(h),
             (Quality::MaxHeight(h), Fallback::Skip) => Quality::Exactly(h),
+            (Quality::Pinned { format, then }, fb) => Quality::Pinned {
+                format,
+                then: Box::new(then.with_fallback(fb)),
+            },
             (q, _) => q,
+        }
+    }
+
+    /// v0.2: this quality pinned to the exact formats `spec` (checked), for a single video. Only
+    /// a fixed height (with or without its fallback) or `m4a` can be pinned.
+    pub fn pinned(self, spec: &str) -> Result<Quality, MediaError> {
+        check_format_spec(spec)?;
+        match self {
+            Quality::MaxHeight(_) | Quality::AtLeast(_) | Quality::Exactly(_) => {
+                Ok(Quality::Pinned {
+                    format: spec.to_owned(),
+                    then: Box::new(self),
+                })
+            }
+            Quality::AudioM4a(_) if !spec.contains('+') => {
+                Ok(Quality::AudioM4a(Some(spec.to_owned())))
+            }
+            _ => Err(MediaError::BadChoice(
+                "exact formats go with a fixed height (or m4a with one audio stream)".into(),
+            )),
         }
     }
 
@@ -318,6 +352,8 @@ impl Quality {
         match self {
             Quality::Best => Some("best".into()),
             Quality::AudioMp3 => Some("audio".into()),
+            Quality::AudioM4a(_) => Some("m4a".into()),
+            Quality::Pinned { then, .. } => then.policy_name(),
             Quality::MaxHeight(h) | Quality::AtLeast(h) | Quality::Exactly(h)
                 if POLICY_HEIGHTS.contains(h) =>
             {
@@ -329,10 +365,10 @@ impl Quality {
 
     /// The file extension we publish for this quality.
     pub fn ext(&self) -> &'static str {
-        if *self == Quality::AudioMp3 {
-            "mp3"
-        } else {
-            "mp4"
+        match self {
+            Quality::AudioMp3 => "mp3",
+            Quality::AudioM4a(_) => "m4a",
+            _ => "mp4",
         }
     }
 }
@@ -352,7 +388,7 @@ pub fn height_selector(h: u32) -> String {
 
 /// The fixed height just below `h` (0 below the smallest): the lower edge of `h`'s class, so a
 /// 1012-pixel "1080p" crop still counts as 1080p.
-fn class_floor(h: u32) -> u32 {
+pub(crate) fn class_floor(h: u32) -> u32 {
     POLICY_HEIGHTS
         .iter()
         .copied()
@@ -412,6 +448,17 @@ pub enum Action {
 
 /// A `format_id` from the network is accepted only if it is short and made of characters that
 /// carry no meaning in yt-dlp's format-selection language.
+/// v0.2: `video+audio` or `video` (one or two [`check_format_id`] ids, nothing else).
+pub fn check_format_spec(s: &str) -> Result<(), MediaError> {
+    let parts: Vec<&str> = s.split('+').collect();
+    if parts.len() > 2 {
+        return Err(MediaError::BadChoice(
+            "at most two formats: video+audio".into(),
+        ));
+    }
+    parts.into_iter().try_for_each(check_format_id)
+}
+
 pub fn check_format_id(id: &str) -> Result<(), MediaError> {
     let ok = !id.is_empty()
         && id.len() <= 64
@@ -509,6 +556,39 @@ pub fn build(
                     a.push(kv("--format", id));
                     a.push(kv("--merge-output-format", "mp4"));
                     a.push(kv("--remux-video", REMUX_VIDEO));
+                }
+                Quality::Pinned { format, then } => {
+                    check_format_spec(format)?;
+                    let sel = match then.as_ref() {
+                        Quality::MaxHeight(h) | Quality::AtLeast(h) | Quality::Exactly(h)
+                            if *h == 0 || *h > MAX_HEIGHT =>
+                        {
+                            return Err(MediaError::BadChoice(format!(
+                                "height must be 1..={MAX_HEIGHT}"
+                            )))
+                        }
+                        Quality::MaxHeight(h) => height_selector(*h),
+                        Quality::AtLeast(h) => higher_selector(*h),
+                        Quality::Exactly(h) => exact_selector(*h),
+                        _ => {
+                            return Err(MediaError::BadChoice(
+                                "exact formats go with a fixed height".into(),
+                            ))
+                        }
+                    };
+                    a.push(kv("--format", &format!("{format}/{sel}")));
+                    a.push(kv("--merge-output-format", "mp4"));
+                    a.push(kv("--remux-video", REMUX_VIDEO));
+                }
+                Quality::AudioM4a(id) => {
+                    let sel = match id {
+                        Some(id) => {
+                            check_format_id(id)?;
+                            format!("{id}/ba[ext=m4a]")
+                        }
+                        None => "ba[ext=m4a]".into(),
+                    };
+                    a.push(kv("--format", &sel));
                 }
             }
             if let Some(r) = limit_rate {
@@ -660,7 +740,12 @@ mod tests {
             assert_eq!(Quality::from_policy(s).unwrap(), q, "{s}");
             assert_eq!(q.policy_name().as_deref(), Some(s));
         }
-        assert_eq!(QUALITY_CHOICES.len(), 11);
+        assert_eq!(QUALITY_CHOICES.len(), 12);
+        assert_eq!(
+            Quality::from_policy("m4a").unwrap(),
+            Quality::AudioM4a(None)
+        );
+        assert_eq!(Quality::AudioM4a(None).ext(), "m4a");
         for bad in [
             "8640p", "4321p", "2161p", "250p", "720", "0720p", "+720p", "720P", "1080p60", "4k",
             "8k", "Best", "mp3", "", " 720p", "bv*+ba", "-1p", "0p",
@@ -730,6 +815,77 @@ mod tests {
             .to_string();
         assert_eq!(f, height_selector(4320));
         assert!(!f.contains("bv*+ba/b"), "uncapped best: {f}");
+    }
+
+    /// v0.2 download menu: exact formats are pinned only to a fixed height (or m4a), each id is
+    /// checked, and the height's own selector (with its fallback) stays as the alternative.
+    #[test]
+    fn pinned_formats_are_checked_and_keep_the_height_selector_after_them() {
+        let t = ToolPaths {
+            ytdlp: std::env::temp_dir().join("yt-dlp"),
+            ffmpeg: std::env::temp_dir().join("ffmpeg"),
+            deno: std::env::temp_dir().join("deno"),
+        };
+        let u = MediaUrl::parse("https://x.test/v").unwrap();
+        let fmt = |q: Quality| -> Result<String, MediaError> {
+            let a = build(
+                &t,
+                &u,
+                &Action::Download {
+                    quality: q,
+                    limit_rate: None,
+                    archive: false,
+                },
+            )?;
+            Ok(a.iter()
+                .find_map(|x| x.to_str()?.strip_prefix("--format=").map(str::to_owned))
+                .unwrap())
+        };
+        let p = Quality::MaxHeight(1080).pinned("299+140").unwrap();
+        assert_eq!(
+            fmt(p.clone()).unwrap(),
+            format!("299+140/{}", height_selector(1080))
+        );
+        assert_eq!(p.policy_name().as_deref(), Some("1080p"));
+        assert_eq!(p.ext(), "mp4");
+        // the fallback applies to the alternative
+        let h = p.with_fallback(Fallback::Skip);
+        assert_eq!(fmt(h).unwrap(), format!("299+140/{}", exact_selector(1080)));
+        let m = Quality::AudioM4a(None).pinned("140").unwrap();
+        assert_eq!(fmt(m).unwrap(), "140/ba[ext=m4a]");
+        assert_eq!(fmt(Quality::AudioM4a(None)).unwrap(), "ba[ext=m4a]");
+        for bad in [
+            "",
+            "+",
+            "1+2+3",
+            "-f",
+            "bv*",
+            "299+ba/b",
+            "299 +140",
+            "a/b",
+            "1,2",
+            "x;y",
+            &"9".repeat(65),
+        ] {
+            assert!(Quality::MaxHeight(720).pinned(bad).is_err(), "{bad:?}");
+        }
+        for q in [
+            Quality::Best,
+            Quality::AudioMp3,
+            Quality::Format("18".into()),
+        ] {
+            assert!(
+                q.pinned("18").is_err(),
+                "only a fixed height or m4a is pinned"
+            );
+        }
+        assert!(Quality::AudioM4a(None).pinned("137+140").is_err());
+        // a pinned height above 8K is refused when building
+        let tall = Quality::Pinned {
+            format: "1".into(),
+            then: Box::new(Quality::MaxHeight(8640)),
+        };
+        assert!(fmt(tall).is_err());
     }
 
     #[test]

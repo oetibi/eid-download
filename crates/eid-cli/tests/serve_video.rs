@@ -68,11 +68,33 @@ async fn ipc_probe_and_add_video_through_eid_serve() {
                 url: video.clone(),
                 quality: quality.into(),
                 if_missing: None,
+                format: None,
             })
             .await
         {
             Err(ClientError::Server(m)) => assert!(m.contains("quality"), "{m}"),
             other => panic!("{quality}: {other:?}"),
+        }
+    }
+    // v0.2: exact formats are ids only, and only with a fixed height or m4a
+    for (quality, format) in [
+        ("720p", "bv*+ba"),
+        ("720p", "1+2+3"),
+        ("best", "v1080+140"),
+        ("720p", "-x"),
+    ] {
+        let mut cl = Client::connect(&ep).await.unwrap();
+        match cl
+            .call(Command::AddVideo {
+                url: video.clone(),
+                quality: quality.into(),
+                if_missing: None,
+                format: Some(format.into()),
+            })
+            .await
+        {
+            Err(ClientError::Server(m)) => assert!(m.contains("format"), "{m}"),
+            other => panic!("{quality} {format}: {other:?}"),
         }
     }
     let mut cl = Client::connect(&ep).await.unwrap();
@@ -86,13 +108,33 @@ async fn ipc_probe_and_add_video_through_eid_serve() {
     assert_eq!(p["kind"], "video");
     assert_eq!(
         p["qualities"],
-        serde_json::json!(["360p", "1080p", "best", "audio"])
+        serde_json::json!(["360p", "1080p", "best", "audio", "m4a"])
     );
+    // v0.2 the download menu's options: exact format pairs, tallest first, the tool's details
+    assert_eq!(
+        p["options"],
+        serde_json::json!([
+            {"quality": "1080p", "height": 1080, "format": "v1080+140", "container": "mp4",
+             "fps": 60, "codec": "H.264", "hdr": null, "audio": true, "size": 10_805_000},
+            {"quality": "360p", "height": 360, "format": "v360+140", "container": "mp4",
+             "fps": 30, "codec": "H.264", "hdr": null, "audio": true, "size": 3_605_000},
+        ])
+    );
+    assert_eq!(
+        p["audio_options"],
+        serde_json::json!([
+            {"quality": "m4a", "original": true, "format": "140", "codec": "AAC", "kbps": 128, "size": 5000},
+            {"quality": "audio", "original": false, "format": null, "codec": "MP3", "kbps": 128, "size": null},
+        ])
+    );
+    // the 1080p line, exactly as shown
+    let opt = &p["options"][0];
     let r = cl
         .call(Command::AddVideo {
             url: video.clone(),
-            quality: "360p".into(),
+            quality: opt["quality"].as_str().unwrap().into(),
             if_missing: None,
+            format: Some(opt["format"].as_str().unwrap().into()),
         })
         .await
         .unwrap();
@@ -114,6 +156,11 @@ async fn ipc_probe_and_add_video_through_eid_serve() {
         cfg.join("eid-download").join("video-jobs.json")
     };
     assert!(jobs_file.is_file(), "{}", jobs_file.display());
+    let saved = std::fs::read_to_string(&jobs_file).unwrap();
+    assert!(
+        saved.contains(r#""format": "v1080+140""#) || saved.contains(r#""format":"v1080+140""#),
+        "the exact formats are saved with the job (resume after a restart): {saved}"
+    );
 
     // v0.2 (owner's Windows test): a YouTube page handed over as a normal "add" becomes a
     // VIDEO job; the file queue never sees it (it used to save the page as a file `watch`)

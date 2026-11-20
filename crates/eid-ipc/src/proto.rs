@@ -15,6 +15,7 @@ pub const MAX_ITEMS: usize = 5000;
 /// Same list as the media crate's `QUALITY_CHOICES` (checked by a test in eid-cli).
 pub const VIDEO_QUALITIES: &[&str] = &[
     "144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best", "audio",
+    "m4a",
 ];
 /// v0.2: what to do when the chosen height is missing. Same list as the media crate's
 /// `FALLBACK_CHOICES` (checked by a test in eid-cli). Absent = `lower` (the v0.1 behaviour).
@@ -66,6 +67,10 @@ pub enum Command {
         /// v0.2: [`VIDEO_FALLBACKS`]; absent = `lower`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_missing: Option<String>,
+        /// v0.2 (the download menu): the exact formats the menu showed, `video+audio` (ids
+        /// from the app's own probe); `quality` applies if the site no longer offers them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
     },
     /// v0.1: download a playlist (all items, or only `items`, numbered from 1 in playlist
     /// order) into a numbered folder named after it, in the default folder.
@@ -197,6 +202,7 @@ impl Request {
                 url,
                 quality,
                 if_missing,
+                ..
             }
             | Command::AddPlaylist {
                 url,
@@ -220,6 +226,19 @@ impl Request {
             let web = url.starts_with("https://") || url.starts_with("http://");
             if !web || !plain(url, MAX_URL_LEN) {
                 return Err("invalid url".into());
+            }
+        }
+        if let Command::AddVideo {
+            format: Some(f),
+            quality,
+            ..
+        } = &self.command
+        {
+            if !format_spec_ok(f) || (quality == "m4a" && f.contains('+')) {
+                return Err("invalid format".into());
+            }
+            if !format_quality_ok(quality) {
+                return Err("invalid format: exact formats go with a fixed height or m4a".into());
             }
         }
         if let Command::AddPlaylist {
@@ -250,6 +269,26 @@ pub fn parse_hello(bytes: &[u8]) -> Result<Hello, String> {
         return Err("malformed hello".into());
     }
     Ok(h)
+}
+
+/// v0.2: the qualities exact formats may go with: a fixed height, or `m4a` with one stream.
+pub fn format_quality_ok(quality: &str) -> bool {
+    quality == "m4a" || (quality.ends_with('p') && VIDEO_QUALITIES.contains(&quality))
+}
+
+/// v0.2: `video+audio` or `video`: one or two ids of 1-64 characters of `A-Z a-z 0-9 _ - .`,
+/// not starting with `-` (the same rule as the media crate's `check_format_spec`).
+pub fn format_spec_ok(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('+').collect();
+    parts.len() <= 2
+        && parts.iter().all(|id| {
+            !id.is_empty()
+                && id.len() <= 64
+                && !id.starts_with('-')
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+        })
 }
 
 #[cfg(test)]
@@ -363,6 +402,43 @@ mod tests {
         assert!(req(&j.to_string()).is_err());
     }
 
+    /// v0.2 the download menu: `format` is one or two plain format ids, only with a fixed
+    /// height or m4a; absent stays absent on the wire (older apps and extensions agree).
+    #[test]
+    fn add_video_format_is_one_or_two_plain_ids_with_a_fixed_height() {
+        let r = req(r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"1080p","format":"299+140"}}"#).unwrap();
+        assert!(
+            matches!(r.command, Command::AddVideo { format: Some(ref f), .. } if f == "299+140")
+        );
+        assert!(req(r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"m4a","format":"140"}}"#).is_ok());
+        assert!(req(r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"4320p","format":"402+140"}}"#).is_ok());
+        let long = "9".repeat(65);
+        for (q, f) in [
+            ("1080p", "bv*+ba"),
+            ("1080p", "1+2+3"),
+            ("1080p", ""),
+            ("1080p", "+"),
+            ("1080p", "-f"),
+            ("1080p", "299/140"),
+            ("1080p", "299 140"),
+            ("1080p", "299;rm"),
+            ("1080p", long.as_str()),
+            ("best", "299+140"),
+            ("audio", "140"),
+        ] {
+            let j = serde_json::json!({"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":q,"format":f}});
+            assert!(req(&j.to_string()).is_err(), "{q} {f:?} accepted");
+        }
+        let plain = serde_json::to_string(&Command::AddVideo {
+            url: "https://y.test/w".into(),
+            quality: "720p".into(),
+            if_missing: None,
+            format: None,
+        })
+        .unwrap();
+        assert!(!plain.contains("format"), "{plain}");
+    }
+
     #[test]
     fn browser_subset_is_only_ping_add_and_the_video_commands() {
         for c in [
@@ -371,6 +447,7 @@ mod tests {
                 url: "u".into(),
                 quality: "best".into(),
                 if_missing: None,
+                format: None,
             },
             Command::AddPlaylist {
                 url: "u".into(),

@@ -134,6 +134,10 @@ fn formats(heights: Option<&str>) -> Vec<Fmt> {
 fn passes(f: &Fmt, filters: &str) -> bool {
     filters.split(']').filter(|x| !x.is_empty()).all(|flt| {
         let flt = flt.trim_start_matches('[');
+        // v0.2 `ba[ext=m4a]`: video formats are mp4, audio-only ones m4a (as in info_json)
+        if let Some(e) = flt.strip_prefix("ext=") {
+            return e == if f.video { "mp4" } else { "m4a" };
+        }
         let (lenient, n) = match flt.strip_prefix("height<=?") {
             Some(n) => (true, n),
             None => (
@@ -178,10 +182,26 @@ fn pick<'a>(fs: &'a [Fmt], atom: &str) -> Option<&'a Fmt> {
 /// The video height `--format` selects from `fs` (`Some(None)`: a selection without a known
 /// height); `None` when nothing matches.
 fn select(fs: &[Fmt], spec: &str) -> Option<Option<u32>> {
-    spec.split('/').find_map(|alt| {
-        let parts: Option<Vec<&Fmt>> = alt.split('+').map(|a| pick(fs, a)).collect();
-        parts.map(|p| p.iter().filter(|f| f.video).filter_map(|f| f.height).max())
-    })
+    selected(fs, spec).map(|p| p.iter().filter(|f| f.video).filter_map(|f| f.height).max())
+}
+
+/// The formats of the first alternative of `spec` that matches.
+fn selected<'a>(fs: &'a [Fmt], spec: &str) -> Option<Vec<&'a Fmt>> {
+    spec.split('/')
+        .find_map(|alt| alt.split('+').map(|a| pick(fs, a)).collect())
+}
+
+/// The extension of the file a download writes: mp3 with `--extract-audio`, m4a when the
+/// selection is audio only (v0.2 `m4a`), else mp4 (or the WebM source, see [`Remux`]).
+fn out_ext(flags: &[String], heights: Option<&str>) -> &'static str {
+    if flags.iter().any(|f| f == "--extract-audio") {
+        return "mp3";
+    }
+    let fs = formats(heights);
+    match value(flags, "--format").and_then(|s| selected(&fs, s)) {
+        Some(p) if !p.is_empty() && p.iter().all(|f| !f.video) => "m4a",
+        _ => "mp4",
+    }
 }
 
 fn info_json(id: &str, title: &str, heights: Option<&str>) -> String {
@@ -189,11 +209,19 @@ fn info_json(id: &str, title: &str, heights: Option<&str>) -> String {
         let fs: Vec<serde_json::Value> = formats(heights)
             .iter()
             .map(|f| {
+                // v0.2 details for the download menu: 60 fps from 720p, sizes and bitrates
+                // that grow with the height, audio 128 kbit/s
+                let h = f.height.unwrap_or(0);
                 serde_json::json!({
                     "format_id": f.id, "ext": if f.video { "mp4" } else { "m4a" },
                     "height": f.height,
-                    "vcodec": if f.video { "avc1" } else { "none" },
+                    "vcodec": if f.video { "avc1.64001f" } else { "none" },
                     "acodec": if f.audio { "mp4a.40.2" } else { "none" },
+                    "fps": if f.video { Some(if h >= 720 { 60.0 } else { 30.0 }) } else { None },
+                    "dynamic_range": if f.video { Some("SDR") } else { None },
+                    "filesize": if f.video { u64::from(h) * 10_000 } else { 5_000 },
+                    "tbr": if f.video { f64::from(h) } else { 128.0 },
+                    "abr": if f.audio { Some(128.0) } else { None },
                 })
             })
             .collect();
@@ -304,6 +332,9 @@ fn download(
     let webm = webm_bytes();
     let (data, ext): (&[u8], &str) = if audio {
         (CLIP_MP3, "mp3")
+    } else if out_ext(flags, heights) == "m4a" {
+        // the fixture clip is an MP4 file; as audio only it stands in for an M4A stream
+        (CLIP_MP4, "m4a")
     } else if remux.container.as_deref() == Some("webm") {
         (&webm, "webm")
     } else {
@@ -605,11 +636,7 @@ fn main() {
             } else {
                 // log first (with the resume offset), so a test can see this process even if
                 // it is killed while it stalls
-                let ext = if flags.iter().any(|f| f == "--extract-audio") {
-                    "mp3"
-                } else {
-                    "mp4"
-                };
+                let ext = out_ext(flags, query("heights").as_deref());
                 let resumed = std::fs::symlink_metadata(format!("{id}.{ext}.part"))
                     .map(|m| m.len())
                     .unwrap_or(0);

@@ -85,7 +85,7 @@ async fn probe_of_a_video_offers_only_available_heights_never_above_4320() {
     assert_eq!(v["title"], "Clip");
     assert_eq!(
         v["qualities"],
-        json!(["144p", "360p", "1080p", "4320p", "best", "audio"])
+        json!(["144p", "360p", "1080p", "4320p", "best", "audio", "m4a"])
     );
 }
 
@@ -249,6 +249,112 @@ async fn single_video_events_report_the_height_obtained() {
     );
     assert!(ev.iter().any(|v| v["ev"] == "item" && v["state"] == "done"));
     assert_eq!(ev.last().unwrap()["code"], 0);
+}
+
+/// v0.2 the download menu: the exact formats shown are what is downloaded (the 360p line of a
+/// video that also has 720p gets 360p); if they are gone, the height's own choice applies;
+/// "m4a" is the original audio stream, saved as .m4a, never converted.
+#[tokio::test]
+async fn exact_formats_from_the_menu_and_the_original_m4a_audio() {
+    let e = Env::new().await;
+    setup(&e).await;
+    let out = e.out().display().to_string();
+    let get = |url: String, extra: &'static [&'static str]| {
+        let out = out.clone();
+        let e = &e;
+        async move {
+            let mut a = vec!["video", "get", url.as_str(), "-d", out.as_str(), "--events"];
+            a.extend_from_slice(extra);
+            e.run(&a).await
+        }
+    };
+    let heights = |o: &Output| -> Vec<u64> {
+        events(o)
+            .iter()
+            .filter(|v| v["ev"] == "progress")
+            .filter_map(|v| v["height"].as_u64())
+            .collect()
+    };
+    // exact: v360+140 although "720p" alone would give 720
+    let o = get(
+        e.url("video/p1", "&title=Pinned&heights=360,720"),
+        &["--quality", "720p", "--format", "v360+140"],
+    )
+    .await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        heights(&o).iter().all(|h| *h == 360) && !heights(&o).is_empty(),
+        "{}",
+        text(&o)
+    );
+    assert!(e.out().join("Pinned.mp4").is_file());
+    // the exact formats are gone: the height's choice (720p, lower if missing)
+    let o = get(
+        e.url("video/p2", "&title=Gone&heights=360,720"),
+        &["--quality", "720p", "--format", "v1080+140"],
+    )
+    .await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(heights(&o).iter().all(|h| *h == 720), "{}", text(&o));
+    // original audio: .m4a, no conversion
+    let o = get(
+        e.url("video/p3", "&title=Song&heights=360"),
+        &["--quality", "m4a", "--format", "140"],
+    )
+    .await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(e.out().join("Song.m4a").is_file(), "{}", text(&o));
+    assert!(!e.out().join("Song.mp3").exists() && !e.out().join("Song.mp4").exists());
+    // refused before anything runs: only `get`, only ids, only a fixed height or m4a
+    for bad in [
+        vec![
+            "video",
+            "playlist",
+            "https://www.youtube.com/playlist?list=PL1",
+            "--quality",
+            "720p",
+            "--format",
+            "v360+140",
+        ],
+        vec![
+            "video",
+            "get",
+            "https://x.test/v",
+            "--quality",
+            "best",
+            "--format",
+            "v360+140",
+        ],
+        vec![
+            "video",
+            "get",
+            "https://x.test/v",
+            "--quality",
+            "720p",
+            "--format",
+            "bv*+ba",
+        ],
+        vec![
+            "video",
+            "get",
+            "https://x.test/v",
+            "--quality",
+            "m4a",
+            "--format",
+            "137+140",
+        ],
+        vec![
+            "video",
+            "get",
+            "https://x.test/v",
+            "--quality",
+            "720p",
+            "--format",
+        ],
+    ] {
+        let o = e.run(&bad).await;
+        assert!(!o.status.success(), "{bad:?} accepted: {}", text(&o));
+    }
 }
 
 #[tokio::test]

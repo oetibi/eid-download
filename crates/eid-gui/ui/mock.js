@@ -81,7 +81,18 @@ export function mockApi(params = new URLSearchParams()) {
   const sorted = () => [...items.values()].map((e) => e.item).sort((a, b) => b.id - a.id);
 
   // ---- video
-  const QUALS = ["360p", "480p", "720p", "1080p", "best", "audio"];
+  const QUALS = ["360p", "480p", "720p", "1080p", "best", "audio", "m4a"];
+  // v0.2 the download menu's exact options (the real backend: eid_media::choice)
+  const OPTIONS = [
+    { quality: "1080p", height: 1080, format: "299+140", container: "mp4", fps: 60, codec: "H.264", hdr: null, audio: true, size: 52428800 },
+    { quality: "720p", height: 720, format: "298+140", container: "mp4", fps: 60, codec: "H.264", hdr: null, audio: true, size: 26214400 },
+    { quality: "480p", height: 480, format: "135+140", container: "mp4", fps: 30, codec: "H.264", hdr: null, audio: true, size: null },
+    { quality: "360p", height: 360, format: "18", container: "mp4", fps: 30, codec: "H.264", hdr: null, audio: true, size: 9000000 },
+  ];
+  const AUDIO_OPTIONS = [
+    { quality: "m4a", original: true, format: "140", codec: "AAC", kbps: 129, size: 3000000 },
+    { quality: "audio", original: false, format: null, codec: "MP3", kbps: 129, size: null },
+  ];
   const jobs = [];
   let nextJob = 1;
   let toolsInstalled = params.get("notools") !== "1";
@@ -277,10 +288,12 @@ export function mockApi(params = new URLSearchParams()) {
           items: Array.from({ length: count }, (_, i) => ({ index: i + 1, id: `id${i + 1}`, title: i === 4 ? "الدرس 5 (will fail once)" : `Lesson ${i + 1}: ${["ownership", "borrowing", "traits", "async", "errors"][i % 5]}`, duration: 300 + i * 17 })),
         };
       }
-      return { kind: "video", title: "Big Buck Bunny — sample video", uploader: "Example Channel", duration: 596, qualities: QUALS };
+      return { kind: "video", title: "Big Buck Bunny — sample video", uploader: "Example Channel", duration: 596, qualities: QUALS, options: OPTIONS, audio_options: AUDIO_OPTIONS };
     },
-    video_add: ({ url, quality }) => {
-      if (!["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best", "audio"].includes(quality)) throw "bad_quality";
+    video_add: ({ url, quality, format }) => {
+      if (!["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best", "audio", "m4a"].includes(quality)) throw "bad_quality";
+      if (format != null && !/^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63}(\+[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63})?$/.test(format)) throw "invalid input: format";
+      window.__eidMockLastVideo = { url, quality, format: format ?? null };
       const j = { job: nextJob++, kind: "video", title: "Big Buck Bunny — sample video", url, state: "queued", quality, done_items: 0, total_items: 1, failed_items: 0, bytes: 0, total_bytes: null, speed: 0, items: [{ index: 1, title: "Big Buck Bunny — sample video", state: "queued", progress: 0 }] };
       jobs.unshift(j);
       return { job: j.job };

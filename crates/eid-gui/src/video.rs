@@ -52,12 +52,19 @@ pub fn video_add(
     quality: String,
     dir: Option<String>,
     if_missing: Option<String>,
+    format: Option<String>,
 ) -> Result<Value, String> {
     let d = folder(&st, dir);
     let f = if_missing.as_deref().unwrap_or("lower");
-    let job = st
-        .video
-        .add_with(Kind::Video, url.trim(), &quality, f, None, d.as_deref())?;
+    let job = st.video.add_full(
+        Kind::Video,
+        url.trim(),
+        &quality,
+        f,
+        None,
+        d.as_deref(),
+        format.as_deref(),
+    )?;
     Ok(json!({ "job": job }))
 }
 

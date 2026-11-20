@@ -8,7 +8,7 @@ param([Parameter(Mandatory)][ValidateSet('brave', 'opera', 'vivaldi')][string]$B
 $ErrorActionPreference = 'Stop'
 
 $pkg = @{ brave = 'brave'; opera = 'opera'; vivaldi = 'vivaldi' }[$Browser]
-choco install $pkg -y --no-progress | Out-Host
+choco install $pkg -y --no-progress --execution-timeout 600 | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "choco install $pkg failed ($LASTEXITCODE)" }
 
 # The browser itself, not a launcher: Opera's top-level opera.exe starts a versioned copy and

@@ -8,7 +8,7 @@
 import { TEXT } from "./i18n.js";
 import {
   ACTIVE, BUSY, CATEGORIES, mergeList, buildView, inView, categoryOf, fraction, clickSelect,
-  pollDelay, safeQualities, QUALITIES, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
+  pollDelay, safeQualities, QUALITIES, optionFor, optionDetails, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
   COLUMNS, TOOLS, normalizeCols, gridTemplate, moveCol, normalizeToolbar, linksFromText, finishedNow, videoPage,
   linkPlaylist, parseRange,
 } from "./logic.js";
@@ -931,10 +931,20 @@ function openInfo(title, body) {
 
 // ---------------------------------------------------------------- settings dialog
 function qualityLabel(q) {
-  return q === "best" ? t("q_best") : q === "audio" ? t("q_audio") : q === "2160p" ? t("q_2160p") : q === "4320p" ? t("q_4320p") : q;
+  return q === "best" ? t("q_best") : q === "audio" ? t("q_audio") : q === "m4a" ? t("q_m4a") : q === "2160p" ? t("q_2160p") : q === "4320p" ? t("q_4320p") : q;
 }
-function fillQualitySelect(sel, list, pick) {
-  sel.replaceChildren(...list.map((q) => { const o = el("option", null, qualityLabel(q)); o.value = q; return o; }));
+/** v0.2: "1080p — 60 fps · H.264 · with audio · ≈ 52 MB" from the probe's own details. */
+const OPT_WORDS = () => ({
+  fps: (n) => t("vd_opt_fps", n), audio: t("vd_opt_audio"), noaudio: t("vd_opt_noaudio"),
+  original: t("vd_opt_original"), converted: t("vd_opt_converted"), kbps: (n) => t("vd_opt_kbps", n), size: (s) => t("vd_opt_size", s),
+});
+function fillQualitySelect(sel, list, pick, result) {
+  sel.replaceChildren(...list.map((q) => {
+    const d = result ? optionDetails(optionFor(result, q), OPT_WORDS(), size) : [];
+    const o = el("option", null, d.length ? `${qualityLabel(q)} — ${d.join(" · ")}` : qualityLabel(q));
+    o.value = q;
+    return o;
+  }));
   sel.value = list.includes(pick) ? pick : list.includes("best") ? "best" : list[0] ?? "";
 }
 function showSettingsFolder() {
@@ -1120,7 +1130,7 @@ function renderProbe() {
   if (r.duration != null) meta.push(`${t("vd_duration")}: ${fmtDur(r.duration)}`);
   if (r.kind === "playlist") meta.push(t("vd_items", r.items?.length ?? 0));
   $("#v-meta").textContent = meta.join(" · ");
-  fillQualitySelect($("#v-quality"), safeQualities(r.qualities), settings.quality);
+  fillQualitySelect($("#v-quality"), safeQualities(r.qualities), settings.quality, r.kind === "video" ? r : null);
   $("#v-missing").value = settings.missing;
   showMissingRow();
   const isList = r.kind === "playlist";
@@ -1232,7 +1242,9 @@ $("#form-video").addEventListener("submit", async (e) => {
       const if_missing = /^\d+p$/.test(quality) ? $("#v-missing").value : undefined;
       await api.call("playlist_add", all ? { url: probe.url, quality, dir, if_missing } : { url: probe.url, quality, items: idx, dir, if_missing });
     } else {
-      await api.call("video_add", { url: probe.url, quality, dir });
+      // v0.2: the exact formats the line showed (the quality alone if the probe gave none)
+      const format = optionFor(probe.result, quality)?.format ?? undefined;
+      await api.call("video_add", format ? { url: probe.url, quality, dir, format } : { url: probe.url, quality, dir });
     }
     $("#dlg-video").close();
     toast(t("video_added"));

@@ -148,10 +148,51 @@ export function pollDelay({ hidden, busy }) {
 
 /** Quality policy (owner 2026-11-20): 144p to 4320p (8K), tallest first, then best and audio;
  * only the known choices, nothing taller. */
-export const QUALITIES = ["4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p", "best", "audio"];
+export const QUALITIES = ["4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p", "best", "m4a", "audio"];
 export function safeQualities(list) {
   const got = new Set(Array.isArray(list) ? list : []);
   return QUALITIES.filter((q) => got.has(q));
+}
+
+/** v0.2 download menu: format ids from the app's own probe (`299+140`), the protocol's rule. */
+const FORMAT_SPEC = /^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63}(\+[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63})?$/;
+
+/**
+ * v0.2: the probe's exact option for `quality` (`options` for a height, `audio_options` for
+ * m4a/audio), or null. An option whose format is not plain ids is ignored (the quality alone is
+ * sent then).
+ */
+export function optionFor(result, quality) {
+  const list = quality === "m4a" || quality === "audio" ? result?.audio_options : result?.options;
+  if (!Array.isArray(list)) return null;
+  const o = list.find((x) => x && typeof x === "object" && x.quality === quality);
+  if (!o) return null;
+  if (o.format != null && (typeof o.format !== "string" || !FORMAT_SPEC.test(o.format))) return null;
+  if (quality === "m4a" && String(o.format ?? "").includes("+")) return null;
+  return o;
+}
+
+/**
+ * v0.2: the details shown next to a quality, only what the probe gave: frame rate, codec, HDR,
+ * audio (or "no audio"), size (≈, the tool's own numbers). `w`: { fps(n), audio, noaudio,
+ * original, converted, kbps(n), size(s) }.
+ */
+export function optionDetails(o, w, fmtSizeFn) {
+  if (!o) return [];
+  const out = [];
+  const num = (n) => typeof n === "number" && Number.isFinite(n) && n > 0;
+  if (typeof o.original === "boolean") {
+    if (typeof o.codec === "string" && o.codec) out.push(o.codec);
+    out.push(o.original ? w.original : w.converted);
+    if (num(o.kbps)) out.push(w.kbps(Math.round(o.kbps)));
+  } else {
+    if (num(o.fps)) out.push(w.fps(Math.round(o.fps)));
+    if (typeof o.codec === "string" && o.codec) out.push(o.codec);
+    if (typeof o.hdr === "string" && o.hdr) out.push(o.hdr);
+    out.push(o.audio === true ? w.audio : w.noaudio);
+  }
+  if (num(o.size)) out.push(w.size(fmtSizeFn(o.size)));
+  return out.map((s) => String(s).slice(0, 40));
 }
 
 /** Human size with the given unit names [B, KB, MB, GB, TB]. */

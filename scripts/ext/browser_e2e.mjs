@@ -158,7 +158,11 @@ async function chromium(kind) {
     }
   });
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => { const id = ++seq; pending.set(id, { res, rej }); w.write(JSON.stringify({ id, method, params, sessionId }) + "\0"); });
-  const { id } = await send("Extensions.loadUnpacked", { path: EXT_DIR });
+  // a browser that never answers on the DevTools pipe fails here with a reason, not at the job timeout
+  const { id } = await Promise.race([
+    send("Extensions.loadUnpacked", { path: EXT_DIR }),
+    sleep(60000).then(() => { throw new Error(`${kind} did not answer on the DevTools pipe within 60 s (stderr: ${err.slice(-800)})`); }),
+  ]);
   if (id !== CHROME_ID) throw new Error(`extension id ${id}`);
   const attach = async (url) => {
     const { targetId } = await send("Target.createTarget", { url: "about:blank" });
@@ -364,6 +368,8 @@ async function until(fn, ms, what) {
   throw new Error(`timed out (${ms} ms): ${what}; last: ${last?.message ?? JSON.stringify(last)?.slice(0, 600)}`);
 }
 
+// the whole run is bounded: a hang anywhere ends with a reason after 10 minutes
+setTimeout(() => { console.log(`FAIL the run took longer than 10 minutes (${BROWSER}); stopped`); process.exit(1); }, 600000).unref();
 const restoreHost = registerHost();
 let B = null;
 try {
