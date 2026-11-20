@@ -23,6 +23,9 @@
 //        host is registered under; default: that browser's known key)
 //        [--checks 1,2]   (only these checks; the others are printed as NOT RUN, never as passed)
 //        [--headed]       (Chromium-based: a normal window instead of headless)
+//        [--cdp-port]     (Chromium-based: DevTools over a local port + --load-extension, for a
+//                          browser that does not serve --remote-debugging-pipe)
+//        [--max-minutes N] (the whole run is stopped with a reason after N minutes; default 10)
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -147,29 +150,60 @@ async function chromium(kind) {
   fs.mkdirSync(prof, { recursive: true });
   // --headed: a normal window (a browser that does not run headless; the runner has a desktop)
   const headless = process.argv.includes("--headed") ? [] : ["--headless=new"];
+  // --cdp-port: DevTools over a local port (a browser that does not serve --remote-debugging-pipe);
+  // the extension is then loaded with --load-extension (Extensions.loadUnpacked needs the pipe)
+  const PORT_MODE = process.argv.includes("--cdp-port");
+  const control = PORT_MODE
+    ? ["--remote-debugging-port=0", `--load-extension=${EXT_DIR}`, `--disable-extensions-except=${EXT_DIR}`]
+    : ["--remote-debugging-pipe", "--enable-unsafe-extension-debugging"];
   const proc = spawn(bin, [...headless, "--no-sandbox", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-    "--remote-debugging-pipe", "--enable-unsafe-extension-debugging", `--user-data-dir=${prof}`, "--window-size=1280,900", "about:blank"],
-  { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], env: { ...process.env, EID_STUB_LOG: STUB_LOG } });
+    ...control, `--user-data-dir=${prof}`, "--window-size=1280,900", "about:blank"],
+  { stdio: PORT_MODE ? ["ignore", "ignore", "pipe"] : ["ignore", "ignore", "pipe", "pipe", "pipe"], env: { ...process.env, EID_STUB_LOG: STUB_LOG } });
   let err = ""; proc.stderr.on("data", (d) => { err += d; });
-  const w = proc.stdio[3], r = proc.stdio[4];
   let seq = 0, buf = Buffer.alloc(0);
   const pending = new Map(), hooks = [];
-  r.on("data", (d) => {
-    buf = Buffer.concat([buf, d]);
-    let i;
-    while ((i = buf.indexOf(0)) >= 0) {
-      const m = JSON.parse(buf.subarray(0, i).toString("utf8")); buf = buf.subarray(i + 1);
-      if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.rej(new Error(JSON.stringify(m.error))) : p.res(m.result); }
-      else for (const h of hooks) h(m);
+  const dispatch = (m) => {
+    if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.rej(new Error(JSON.stringify(m.error))) : p.res(m.result); }
+    else for (const h of hooks) h(m);
+  };
+  let write;
+  if (PORT_MODE) {
+    // the browser writes the port it chose into <user-data-dir>/DevToolsActivePort
+    const portFile = path.join(prof, "DevToolsActivePort");
+    const t0 = Date.now();
+    while (!fs.existsSync(portFile) || fs.readFileSync(portFile, "utf8").split("\n").length < 2) {
+      if (Date.now() - t0 > 60000) throw new Error(`${kind} opened no DevTools port within 60 s (stderr: ${err.slice(-800)})`);
+      await sleep(200);
     }
-  });
-  const send = (method, params = {}, sessionId) => new Promise((res, rej) => { const id = ++seq; pending.set(id, { res, rej }); w.write(JSON.stringify({ id, method, params, sessionId }) + "\0"); });
-  // a browser that never answers on the DevTools pipe fails here with a reason, not at the job timeout
-  const { id } = await Promise.race([
-    send("Extensions.loadUnpacked", { path: EXT_DIR }),
-    sleep(60000).then(() => { throw new Error(`${kind} did not answer on the DevTools pipe within 60 s (stderr: ${err.slice(-800)})`); }),
-  ]);
-  if (id !== CHROME_ID) throw new Error(`extension id ${id}`);
+    const [port, wsPath] = fs.readFileSync(portFile, "utf8").split("\n").map((x) => x.trim());
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${wsPath}`);
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error(`${kind}: DevTools WebSocket failed`)); });
+    ws.onmessage = (e) => dispatch(JSON.parse(String(e.data)));
+    write = (s) => ws.send(s);
+  } else {
+    const w = proc.stdio[3], r = proc.stdio[4];
+    r.on("data", (d) => {
+      buf = Buffer.concat([buf, d]);
+      let i;
+      while ((i = buf.indexOf(0)) >= 0) {
+        const m = JSON.parse(buf.subarray(0, i).toString("utf8")); buf = buf.subarray(i + 1);
+        dispatch(m);
+      }
+    });
+    write = (s) => w.write(s + "\0");
+  }
+  const send = (method, params = {}, sessionId) => new Promise((res, rej) => { const id = ++seq; pending.set(id, { res, rej }); write(JSON.stringify({ id, method, params, sessionId })); });
+  if (PORT_MODE) {
+    // --load-extension: wait for the extension's service worker (its id is pinned by the key)
+    await until(async () => (await send("Target.getTargets")).targetInfos.some((x) => x.url.startsWith(`chrome-extension://${CHROME_ID}/`)), 30000, `${kind}: the extension loaded with --load-extension`);
+  } else {
+    // a browser that never answers on the DevTools pipe fails here with a reason, not at the job timeout
+    const { id } = await Promise.race([
+      send("Extensions.loadUnpacked", { path: EXT_DIR }),
+      sleep(60000).then(() => { throw new Error(`${kind} did not answer on the DevTools pipe within 60 s (stderr: ${err.slice(-800)})`); }),
+    ]);
+    if (id !== CHROME_ID) throw new Error(`extension id ${id}`);
+  }
   const attach = async (url) => {
     const { targetId } = await send("Target.createTarget", { url: "about:blank" });
     const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -377,7 +411,8 @@ async function until(fn, ms, what) {
 }
 
 // the whole run is bounded: a hang anywhere ends with a reason after 10 minutes
-setTimeout(() => { console.log(`FAIL the run took longer than 10 minutes (${BROWSER}); stopped`); process.exit(1); }, 600000).unref();
+const MAX_MIN = Number(arg("--max-minutes", "10"));
+setTimeout(() => { console.log(`FAIL the run took longer than ${MAX_MIN} minutes (${BROWSER}); stopped`); process.exit(1); }, MAX_MIN * 60000).unref();
 const restoreHost = registerHost();
 let B = null;
 try {
