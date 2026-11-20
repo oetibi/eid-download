@@ -211,7 +211,9 @@ async function firefox() {
   const gdDir = process.env.GECKOWEBDRIVER;
   const gd = arg("--geckodriver", gdDir ? path.join(gdDir, IS_WIN ? "geckodriver.exe" : "geckodriver") : "geckodriver");
   const port = 4444 + Math.floor(Math.random() * 1000);
-  const env = { ...process.env, EID_STUB_LOG: STUB_LOG };
+  // MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: lets the test open the options tab from the browser's own
+  // context (run 44717763588); the page under test runs as an ordinary web page either way
+  const env = { ...process.env, EID_STUB_LOG: STUB_LOG, MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: "1" };
   if (!IS_WIN) env.HOME = path.join(TMP, "home");
   const proc = spawn(gd, ["--port", String(port)], { stdio: ["ignore", "pipe", "pipe"], env });
   let err = ""; proc.stderr.on("data", (d) => { err += d; }); proc.stdout.on("data", (d) => { err += d; });
@@ -228,7 +230,7 @@ async function firefox() {
     "dom.security.https_first": false,
     "browser.shell.checkDefaultBrowser": false,
   };
-  const opts = { args: ["-headless", "--window-size=1280,900"], prefs };
+  const opts = { args: ["-headless"], prefs };
   if (arg("--bin")) opts.binary = arg("--bin");
   const sess = await http("POST", "/session", { capabilities: { alwaysMatch: { browserName: "firefox", webSocketUrl: true, acceptInsecureCerts: true, "moz:firefoxOptions": opts } } });
   const sid = sess.sessionId;

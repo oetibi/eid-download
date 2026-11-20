@@ -12,12 +12,23 @@
 // * no innerHTML: every node is built with createElement and text goes through textContent.
 (function () {
   "use strict";
-  if (window.__eidDownloadLoaded) return;
-  window.__eidDownloadLoaded = true;
+  // The shared logic (lib/core.js, injected just before this file) is reached by its bare name.
+  // NOT window.EidCore: in Firefox a content script's globals live in its own sandbox, and
+  // `window` is the page's window seen through a wrapper, so window.EidCore was undefined there
+  // and this script stopped at once: no button on any page (owner's report, Firefox 160,
+  // 2026-11-20; Chrome, where both are the same object, was not affected).
+  const G = typeof globalThis !== "undefined" ? globalThis : window;
+  if (G.__eidDownloadLoaded) return;
+  G.__eidDownloadLoaded = true;
 
   const api = typeof browser !== "undefined" ? browser : chrome;
-  const Core = window.EidCore;
-  if (!Core || !api || !api.runtime) return;
+  // eslint-disable-next-line no-undef
+  const Core = typeof EidCore !== "undefined" ? EidCore : G.EidCore;
+  if (!Core || !api || !api.runtime) {
+    // never silently: this is the console of the page (F12)
+    console.error("Eid Download: the extension's script could not start (shared logic missing); please reinstall the extension.");
+    return;
+  }
 
   const t = (key, subs) => {
     try {
@@ -841,9 +852,24 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
     for (const v of document.getElementsByTagName("video")) track(v);
     schedule();
   };
-  // YouTube is a single-page app: its own event marks the end of a navigation
+  // YouTube is a single-page app: its own events mark the end of a navigation; the Navigation
+  // API (Chrome/Edge/Brave, newer Firefox) and popstate cover any other in-page navigation
   document.addEventListener("yt-navigate-finish", onNavigate);
+  document.addEventListener("yt-page-data-updated", onNavigate);
   window.addEventListener("popstate", onNavigate);
+  try {
+    if (typeof navigation !== "undefined" && navigation && navigation.addEventListener) {
+      let lastHref = location.href;
+      navigation.addEventListener("currententrychange", () => {
+        if (location.href !== lastHref) {
+          lastHref = location.href;
+          onNavigate();
+        }
+      });
+    }
+  } catch (_) {
+    /* no Navigation API */
+  }
 
   // settings (storage.sync) and live updates from the options page
   try {
