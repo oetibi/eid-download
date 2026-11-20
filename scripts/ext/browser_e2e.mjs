@@ -22,6 +22,7 @@
 //        [--nm-key HKCU\\...\\NativeMessagingHosts]   (Windows: the ONE registry key the stand-in
 //        host is registered under; default: that browser's known key)
 //        [--checks 1,2]   (only these checks; the others are printed as NOT RUN, never as passed)
+//        [--headed]       (Chromium-based: a normal window instead of headless)
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -141,7 +142,9 @@ async function chromium(kind) {
   const bin = arg("--bin", DEFAULT_BIN[kind]);
   const prof = path.join(TMP, "profile");
   fs.mkdirSync(prof, { recursive: true });
-  const proc = spawn(bin, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+  // --headed: a normal window (a browser that does not run headless; the runner has a desktop)
+  const headless = process.argv.includes("--headed") ? [] : ["--headless=new"];
+  const proc = spawn(bin, [...headless, "--no-sandbox", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
     "--remote-debugging-pipe", "--enable-unsafe-extension-debugging", `--user-data-dir=${prof}`, "--window-size=1280,900", "about:blank"],
   { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], env: { ...process.env, EID_STUB_LOG: STUB_LOG } });
   let err = ""; proc.stderr.on("data", (d) => { err += d; });
@@ -197,6 +200,7 @@ async function chromium(kind) {
       await sleep(500);
     },
     evaluate,
+    async shot(name) { const r = await S("Page.captureScreenshot", { format: "png" }); fs.writeFileSync(path.join(OUT, name), Buffer.from(r.data, "base64")); },
     async hover(x, y) { await S("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }); await sleep(400); },
     async overlay() {
       const { root } = await S("DOM.getDocument", { depth: -1, pierce: true });
@@ -301,6 +305,7 @@ async function firefox() {
     logs,
     async open(url) { await bidi("browsingContext.navigate", { context, url, wait: "complete" }); await sleep(800); },
     evaluate,
+    async shot(name) { const r = await bidi("browsingContext.captureScreenshot", { context }); fs.writeFileSync(path.join(OUT, name), Buffer.from(r.data, "base64")); },
     async hover(x, y) {
       await bidi("input.performActions", { context, actions: [{ type: "pointer", id: "mouse", parameters: { pointerType: "mouse" }, actions: [{ type: "pointerMove", x: Math.round(x), y: Math.round(y), duration: 0 }] }] });
       await sleep(400);
@@ -388,16 +393,24 @@ try {
     assert(left > p.x + p.w / 2 && left < p.x + p.w, `button left ${left} is not at the top-right of the player ${JSON.stringify(p)}`);
   });
 
-  await check("2. its menu asks the app (probe) and lists the qualities; 720p sends add_video with the canonical link", async () => {
+  await check("2. its menu asks the app (probe): video lines tallest first with their real details, then audio; 720p sends add_video with its exact formats and the canonical link", async () => {
     const { b } = await until(shownButton, 5000, "button");
     await B.click(b.ref);
     const q720 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-q"] === "720p"), 15000, "the 720p choice (probe through the native host)");
-    const offered = (await B.overlay()).buttons.map((x) => x.attrs["data-q"]).filter(Boolean);
-    assert(!offered.some((q) => /4320|2880/.test(q)), `8K offered: ${offered}`);
+    const bs = (await B.overlay()).buttons;
+    const offered = bs.map((x) => x.attrs["data-q"]).filter(Boolean);
+    assert(JSON.stringify(offered) === JSON.stringify(["4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]), `order: ${offered}`);
+    const text = (q) => bs.find((x) => x.attrs["data-q"] === q).text;
+    assert(/4320p/.test(text("4320p")) && /AV1/.test(text("4320p")) && /603/.test(text("4320p")), `8K line: ${text("4320p")}`);
+    assert(/HDR10/.test(text("2160p")) && !/≈/.test(text("2160p")), `4K line (HDR, no size from the app): ${text("2160p")}`);
+    assert(/60 fps/.test(text("720p")) && /H\.264/.test(text("720p")) && /with audio/.test(text("720p")), `720p line: ${text("720p")}`);
+    assert(/AAC/.test(text("m4a")) && /original/.test(text("m4a")), `m4a line: ${text("m4a")}`);
+    assert(/MP3/.test(text("audio")) && /converted/.test(text("audio")) && !/≈/.test(text("audio")), `mp3 line: ${text("audio")}`);
+    await B.shot(`menu-video-${BROWSER}.png`).catch((e) => console.log(`     (no screenshot: ${e.message})`));
     await B.click(q720.ref);
     await until(() => hoverRequests().some((r) => r.cmd === "add_video"), 10000, "add_video at the host");
     const add = hostRequests().find((r) => r.cmd === "add_video");
-    assert(add.url === "https://www.youtube.com/watch?v=AAAAAAAAAAA" && add.quality === "720p", JSON.stringify(add));
+    assert(add.url === "https://www.youtube.com/watch?v=AAAAAAAAAAA" && add.quality === "720p" && add.format === "298+140", JSON.stringify(add));
     const probe = hostRequests().find((r) => r.cmd === "probe");
     assert(probe && probe.url === "https://www.youtube.com/watch?v=AAAAAAAAAAA", JSON.stringify(probe));
   });
@@ -471,6 +484,51 @@ try {
     const r = hostRequests().find((x) => x.cmd === "open_video");
     assert(r.url === "https://www.youtube.com/watch?v=DDDDDDDDDDD&list=PLtestlist01", JSON.stringify(r));
     await until(async () => /Opened in Eid Download/.test((await B.overlay()).texts.join(" ")), 5000, "the confirmation in the menu");
+  });
+
+  await check("7. 'Download Entire Playlist' is the menu's last choice (after every video and audio line) and opens the whole playlist in the app; a headless app downloads it all directly", async () => {
+    await B.open("https://www.youtube.com/watch?v=EEEEEEEEEEE&list=PLtestlist01");
+    await B.hover(3, 3);
+    const { b } = await until(shownButton, 8000, "the button");
+    await B.click(b.ref);
+    const entire = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 15000, "'Download Entire Playlist'");
+    await until(async () => (await B.overlay()).buttons.some((x) => x.attrs["data-q"] === "audio"), 15000, "the video and audio lines");
+    const bs = (await B.overlay()).buttons;
+    await B.shot(`menu-playlist-${BROWSER}.png`).catch((e) => console.log(`     (no screenshot: ${e.message})`));
+    const last = bs[bs.length - 1];
+    assert(last.attrs["data-act"] === "entire", `last button: ${JSON.stringify(last.attrs)} ${last.text}`);
+    assert(/Download Entire Playlist/.test(entire.text) && /120/.test(entire.text), entire.text);
+    const before = hostRequests().length;
+    await B.click(entire.ref);
+    await until(() => hostRequests().slice(before).some((r) => r.cmd === "open_video"), 10000, "open_video at the host");
+    const r = hostRequests().slice(before).find((x) => x.cmd === "open_video");
+    assert(r.url === "https://www.youtube.com/playlist?list=PLtestlist01", JSON.stringify(r));
+    await until(async () => /The playlist is open in Eid Download/.test((await B.overlay()).texts.join(" ")), 5000, "the confirmation");
+    // the headless app ("no window"): the whole playlist is downloaded in one operation
+    await B.open("https://www.youtube.com/watch?v=FFFFFFFFFFF&list=PLnowindow");
+    await B.hover(3, 3);
+    const s2 = await until(shownButton, 8000, "the button");
+    await B.click(s2.b.ref);
+    const e2 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 15000, "'Download Entire Playlist'");
+    const n0 = hostRequests().length;
+    await B.click(e2.ref);
+    await until(() => hostRequests().slice(n0).some((x) => x.cmd === "add_playlist"), 10000, "add_playlist after 'no window'");
+    const ap = hostRequests().slice(n0).find((x) => x.cmd === "add_playlist");
+    assert(ap.url === "https://www.youtube.com/playlist?list=PLnowindow" && ap.items === undefined, JSON.stringify(ap));
+  });
+
+  await check("8. an app from before the details (qualities only) still works: plain lines, no exact formats sent", async () => {
+    await B.open("https://www.youtube.com/watch?v=OLDAPPOLDAP");
+    await B.hover(3, 3);
+    const { b } = await until(shownButton, 8000, "the button");
+    await B.click(b.ref);
+    const q = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-q"] === "720p"), 15000, "the 720p choice");
+    assert(!q.attrs["data-format"], JSON.stringify(q.attrs));
+    const n0 = hostRequests().length;
+    await B.click(q.ref);
+    await until(() => hostRequests().slice(n0).some((x) => x.cmd === "add_video"), 10000, "add_video");
+    const add = hostRequests().slice(n0).find((x) => x.cmd === "add_video");
+    assert(add.quality === "720p" && add.format === undefined, JSON.stringify(add));
   });
 } catch (e) {
   failed++;

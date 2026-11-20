@@ -94,5 +94,16 @@
   "optAccessOk": { "message": "Allowed. Reload the video page." },
   "menuOpenInApp": { "message": "Open in Eid Download (choose episodes, quality, folder)…" },
   "openedInApp": { "message": "Opened in Eid Download: choose there." },
-  "errNoWindow": { "message": "Only the background part of Eid Download is running. Open the Eid Download window and try again." }
+  "errNoWindow": { "message": "Only the background part of Eid Download is running. Open the Eid Download window and try again." },
+  "menuAudio": { "message": "Audio" },
+  "qM4a": { "message": "Original audio (M4A)" },
+  "optFps": { "message": "$N$ fps", "placeholders": { "n": { "content": "$1" } } },
+  "optWithAudio": { "message": "with audio" },
+  "optNoAudio": { "message": "no audio" },
+  "optOriginal": { "message": "original" },
+  "optConverted": { "message": "converted" },
+  "optKbps": { "message": "$N$ kb/s", "placeholders": { "n": { "content": "$1" } } },
+  "optSize": { "message": "≈ $S$", "placeholders": { "s": { "content": "$1" } } },
+  "menuEntirePlaylist": { "message": "Download Entire Playlist ($COUNT$ videos)", "placeholders": { "count": { "content": "$1" } } },
+  "openedPlaylistInApp": { "message": "The playlist is open in Eid Download: check the folder and quality, then Start." }
 }

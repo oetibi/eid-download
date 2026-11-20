@@ -23,7 +23,9 @@
    * Order is the display order (tallest first).
    */
   const QUALITIES = ["4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p"];
-  const SPECIAL = ["best", "audio"];
+  const SPECIAL = ["best", "m4a", "audio"];
+  /** v0.2: exact format ids from the app's own probe (`299+140`), the protocol's rule. */
+  const FORMAT_SPEC = /^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63}(\+[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63})?$/;
   const ALL_QUALITIES = QUALITIES.concat(SPECIAL);
   const MAX_HEIGHT = 4320;
 
@@ -210,7 +212,81 @@
       items.sort((a, b) => a.index - b.index);
       out.items = items;
     }
+    if (r.kind === "video") {
+      const o = normalizeOptions(r.options);
+      if (o.length) out.options = o;
+      const a = normalizeAudioOptions(r.audio_options);
+      if (a.length) out.audioOptions = a;
+    }
     return out;
+  }
+
+  function cleanFormat(f) {
+    return typeof f === "string" && FORMAT_SPEC.test(f) ? f : null;
+  }
+  function posInt(n, max) {
+    return typeof n === "number" && Number.isFinite(n) && n > 0 && n <= max ? Math.round(n) : undefined;
+  }
+
+  /**
+   * v0.2 the download menu: the app's exact video options, validated; tallest first, one per
+   * policy height, only real details (anything malformed is dropped, never guessed).
+   */
+  function normalizeOptions(list) {
+    if (!Array.isArray(list)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const o of list.slice(0, 32)) {
+      if (!o || typeof o !== "object") continue;
+      if (QUALITIES.indexOf(o.quality) === -1 || seen.has(o.quality)) continue;
+      const format = cleanFormat(o.format);
+      if (!format) continue;
+      seen.add(o.quality);
+      const x = { quality: o.quality, format, audio: o.audio === true };
+      const fps = posInt(o.fps, 1000);
+      if (fps) x.fps = fps;
+      const codec = cleanText(o.codec, 12);
+      if (codec) x.codec = codec;
+      const hdr = cleanText(o.hdr, 16);
+      if (hdr) x.hdr = hdr;
+      const size = finiteNonNeg(o.size);
+      if (size) x.size = size;
+      out.push(x);
+    }
+    return out.sort((a, b) => QUALITIES.indexOf(a.quality) - QUALITIES.indexOf(b.quality));
+  }
+
+  /** v0.2: the audio options (`m4a` original, `audio` MP3 converted), validated. */
+  function normalizeAudioOptions(list) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const q of ["m4a", "audio"]) {
+      const o = list.find((x) => x && typeof x === "object" && x.quality === q);
+      if (!o) continue;
+      const format = o.format == null ? null : cleanFormat(o.format);
+      if (q === "m4a" && (!format || format.indexOf("+") !== -1)) continue;
+      const x = { quality: q, original: q === "m4a", codec: q === "m4a" ? "AAC" : "MP3" };
+      if (format) x.format = format;
+      const kbps = posInt(o.kbps, 10000);
+      if (kbps) x.kbps = kbps;
+      const size = finiteNonNeg(o.size);
+      if (size && q === "m4a") x.size = size;
+      out.push(x);
+    }
+    return out;
+  }
+
+  /** "52.4 MB" (decimal units, as download sizes are usually shown). */
+  function fmtBytes(n) {
+    if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "";
+    const u = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0;
+    let v = n;
+    while (v >= 1000 && i < u.length - 1) {
+      v /= 1000;
+      i++;
+    }
+    return (i === 0 ? String(Math.round(v)) : v.toFixed(v < 10 ? 2 : 1)) + " " + u[i];
   }
 
   /** A fresh request id (idempotency key, see proto.rs `Request::id`). */
@@ -271,6 +347,13 @@
         if (!validHttpUrl(action.url)) throw new Error("bad_url");
         if (!isPolicyQuality(action.quality)) throw new Error("bad_quality");
         command = { cmd: "add_video", url: action.url, quality: action.quality };
+        // v0.2: the exact formats the menu line showed (only with a fixed height or m4a)
+        if (action.format !== undefined && action.format !== null) {
+          const f = cleanFormat(action.format);
+          const fixed = /^\d+p$/.test(action.quality);
+          if (!f || !(fixed || (action.quality === "m4a" && f.indexOf("+") === -1))) throw new Error("bad_format");
+          command.format = f;
+        }
         break;
       case "add_playlist": {
         if (!validHttpUrl(action.url)) throw new Error("bad_url");
@@ -515,6 +598,9 @@
     DEFAULT_SETTINGS,
     classifyUrl,
     openInAppUrl,
+    normalizeOptions,
+    normalizeAudioOptions,
+    fmtBytes,
     heightOf,
     filterQualities,
     isPolicyQuality,

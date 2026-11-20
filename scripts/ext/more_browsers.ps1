@@ -31,17 +31,22 @@ $candidates = @{
 
 $table = @()
 $works = $null
-foreach ($k in $candidates) {
-  node scripts/ext/browser_e2e.mjs --browser $Browser --bin $bin --nm-key $k --checks 1,2 --out "$Out\probe" | Out-Host
-  $ok = ($LASTEXITCODE -eq 0)
-  $table += [pscustomobject]@{ browser = "$Browser $ver"; key = $k; reached_host = $ok }
-  if ($ok -and -not $works) { $works = $k }
+$mode = @()
+# headless first; a browser that cannot run headless is tried again in a normal window
+foreach ($m in @(@(), @('--headed'))) {
+  foreach ($k in $candidates) {
+    node scripts/ext/browser_e2e.mjs --browser $Browser --bin $bin --nm-key $k --checks 1,2 --out "$Out\probe" @m | Out-Host
+    $ok = ($LASTEXITCODE -eq 0)
+    $table += [pscustomobject]@{ browser = "$Browser $ver"; mode = $(if ($m.Count) { 'window' } else { 'headless' }); key = $k; reached_host = $ok }
+    if ($ok -and -not $works) { $works = $k; $mode = $m }
+  }
+  if ($works) { break }
 }
 $table | Format-Table -AutoSize | Out-Host
 New-Item -ItemType Directory -Force $Out | Out-Null
 $table | ConvertTo-Json | Set-Content -Encoding utf8 "$Out\nm-keys-$Browser.json"
 if (-not $works) { throw "$Browser $ver did not reach the native host through any candidate key" }
 
-Write-Host "NM KEY ($Browser $ver): $works"
-node scripts/ext/browser_e2e.mjs --browser $Browser --bin $bin --nm-key $works --out $Out | Out-Host
+Write-Host "NM KEY ($Browser $ver): $works $(if ($mode.Count) { '(normal window)' } else { '(headless)' })"
+node scripts/ext/browser_e2e.mjs --browser $Browser --bin $bin --nm-key $works --out $Out @mode | Out-Host
 if ($LASTEXITCODE -ne 0) { exit 1 }

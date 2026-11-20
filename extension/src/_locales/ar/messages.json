@@ -94,5 +94,16 @@
   "optAccessOk": { "message": "تم السماح. أعد تحميل صفحة الفيديو." },
   "menuOpenInApp": { "message": "فتح في Eid Download (اختيار الحلقات والجودة والمجلد)…" },
   "openedInApp": { "message": "فُتح في Eid Download: اختر هناك." },
-  "errNoWindow": { "message": "يعمل الجزء الخلفي من Eid Download فقط. افتح نافذة Eid Download ثم حاول مجدداً." }
+  "errNoWindow": { "message": "يعمل الجزء الخلفي من Eid Download فقط. افتح نافذة Eid Download ثم حاول مجدداً." },
+  "menuAudio": { "message": "الصوت" },
+  "qM4a": { "message": "الصوت الأصلي (M4A)" },
+  "optFps": { "message": "$N$ إطاراً/ث", "placeholders": { "n": { "content": "$1" } } },
+  "optWithAudio": { "message": "مع الصوت" },
+  "optNoAudio": { "message": "بلا صوت" },
+  "optOriginal": { "message": "أصلي" },
+  "optConverted": { "message": "محوَّل" },
+  "optKbps": { "message": "$N$ كيلوبت/ث", "placeholders": { "n": { "content": "$1" } } },
+  "optSize": { "message": "≈ $S$", "placeholders": { "s": { "content": "$1" } } },
+  "menuEntirePlaylist": { "message": "تنزيل قائمة التشغيل كاملة ($COUNT$ فيديو)", "placeholders": { "count": { "content": "$1" } } },
+  "openedPlaylistInApp": { "message": "فُتحت قائمة التشغيل في Eid Download: راجع المجلد والجودة ثم اضغط «ابدأ»." }
 }

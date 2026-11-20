@@ -105,7 +105,7 @@ test("filterQualities: tallest first, 4320p cap, nothing above 8K, no unknowns, 
     assert.ok(h === null || h <= C.MAX_HEIGHT, q);
   }
   assert.equal(C.MAX_HEIGHT, 4320);
-  assert.deepEqual(C.ALL_QUALITIES, ["4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p", "best", "audio"]);
+  assert.deepEqual(C.ALL_QUALITIES, ["4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p", "best", "m4a", "audio"]);
 });
 
 test("normalizeProbe: validates shape, filters qualities, cleans text, bounds items", () => {
@@ -425,4 +425,52 @@ test("v0.2 open_video: one checked address; 'Open in Eid Download' sends the vid
   assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/")), null);
   assert.equal(C.openInAppUrl(C.classifyUrl("https://example.com/v.mp4")), null);
   assert.equal(C.classifyError("no window: this is the background server; open Eid Download and use Video"), "no_window");
+});
+
+test("v0.2 download menu: options validated, tallest first, only real details; add_video carries the exact formats", () => {
+  const o = C.normalizeOptions([
+    { quality: "360p", format: "18", fps: 30, codec: "H.264", audio: true, size: 9000000 },
+    { quality: "4320p", format: "402+140", fps: 60, codec: "AV1", hdr: null, audio: true, size: 603000000 },
+    { quality: "2160p", format: "337+140", fps: 60, codec: "VP9", hdr: "HDR10", audio: true },
+    { quality: "1080p", format: "bv*+ba/b", fps: 60 },
+    { quality: "720p", format: "298+140", fps: -1, codec: "<b>x</b>\u202e", audio: "yes", size: NaN },
+    { quality: "8640p", format: "1" },
+    { quality: "360p", format: "134+140" },
+    null, 7, "x",
+  ]);
+  assert.deepEqual(o.map((x) => x.quality), ["4320p", "2160p", "720p", "360p"]);
+  assert.deepEqual(o[0], { quality: "4320p", format: "402+140", fps: 60, codec: "AV1", audio: true, size: 603000000 });
+  assert.equal(o[1].hdr, "HDR10");
+  assert.equal(o[1].size, undefined, "no size from the app: none shown");
+  assert.deepEqual(o[2], { quality: "720p", format: "298+140", codec: "<b>x</b>", audio: false }, "bad fps/size dropped; 'audio' only when true");
+  assert.equal(o[3].format, "18", "the first line of a quality wins");
+  assert.deepEqual(C.normalizeOptions("x"), []);
+  const a = C.normalizeAudioOptions([
+    { quality: "audio", original: false, format: null, codec: "MP3", kbps: 129, size: 5 },
+    { quality: "m4a", original: true, format: "140", codec: "AAC", kbps: 129.4, size: 3000000 },
+  ]);
+  assert.deepEqual(a, [
+    { quality: "m4a", original: true, codec: "AAC", format: "140", kbps: 129, size: 3000000 },
+    { quality: "audio", original: false, codec: "MP3", kbps: 129 },
+  ], "MP3 never shows a size (unknown before converting)");
+  assert.deepEqual(C.normalizeAudioOptions([{ quality: "m4a", format: "137+140" }]), []);
+  const p = C.normalizeProbe({ kind: "video", title: "T", qualities: ["1080p", "m4a", "audio"], options: [{ quality: "1080p", format: "299+140", audio: true }], audio_options: [{ quality: "m4a", format: "140" }] });
+  assert.deepEqual(p.qualities, ["1080p", "m4a", "audio"]);
+  assert.equal(p.options[0].format, "299+140");
+  assert.equal(p.audioOptions[0].format, "140");
+  assert.equal(C.normalizeProbe({ kind: "playlist", title: "L", qualities: [], items: [], options: [{ quality: "1080p", format: "1" }] }).options, undefined);
+  // the request
+  const W = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  assert.deepEqual(C.buildRequest({ cmd: "add_video", url: W, quality: "1080p", format: "299+140" }, "ext-1").command,
+    { cmd: "add_video", url: W, quality: "1080p", format: "299+140" });
+  assert.deepEqual(C.buildRequest({ cmd: "add_video", url: W, quality: "m4a", format: "140" }, "ext-1").command,
+    { cmd: "add_video", url: W, quality: "m4a", format: "140" });
+  assert.deepEqual(C.buildRequest({ cmd: "add_video", url: W, quality: "720p" }, "ext-1").command,
+    { cmd: "add_video", url: W, quality: "720p" }, "no format: the field is not sent (older apps)");
+  for (const [q, f] of [["best", "299+140"], ["audio", "140"], ["1080p", "bv*+ba"], ["m4a", "137+140"], ["1080p", "1+2+3"], ["1080p", 7]]) {
+    assert.throws(() => C.buildRequest({ cmd: "add_video", url: W, quality: q, format: f }, "ext-1"), /bad_format/, `${q} ${f}`);
+  }
+  assert.equal(C.fmtBytes(52428800), "52.4 MB");
+  assert.equal(C.fmtBytes(3000000), "3.00 MB");
+  assert.equal(C.fmtBytes(0), "");
 });

@@ -108,8 +108,8 @@
 .btn:hover, .btn:focus-visible { opacity: 1; transform: translateY(-1px); }
 .btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .ico { width: calc(var(--px) * .56); height: calc(var(--px) * .56); flex: none; }
-.menu { position: fixed; pointer-events: auto; display: none; width: 300px; max-width: calc(100vw - 16px);
-  max-height: min(420px, calc(100vh - 16px)); overflow: auto; background: #fff; color: #111827;
+.menu { position: fixed; pointer-events: auto; display: none; width: 420px; max-width: calc(100vw - 16px);
+  max-height: min(600px, calc(100vh - 16px)); overflow: auto; background: #fff; color: #111827;
   border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.35); padding: 6px 0; }
 .menu.open { display: block; }
 .head { display: flex; align-items: center; gap: 8px; padding: 6px 12px 8px; border-bottom: 1px solid #e5e7eb; }
@@ -123,6 +123,16 @@
   text-align: start; padding: 7px 12px; cursor: pointer; font: inherit; color: inherit; }
 .it:hover, .it:focus-visible { background: #f0fdfa; outline: none; }
 .it[disabled] { opacity: .5; cursor: default; }
+.it { padding: 6px 12px; }
+.it .q { font-weight: 600; min-width: 7.6em; flex: none; }
+.it .meta { flex: 1; color: #6b7280; font-size: 12px; line-height: 1.35; }
+.it .sz { flex: none; color: #374151; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; margin-inline-start: auto; }
+.link { white-space: nowrap; }
+.row .grow { flex: 1; }
+/* the playlist part stays visible at the bottom of the menu while the qualities scroll */
+.pl { position: sticky; bottom: -6px; background: #fff; border-top: 2px solid #99f6e4 !important;
+  margin-top: 2px; padding-bottom: 8px; box-shadow: 0 -8px 14px -10px rgba(0,0,0,.3); }
+.entire { font-size: 14px; }
 .muted { padding: 6px 12px; color: #6b7280; }
 .err { padding: 6px 12px; color: #b91c1c; }
 .ok { padding: 6px 12px; color: #15803d; }
@@ -144,7 +154,9 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
   .head, .sec + .sec, .list { border-color: #374151; }
   .x:hover, .pick:hover { background: #374151; color: #f3f4f6; }
   .it:hover, .it:focus-visible { background: #134e4a; }
-  .lbl, .muted, .pick .n, .pick .d { color: #9ca3af; }
+  .lbl, .muted, .pick .n, .pick .d, .it .meta { color: #9ca3af; }
+  .it .sz { color: #d1d5db; }
+  .pl { border-top-color: #115e59 !important; background: #1f2937; }
   select { background: #111827; border-color: #4b5563; }
   .link { color: #5eead4; }
   .err { color: #fca5a5; } .ok { color: #86efac; }
@@ -212,7 +224,20 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
       if (e.key === "Escape") {
         closeMenu();
         btn.focus();
+        return;
       }
+      // v0.2: Up/Down/Home/End move between the menu's choices (keyboard use)
+      if (!menuOpen || !["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+      const all = [...menu.querySelectorAll("button:not([disabled])")];
+      if (!all.length) return;
+      const i = all.indexOf(root.activeElement);
+      const n =
+        e.key === "Home" ? 0
+        : e.key === "End" ? all.length - 1
+        : e.key === "ArrowDown" ? (i + 1) % all.length
+        : (i - 1 + all.length) % all.length;
+      all[n].focus();
+      e.preventDefault();
     });
     wrap.addEventListener("pointerenter", () => clearTimeout(hideTimer), true);
     ui = { root, wrap, btn, btnText, menu };
@@ -505,7 +530,32 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
     "360p": "q360",
     "240p": "q240",
     "144p": "q144",
+    m4a: "qM4a",
   };
+
+  /** v0.2: "MP4 · 60 fps · H.264 · with audio": only what the app's probe gave. */
+  function videoMeta(o) {
+    const out = ["MP4"];
+    if (o.fps) out.push(t("optFps", [String(o.fps)]));
+    if (o.codec) out.push(o.codec);
+    if (o.hdr) out.push(o.hdr);
+    out.push(o.audio ? t("optWithAudio") : t("optNoAudio"));
+    return out.join(" · ");
+  }
+  function audioMeta(o) {
+    const out = [o.original ? "M4A · " + o.codec : "MP3", o.original ? t("optOriginal") : t("optConverted")];
+    if (o.kbps) out.push(t("optKbps", [String(o.kbps)]));
+    return out.join(" · ");
+  }
+  /** One choice of the menu: the quality in bold, its details, the size (when known) at the end. */
+  function choice(q, meta, onClick, extra, size) {
+    const sz = size ? t("optSize", [Core.fmtBytes(size)]) : "";
+    const kids = [h("span", { class: "q", text: t(Q_KEYS[q]) })];
+    if (meta) kids.push(h("span", { class: "meta", text: meta }));
+    if (sz) kids.push(h("span", { class: "sz", text: sz }));
+    const title = [meta, sz].filter(Boolean).join(" · ");
+    return h("button", Object.assign({ class: "it", type: "button", "data-q": q, title, on: { click: onClick } }, extra || {}), kids);
+  }
   // the menu lists "best" first, then heights from tall to short, then audio
   function menuOrder(qs) {
     const f = Core.filterQualities(qs);
@@ -620,13 +670,18 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
     const vbody = h("div");
     vsec.appendChild(vbody);
     m.appendChild(vsec);
+    // v0.2: audio in its own part (the original stream, and MP3 converted)
+    const abody = h("div");
+    const asec = h("div", { class: "sec", hidden: true }, [h("div", { class: "lbl", text: t("menuAudio") }), abody]);
+    m.appendChild(asec);
 
     let psec = null;
     let pbody = null;
     if (cls.playlistUrl) {
+      // v0.2 (owner's request): the whole playlist at the very bottom, after every video and
+      // audio choice, clearly separated
       pbody = h("div");
-      psec = h("div", { class: "sec" }, [h("div", { class: "lbl", text: t("menuPlaylist") }), pbody]);
-      m.appendChild(psec);
+      psec = h("div", { class: "sec pl" }, [h("div", { class: "lbl", text: t("menuPlaylist") }), pbody]);
     }
     // v0.2: the same page in the app's own Video window (this video or the whole playlist,
     // episodes, range, quality, folder): owner's request 2026-11-20
@@ -651,6 +706,7 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
         ]),
       );
     }
+    if (psec) m.appendChild(psec);
     m.appendChild(status);
     setStatus("", "");
 
@@ -670,18 +726,31 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
           return;
         }
         if (r.result.title) hd.ttl.textContent = r.result.title;
-        const qs = menuOrder(r.result.qualities);
-        if (!qs.length) vbody.appendChild(h("div", { class: "err", text: errText("no_qualities") }));
-        for (const q of qs) {
-          vbody.appendChild(
-            h("button", {
-              class: "it",
-              type: "button",
-              "data-q": q,
-              text: t(Q_KEYS[q]),
-              on: { click: () => act({ cmd: "add_video", url: cls.videoUrl, quality: q }) },
-            }),
-          );
+        const opts = r.result.options || [];
+        const aopts = r.result.audioOptions || [];
+        if (opts.length) {
+          // v0.2: each line is an exact pair of formats with its real details, tallest first
+          for (const o of opts) {
+            vbody.appendChild(
+              choice(o.quality, videoMeta(o), () => act({ cmd: "add_video", url: cls.videoUrl, quality: o.quality, format: o.format }), { "data-format": o.format }, o.size),
+            );
+          }
+          for (const o of aopts) {
+            abody.appendChild(
+              choice(o.quality, audioMeta(o), () => act(o.format ? { cmd: "add_video", url: cls.videoUrl, quality: o.quality, format: o.format } : { cmd: "add_video", url: cls.videoUrl, quality: o.quality }), null, o.size),
+            );
+          }
+          if (!aopts.length && r.result.qualities.indexOf("audio") !== -1) {
+            abody.appendChild(choice("audio", "", () => act({ cmd: "add_video", url: cls.videoUrl, quality: "audio" })));
+          }
+          asec.hidden = !abody.childNodes.length;
+        } else {
+          // an app without details (older versions): the qualities alone, as before
+          const qs = menuOrder(r.result.qualities);
+          if (!qs.length) vbody.appendChild(h("div", { class: "err", text: errText("no_qualities") }));
+          for (const q of qs) {
+            vbody.appendChild(choice(q, "", () => act({ cmd: "add_video", url: cls.videoUrl, quality: q })));
+          }
         }
         placeMenu();
       });
@@ -717,32 +786,38 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
           }
           const sel = h("select", { "aria-label": t("menuPlaylistQuality") });
           for (const q of qs) sel.appendChild(h("option", { value: q, text: t(Q_KEYS[q]) }));
+          const n = String(pl.items.length);
           pbody.appendChild(
             h("div", { class: "row" }, [
-              h("span", { class: "tt", text: (pl.title ? pl.title + " · " : "") + t("menuPlaylistCount", [String(pl.items.length)]) }),
+              h("span", { class: "tt", text: (pl.title ? pl.title + " · " : "") + t("menuPlaylistCount", [n]) }),
             ]),
           );
           pbody.appendChild(
-            h("div", { class: "row" }, [h("span", { text: t("menuPlaylistQuality") }), sel]),
+            h("div", { class: "row" }, [
+              h("span", { text: t("menuPlaylistQuality") }),
+              sel,
+              h("span", { class: "grow" }),
+              h("button", { class: "link", type: "button", "data-act": "choose", text: t("menuChooseItems"), on: { click: () => renderPicker(cls.playlistUrl, pl, sel.value) } }),
+            ]),
           );
+          // the last choice of the menu: every video of the playlist in one operation. The
+          // app's Playlist window opens with all of them ticked (folder, range, quality, file
+          // names there); a headless app without a window downloads them all directly.
           pbody.appendChild(
             h("button", {
-              class: "it",
+              class: "it primary entire",
               type: "button",
-              "data-act": "whole",
-              text: t("menuWholePlaylist"),
+              "data-act": "entire",
+              text: t("menuEntirePlaylist", [n]),
               on: {
-                click: () => act({ cmd: "add_playlist", url: cls.playlistUrl, quality: sel.value, if_missing: settings.ifMissing }),
+                click: async () => {
+                  setStatus("muted", t("sending"));
+                  const r = await send({ cmd: "open_video", url: cls.playlistUrl });
+                  if (r.ok) setStatus("ok", t("openedPlaylistInApp"));
+                  else if (r.code === "no_window") await act({ cmd: "add_playlist", url: cls.playlistUrl, quality: sel.value, if_missing: settings.ifMissing });
+                  else setStatus("err", errText(r.code));
+                },
               },
-            }),
-          );
-          pbody.appendChild(
-            h("button", {
-              class: "it",
-              type: "button",
-              "data-act": "choose",
-              text: t("menuChooseItems"),
-              on: { click: () => renderPicker(cls.playlistUrl, pl, sel.value) },
             }),
           );
           placeMenu();

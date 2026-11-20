@@ -67,6 +67,7 @@ async function handle(msg) {
   if (msg.quality !== undefined) action.quality = msg.quality;
   if (msg.items !== undefined) action.items = msg.items;
   if (msg.if_missing !== undefined) action.if_missing = msg.if_missing;
+  if (msg.format !== undefined) action.format = msg.format;
   const r = await nativeCall(action);
   // results of add* are opaque to the page ({job}); never forward more than ok/code
   return r.ok ? { ok: true } : { ok: false, code: r.code };
