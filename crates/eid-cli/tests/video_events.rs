@@ -172,7 +172,7 @@ async fn playlist_events_and_items_selection() {
         .filter(|n| !n.starts_with('.'))
         .collect();
     files.sort();
-    assert_eq!(files, ["01 - Alpha.mp4", "03 - Gamma.mp4"]);
+    assert_eq!(files, ["001 - Alpha.mp4", "003 - Gamma.mp4"]);
     // the same command again: finished items are not downloaded again, the plan says done
     let before = e.calls().len();
     let o = e

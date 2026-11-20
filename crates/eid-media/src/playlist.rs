@@ -3,8 +3,10 @@
 //! The state lives inside the playlist folder in `.eid-playlist.json` (private, checksummed,
 //! bounded, validated and confined on load; D13). Rules:
 //!
-//! 1. the number width is fixed at the first download: 2 if the playlist has at most 99 items,
-//!    otherwise 3; it never changes;
+//! 1. the number width is fixed at the first download: 3 digits (`001`), or as many as the
+//!    item count needs beyond 999; it never changes (v0.2, owner's request 2026-11-20: names
+//!    like `001 - Episode Title.mp4`; a folder started earlier with 2 digits keeps them, so no
+//!    file is ever renamed);
 //! 2. an item's number is its position when it is first seen; it never changes and is never
 //!    reused (also when the item later disappears or becomes private);
 //! 3. on sync, new items get `max + 1`, in the order they appear (items added at the top do
@@ -278,7 +280,7 @@ pub fn plan<'a>(
         }
         None => State {
             playlist_id: playlist_id.to_string(),
-            width: if distinct.len() <= 99 { 2 } else { 3 },
+            width: (distinct.len().max(1).ilog10() + 1).clamp(3, 7) as u8,
             items: vec![],
         },
     };
@@ -497,7 +499,8 @@ mod tests {
     fn numbering_follows_the_d8_rules() {
         let list: Vec<Entry> = ["a", "b", "a", "c"].iter().map(|x| e(x)).collect();
         let (st, planned) = plan(None, "pl", &list).unwrap();
-        assert_eq!(st.width, 2);
+        // v0.2 (owner, 2026-11-20): new playlists get 3 digits: "001 - Episode Title.mp4"
+        assert_eq!(st.width, 3);
         assert_eq!(
             numbers(&st),
             [("a".into(), 1), ("b".into(), 2), ("c".into(), 3)]
@@ -521,6 +524,14 @@ mod tests {
         assert!(plan(Some(st3), "other", &list).is_err());
         let many: Vec<Entry> = (0..100).map(|i| e(&format!("i{i}"))).collect();
         assert_eq!(plan(None, "pl", &many).unwrap().0.width, 3);
+        let more: Vec<Entry> = (0..1000).map(|i| e(&format!("i{i}"))).collect();
+        assert_eq!(plan(None, "pl", &more).unwrap().0.width, 4);
+        // a folder started with 2 digits keeps them (no file is ever renamed)
+        let old = State {
+            width: 2,
+            ..st.clone()
+        };
+        assert_eq!(plan(Some(old), "pl", &list).unwrap().0.width, 2);
         assert_eq!(item_name(2, 7, "x", "mp4"), "07 - x.mp4");
         assert_eq!(item_name(2, 100, "x", "mp4"), "100 - x.mp4");
         assert_eq!(item_name(3, 7, "", "mp3"), "007 - video.mp3");

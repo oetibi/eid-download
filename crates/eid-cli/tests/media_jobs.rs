@@ -162,9 +162,9 @@ async fn body() {
         .collect();
     assert_eq!(states, ["done", "skipped", "done"]);
     let folder = e.out().join("Mix");
-    assert!(folder.join("01 - Alpha.mp4").is_file());
-    assert!(folder.join("03 - Gamma.mp4").is_file());
-    assert!(!folder.join("02 - Beta.mp4").exists());
+    assert!(folder.join("001 - Alpha.mp4").is_file());
+    assert!(folder.join("003 - Gamma.mp4").is_file());
+    assert!(!folder.join("002 - Beta.mp4").exists());
 
     phase("pause/resume");
     // a long-running job: pause stops the child, resume starts it again, remove stops it

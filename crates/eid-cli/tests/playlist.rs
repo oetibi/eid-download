@@ -195,16 +195,16 @@ async fn playlist_selects_every_item_by_default_with_one_quality_and_a_deselecte
     assert!(o.status.success(), "{}", text(&o));
     let plan = String::from_utf8_lossy(&o.stdout).into_owned();
     let line = |n: &str| plan.lines().find(|l| l.starts_with(n)).unwrap().to_string();
-    assert!(line("01").contains("to download"), "{plan}");
-    assert!(line("02").contains("deselected"), "{plan}");
-    assert!(line("03").contains("to download"), "{plan}");
+    assert!(line("001").contains("to download"), "{plan}");
+    assert!(line("002").contains("deselected"), "{plan}");
+    assert!(line("003").contains("to download"), "{plan}");
     assert!(download_ids(&e.calls()).is_empty(), "--list downloaded");
     let folder = e.out().join("Mix");
     assert!(visible(&folder).is_empty());
     // item 2 is skipped; all others use the one chosen quality
     let o = playlist(&e, &url, &["--skip", "2", "--quality", "720p", "-q"]).await;
     assert!(o.status.success(), "{}", text(&o));
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "03 - Gamma.mp4"]);
+    assert_eq!(visible(&folder), ["001 - Alpha.mp4", "003 - Gamma.mp4"]);
     let calls = e.calls();
     assert_eq!(download_ids(&calls), ["a", "c"]);
     let formats: std::collections::HashSet<String> = calls
@@ -229,7 +229,7 @@ async fn playlist_selects_every_item_by_default_with_one_quality_and_a_deselecte
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(
         visible(&folder),
-        ["01 - Alpha.mp4", "02 - Beta.mp4", "03 - Gamma.mp4"]
+        ["001 - Alpha.mp4", "002 - Beta.mp4", "003 - Gamma.mp4"]
     );
     assert_eq!(download_ids(&e.calls()), ["a", "c", "b"]);
     for f in visible(&folder) {
@@ -284,7 +284,7 @@ async fn playlist_folder_name_is_sanitized_and_confined() {
             !["CON", "NUL"].contains(&stem.as_str()),
             "reserved: {name:?}"
         );
-        assert_eq!(visible(&folder), ["01 - Alpha.mp4"], "{t:?}");
+        assert_eq!(visible(&folder), ["001 - Alpha.mp4"], "{t:?}");
     }
     // nothing was created beside the output folder
     let mut top = entries(e.root.path());
@@ -362,19 +362,20 @@ async fn playlist_numbering_is_zero_padded_in_playlist_order() {
     let folder = folder_of(&o);
     let names = visible(&folder);
     assert_eq!(names.len(), 5, "{names:?}");
-    assert_eq!(names[0], "01 - Same.mp4");
-    assert_eq!(names[1], "02 - Same.mp4");
-    assert_eq!(names[2], "03 - عنوان عربي.mp4");
+    assert_eq!(names[0], "001 - Same.mp4");
+    assert_eq!(names[1], "002 - Same.mp4");
+    assert_eq!(names[2], "003 - عنوان عربي.mp4");
     assert!(
-        names[3].starts_with("04 - ") && names[3].ends_with(".mp4"),
+        names[3].starts_with("004 - ") && names[3].ends_with(".mp4"),
         "{names:?}"
     );
-    assert_eq!(names[4], "05 - _CON.mp4");
+    assert_eq!(names[4], "005 - _CON.mp4");
     for n in &names {
         assert!(!n.contains(['/', '\\', ':']) && !has_bidi(n), "{n:?}");
         assert_eq!(folder.join(n).parent().unwrap(), folder);
     }
-    assert_eq!(state_json(&folder)["width"], 2);
+    // v0.2 (owner, 2026-11-20): at least three digits, "001 - Episode Title.mp4"
+    assert_eq!(state_json(&folder)["width"], 3);
     // 120 items: three digits, in the order of the list, one tool call per item
     let list = write_list(&e, &items(120, |_| "T".into()));
     let o = playlist(&e, &purl(&e, &list, "big", "Big", ""), &["-q"]).await;
@@ -420,7 +421,7 @@ async fn playlist_kill_then_resume_skips_finished_items() {
     stop_eid(eid, pid).await;
     let folder = e.out().join("Resume");
     // item a is finished and published; b is partial in its staging folder; c never started
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4"]);
+    assert_eq!(visible(&folder), ["001 - Alpha.mp4"]);
     assert_eq!(item_state(&folder, "a")["status"], "done");
     assert_eq!(staging_dirs(&folder).len(), 1);
     let half = part.metadata().unwrap().len();
@@ -440,7 +441,7 @@ async fn playlist_kill_then_resume_skips_finished_items() {
     assert_eq!(b["resumed_from"], half, "b was not continued");
     assert_eq!(
         visible(&folder),
-        ["01 - Alpha.mp4", "02 - Beta.mp4", "03 - Gamma.mp4"]
+        ["001 - Alpha.mp4", "002 - Beta.mp4", "003 - Gamma.mp4"]
     );
     assert!(staging_dirs(&folder).is_empty());
     for f in visible(&folder) {
@@ -489,11 +490,11 @@ async fn playlist_sync_downloads_only_new_items_via_the_archive() {
     assert_eq!(
         visible(&folder),
         [
-            "01 - Alpha.mp4",
-            "02 - Beta.mp4",
-            "03 - Gamma.mp4",
-            "04 - Xray.mp4",
-            "05 - Yankee.mp4"
+            "001 - Alpha.mp4",
+            "002 - Beta.mp4",
+            "003 - Gamma.mp4",
+            "004 - Xray.mp4",
+            "005 - Yankee.mp4"
         ]
     );
     // every download goes through the archive inside the playlist folder
@@ -571,7 +572,7 @@ async fn playlist_lost_state_with_archive_and_numbered_files_is_refused() {
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(
         visible(&folder),
-        ["01 - Alpha.mp4", "02 - Beta.mp4", "03 - Gamma.mp3"]
+        ["001 - Alpha.mp4", "002 - Beta.mp4", "003 - Gamma.mp3"]
     );
     assert!(!std::fs::read_to_string(folder.join(".eid-archive.txt"))
         .unwrap()
@@ -602,7 +603,7 @@ async fn playlist_lost_state_with_archive_and_numbered_files_is_refused() {
         for want in [
             ".eid-playlist.json is missing",
             "download archive",
-            "3 numbered file(s) (01 - Alpha.mp4, 02 - Beta.mp4, 03 - Gamma.mp3)",
+            "3 numbered file(s) (001 - Alpha.mp4, 002 - Beta.mp4, 003 - Gamma.mp3)",
             "nothing was downloaded",
             "from a backup",
             "-d <another folder>",
@@ -658,10 +659,10 @@ async fn playlist_lost_state_with_archive_and_numbered_files_is_refused() {
     assert_eq!(
         visible(&folder_of(&o)),
         [
-            "01 - Zulu.mp4",
-            "02 - Alpha.mp4",
-            "03 - Beta.mp4",
-            "04 - Gamma.mp4"
+            "001 - Zulu.mp4",
+            "002 - Alpha.mp4",
+            "003 - Beta.mp4",
+            "004 - Gamma.mp4"
         ]
     );
     // the old folder was left exactly as it was (the archive was moved aside by this test)
@@ -679,7 +680,7 @@ async fn playlist_lost_state_message_neutralises_names_and_list_survives_an_odd_
     let url = purl(&e, &list, "pl-m3d", "Odd", "");
     let folder = e.out().join("Odd");
     std::fs::create_dir(&folder).unwrap();
-    let hostile = "01 - \u{202E}4pm.exe\u{200F}\u{2028}\u{200B}\u{061C}x\u{85}y.mp4";
+    let hostile = "001 - \u{202E}4pm.exe\u{200F}\u{2028}\u{200B}\u{061C}x\u{85}y.mp4";
     std::fs::write(folder.join(hostile), b"mine").unwrap();
     let outside = e.root.path().join("archive-elsewhere.txt");
     std::fs::write(&outside, b"fake old\n").unwrap();
@@ -697,7 +698,7 @@ async fn playlist_lost_state_message_neutralises_names_and_list_survives_an_odd_
     assert_eq!(o.status.code(), Some(1), "{t}");
     assert!(t.contains("download archive"), "{t}");
     assert!(
-        t.contains("1 numbered file(s) (01 - ?4pm.exe????x?y.mp4)"),
+        t.contains("1 numbered file(s) (001 - ?4pm.exe????x?y.mp4)"),
         "{t}"
     );
     for bad in [
@@ -740,7 +741,7 @@ async fn playlist_lost_state_restored_from_backup_continues_with_the_old_numbers
     assert_eq!(download_ids(&e.calls()[before..]), ["z"]);
     assert_eq!(
         visible(&folder),
-        ["01 - Alpha.mp4", "02 - Beta.mp4", "03 - Zulu.mp4"]
+        ["001 - Alpha.mp4", "002 - Beta.mp4", "003 - Zulu.mp4"]
     );
 }
 
@@ -759,7 +760,7 @@ async fn playlist_without_state_in_a_folder_without_earlier_runs_starts_normally
     assert_eq!(folder_of(&o), folder);
     assert_eq!(
         visible(&folder),
-        ["01 - Alpha.mp4", "02 - Beta.mp4", "notes.txt"]
+        ["001 - Alpha.mp4", "002 - Beta.mp4", "notes.txt"]
     );
     assert_eq!(std::fs::read(folder.join("notes.txt")).unwrap(), b"mine");
 }
@@ -775,7 +776,7 @@ async fn numbering_is_stable_when_new_items_are_prepended() {
     assert!(o.status.success(), "{}", text(&o));
     let folder = folder_of(&o);
     let snapshot = |f: &str| hex(&std::fs::read(folder.join(f)).unwrap());
-    let a_hash = snapshot("01 - Alpha.mp4");
+    let a_hash = snapshot("001 - Alpha.mp4");
     // a new item on top does not shift the old ones: it takes the next free number
     write_list(
         &e,
@@ -785,9 +786,9 @@ async fn numbering_is_stable_when_new_items_are_prepended() {
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(
         visible(&folder),
-        ["01 - Alpha.mp4", "02 - Beta.mp4", "03 - Zulu.mp4"]
+        ["001 - Alpha.mp4", "002 - Beta.mp4", "003 - Zulu.mp4"]
     );
-    assert_eq!(snapshot("01 - Alpha.mp4"), a_hash);
+    assert_eq!(snapshot("001 - Alpha.mp4"), a_hash);
     // an item that disappears keeps its number and file; its number is never reused
     write_list(
         &e,
@@ -798,10 +799,10 @@ async fn numbering_is_stable_when_new_items_are_prepended() {
     assert_eq!(
         visible(&folder),
         [
-            "01 - Alpha.mp4",
-            "02 - Beta.mp4",
-            "03 - Zulu.mp4",
-            "04 - Quebec.mp4"
+            "001 - Alpha.mp4",
+            "002 - Beta.mp4",
+            "003 - Zulu.mp4",
+            "004 - Quebec.mp4"
         ]
     );
     assert_eq!(item_state(&folder, "b")["number"], 2);
@@ -825,34 +826,36 @@ async fn numbering_is_stable_when_new_items_are_prepended() {
 async fn growing_past_99_keeps_old_names_and_never_collides() {
     let e = Env::new().await;
     let url = purl(&e, &e.root.path().join("list.json"), "pl7", "Grow", "");
-    // deselect all but the last two so the test stays fast; numbers are kept for every item
-    let skip: Vec<String> = (1..=97).map(|n| n.to_string()).collect();
+    // v0.2: new playlists get at least 3 digits, so "past the width" is now past 999 (the
+    // test keeps its name, listed in required_tests.txt). Deselect all but the last two so the
+    // test stays fast; numbers are kept for every item
+    let skip: Vec<String> = (1..=997).map(|n| n.to_string()).collect();
     let skip = skip.join(",");
-    write_list(&e, &items(99, |i| format!("T{i}")));
+    write_list(&e, &items(999, |i| format!("T{i}")));
     let o = playlist(&e, &url, &["--skip", &skip, "-q"]).await;
     assert!(o.status.success(), "{}", text(&o));
     let folder = folder_of(&o);
-    assert_eq!(visible(&folder), ["98 - T98.mp4", "99 - T99.mp4"]);
-    assert_eq!(state_json(&folder)["width"], 2, "99 items: two digits");
-    let old: Vec<String> = ["98 - T98.mp4", "99 - T99.mp4"]
+    assert_eq!(visible(&folder), ["998 - T998.mp4", "999 - T999.mp4"]);
+    assert_eq!(state_json(&folder)["width"], 3, "999 items: three digits");
+    let old: Vec<String> = ["998 - T998.mp4", "999 - T999.mp4"]
         .iter()
         .map(|f| hex(&std::fs::read(folder.join(f)).unwrap()))
         .collect();
-    // the list grows to 101: the width stays 2, the new numbers keep their natural digits
-    write_list(&e, &items(101, |i| format!("T{i}")));
+    // the list grows to 1001: the width stays 3, the new numbers keep their natural digits
+    write_list(&e, &items(1001, |i| format!("T{i}")));
     let o = playlist(&e, &url, &["--skip", &skip, "-q"]).await;
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(
         visible(&folder),
         [
-            "100 - T100.mp4",
-            "101 - T101.mp4",
-            "98 - T98.mp4",
-            "99 - T99.mp4"
+            "1000 - T1000.mp4",
+            "1001 - T1001.mp4",
+            "998 - T998.mp4",
+            "999 - T999.mp4"
         ]
     );
-    assert_eq!(state_json(&folder)["width"], 2, "the width never changes");
-    for (f, h) in ["98 - T98.mp4", "99 - T99.mp4"].iter().zip(old) {
+    assert_eq!(state_json(&folder)["width"], 3, "the width never changes");
+    for (f, h) in ["998 - T998.mp4", "999 - T999.mp4"].iter().zip(old) {
         assert_eq!(
             hex(&std::fs::read(folder.join(f)).unwrap()),
             h,
@@ -861,20 +864,20 @@ async fn growing_past_99_keeps_old_names_and_never_collides() {
     }
     // a foreign file already carrying the next name is never overwritten: the item gets the
     // collision suffix and the real name is recorded
-    std::fs::write(folder.join("102 - T102.mp4"), b"foreign").unwrap();
-    write_list(&e, &items(102, |i| format!("T{i}")));
+    std::fs::write(folder.join("1002 - T1002.mp4"), b"foreign").unwrap();
+    write_list(&e, &items(1002, |i| format!("T{i}")));
     let o = playlist(&e, &url, &["--skip", &skip, "-q"]).await;
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(
-        std::fs::read(folder.join("102 - T102.mp4")).unwrap(),
+        std::fs::read(folder.join("1002 - T1002.mp4")).unwrap(),
         b"foreign"
     );
-    let recorded = item_state(&folder, "i102")["file"]
+    let recorded = item_state(&folder, "i1002")["file"]
         .as_str()
         .unwrap()
         .to_string();
-    assert_ne!(recorded, "102 - T102.mp4");
-    assert!(recorded.starts_with("102 - T102"), "{recorded}");
+    assert_ne!(recorded, "1002 - T1002.mp4");
+    assert!(recorded.starts_with("1002 - T1002"), "{recorded}");
     assert_eq!(
         hex(&std::fs::read(folder.join(&recorded)).unwrap()),
         hex(&fixture("clip.mp4"))
@@ -900,7 +903,7 @@ async fn duplicate_video_in_a_playlist_downloads_once() {
     // one file per video, numbered by the first appearance; c is the third distinct video
     assert_eq!(
         visible(&folder),
-        ["01 - Alpha.mp4", "02 - Beta.mp4", "03 - Gamma.mp4"]
+        ["001 - Alpha.mp4", "002 - Beta.mp4", "003 - Gamma.mp4"]
     );
     assert_eq!(download_ids(&e.calls()), ["a", "b", "c"]);
 }
@@ -917,7 +920,7 @@ fn good_state() -> eid_media::playlist::State {
                 id: "a".into(),
                 number: 1,
                 status: Status::Done,
-                file: Some("01 - Alpha.mp4".into()),
+                file: Some("001 - Alpha.mp4".into()),
                 attempts: 0,
             },
             Item {
@@ -951,7 +954,7 @@ async fn hostile_playlist_state_file_is_rejected_and_confined() {
     let elsewhere = e.root.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
     std::fs::write(elsewhere.join("victim.mp4"), b"victim").unwrap();
-    std::fs::write(folder.join("01 - Alpha.mp4"), b"mine").unwrap();
+    std::fs::write(folder.join("001 - Alpha.mp4"), b"mine").unwrap();
     let state_path = folder.join(".eid-playlist.json");
 
     // the control: the good state is accepted (the rejections below are about the hostile part)
@@ -1020,13 +1023,13 @@ async fn hostile_playlist_state_file_is_rejected_and_confined() {
     ));
     cases.push((
         "file on a pending item".into(),
-        with(&|s| s.items[1].file = Some("02 - Beta.mp4".into())),
+        with(&|s| s.items[1].file = Some("002 - Beta.mp4".into())),
     ));
     cases.push((
         "same file twice".into(),
         with(&|s| {
             s.items[1].status = Status::Done;
-            s.items[1].file = Some("01 - ALPHA.mp4".into());
+            s.items[1].file = Some("001 - ALPHA.mp4".into());
         }),
     ));
     // a damaged or edited file: the checksum no longer matches
@@ -1081,7 +1084,7 @@ async fn hostile_playlist_state_file_is_rejected_and_confined() {
         );
         assert_eq!(entries(&elsewhere), ["victim.mp4"], "{name}");
         assert_eq!(
-            std::fs::read(folder.join("01 - Alpha.mp4")).unwrap(),
+            std::fs::read(folder.join("001 - Alpha.mp4")).unwrap(),
             b"mine"
         );
     }
@@ -1168,7 +1171,7 @@ async fn two_runs_on_one_playlist_folder_cannot_overlap() {
     std::fs::remove_file(&stall).unwrap();
     let o = playlist(&e, &url, &["-q"]).await;
     assert!(o.status.success(), "{}", text(&o));
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "02 - Beta.mp4"]);
+    assert_eq!(visible(&folder), ["001 - Alpha.mp4", "002 - Beta.mp4"]);
 }
 
 // ------------------------------------------------------------------ private / deleted items
@@ -1195,7 +1198,7 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
         text(&o)
     );
     let folder = folder_of(&o);
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "06 - Echo.mp4"]);
+    assert_eq!(visible(&folder), ["001 - Alpha.mp4", "006 - Echo.mp4"]);
     for (id, n) in [("b", 2), ("c", 3), ("d", 4), ("p", 5)] {
         let s = item_state(&folder, id);
         assert_eq!(
@@ -1222,7 +1225,7 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
     assert_eq!(download_ids(&e.calls()[before..]), ["f"]);
     assert_eq!(
         visible(&folder),
-        ["01 - Alpha.mp4", "06 - Echo.mp4", "07 - Foxtrot.mp4"]
+        ["001 - Alpha.mp4", "006 - Echo.mp4", "007 - Foxtrot.mp4"]
     );
     let err = String::from_utf8_lossy(&o.stderr).into_owned();
     for n in 2..=5 {
@@ -1274,10 +1277,10 @@ async fn private_or_deleted_item_is_skipped_and_keeps_its_number() {
     assert_eq!(
         visible(&folder),
         [
-            "01 - Alpha.mp4",
-            "02 - Removed.mp4",
-            "06 - Echo.mp4",
-            "07 - Foxtrot.mp4"
+            "001 - Alpha.mp4",
+            "002 - Removed.mp4",
+            "006 - Echo.mp4",
+            "007 - Foxtrot.mp4"
         ]
     );
     for (id, n, status) in [
@@ -1314,7 +1317,7 @@ async fn one_item_that_cannot_be_published_does_not_end_the_playlist_run() {
     );
     let out = e.out().display().to_string();
     let mut c = e.cmd(&["video", "playlist", &url, "-d", &out, "--yes-i-agree"]);
-    c.env("EID_TEST_PUBLISH_FAIL", "02 - Bravo.mp4");
+    c.env("EID_TEST_PUBLISH_FAIL", "002 - Bravo.mp4");
     let o = tokio::task::spawn_blocking(move || c.output().unwrap())
         .await
         .unwrap();
@@ -1327,7 +1330,7 @@ async fn one_item_that_cannot_be_published_does_not_end_the_playlist_run() {
         err.contains("2 downloaded, 0 deselected, 0 unavailable, 1 failed"),
         "no summary: {err}"
     );
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "03 - Charlie.mp4"]);
+    assert_eq!(visible(&folder), ["001 - Alpha.mp4", "003 - Charlie.mp4"]);
     let b = item_state(&folder, "b");
     assert_eq!(
         (
@@ -1356,7 +1359,7 @@ async fn one_item_that_cannot_be_published_does_not_end_the_playlist_run() {
     let o = playlist(&e, &url, &["-q"]).await;
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(
-        std::fs::metadata(folder.join("02 - Bravo.mp4"))
+        std::fs::metadata(folder.join("002 - Bravo.mp4"))
             .unwrap()
             .modified()
             .unwrap(),
@@ -1365,10 +1368,10 @@ async fn one_item_that_cannot_be_published_does_not_end_the_playlist_run() {
     );
     assert_eq!(
         visible(&folder),
-        ["01 - Alpha.mp4", "02 - Bravo.mp4", "03 - Charlie.mp4"]
+        ["001 - Alpha.mp4", "002 - Bravo.mp4", "003 - Charlie.mp4"]
     );
     assert_eq!(
-        std::fs::read(folder.join("02 - Bravo.mp4")).unwrap(),
+        std::fs::read(folder.join("002 - Bravo.mp4")).unwrap(),
         fixture("clip.mp4")
     );
     assert_eq!(item_state(&folder, "b")["status"], "done");
@@ -1390,7 +1393,7 @@ async fn a_swap_while_publishing_one_item_stops_the_playlist_run() {
     );
     let out = e.out().display().to_string();
     let mut c = e.cmd(&["video", "playlist", &url, "-d", &out, "--yes-i-agree"]);
-    c.env("EID_TEST_PUBLISH_FAIL", "swap:02 - Bravo.mp4");
+    c.env("EID_TEST_PUBLISH_FAIL", "swap:002 - Bravo.mp4");
     let o = tokio::task::spawn_blocking(move || c.output().unwrap())
         .await
         .unwrap();
@@ -1410,7 +1413,7 @@ async fn a_swap_while_publishing_one_item_stops_the_playlist_run() {
         "a summary after a refusal: {err}"
     );
     let folder = e.out().join("Swap");
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4"]);
+    assert_eq!(visible(&folder), ["001 - Alpha.mp4"]);
     assert_eq!(staging_dirs(&folder).len(), 1, "{:?}", entries(&folder));
     assert_ne!(item_state(&folder, "b")["status"], "done");
     assert_ne!(item_state(&folder, "c")["status"], "done");
@@ -1429,7 +1432,7 @@ async fn an_archived_item_without_a_published_file_is_reported() {
     write_list(&e, &[item("a", "Alpha"), item("b", "Bravo")]);
     let out = e.out().display().to_string();
     let mut c = e.cmd(&["video", "playlist", &url, "-d", &out, "--yes-i-agree", "-q"]);
-    c.env("EID_TEST_PUBLISH_FAIL", "02 - Bravo.mp4");
+    c.env("EID_TEST_PUBLISH_FAIL", "002 - Bravo.mp4");
     let o = tokio::task::spawn_blocking(move || c.output().unwrap())
         .await
         .unwrap();
@@ -1448,13 +1451,13 @@ async fn an_archived_item_without_a_published_file_is_reported() {
         err.contains("2: warning: the download archive already lists this item"),
         "{err}"
     );
-    assert!(err.contains("02 - Bravo.mp4"), "{err}");
+    assert!(err.contains("002 - Bravo.mp4"), "{err}");
     assert!(err.contains(".eid-archive.txt"), "{err}");
     assert!(
         !err.contains("1: warning"),
         "a published item was reported: {err}"
     );
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4"]);
+    assert_eq!(visible(&folder), ["001 - Alpha.mp4"]);
     assert_eq!(download_ids(&e.calls()), ["a", "b", "b"], "{err}");
 }
 
@@ -1496,7 +1499,7 @@ async fn an_item_without_an_address_stops_being_retried_after_three_runs() {
         }
     }
     assert_eq!(download_ids(&e.calls()), ["a", "c"]);
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "03 - Charlie.mp4"]);
+    assert_eq!(visible(&folder), ["001 - Alpha.mp4", "003 - Charlie.mp4"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1570,7 +1573,7 @@ async fn temporary_failures_stop_after_three_runs_and_retry_failed_resets_only_t
         "item 2 still failed: {}",
         text(&o)
     );
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "03 - Rated.mp4"]);
+    assert_eq!(visible(&folder), ["001 - Alpha.mp4", "003 - Rated.mp4"]);
     let v = item_state(&folder, "v");
     assert_eq!(
         (v["status"].as_str(), v["attempts"].as_u64()),
@@ -1650,6 +1653,7 @@ async fn playlist_state_schema_1_is_upgraded_in_place_without_losing_numbers_or_
         v1
     );
     let o = playlist(&e, &url, &["-q"]).await;
+    // a folder started by an older version keeps its 2-digit width: new files follow it
     assert!(o.status.success(), "{}", text(&o));
     // a (done) and d (done, archive only) are not downloaded again; b (an old "unavailable",
     // from the classifier that M2 replaced) and c (pending) are
@@ -1801,7 +1805,7 @@ async fn playlist_items_in_another_container_are_remuxed_and_a_bad_result_is_a_f
     let o = playlist(&e, &url, &["-q"]).await;
     assert!(o.status.success(), "{}", text(&o));
     let folder = folder_of(&o);
-    assert_eq!(visible(&folder), ["01 - Alpha.mp4", "02 - Beta.mp4"]);
+    assert_eq!(visible(&folder), ["001 - Alpha.mp4", "002 - Beta.mp4"]);
     for f in visible(&folder) {
         assert_eq!(
             hex(&std::fs::read(folder.join(&f)).unwrap()),
