@@ -79,6 +79,7 @@ jobs:
       - name: socket test binary alone, one at a time (kernel-socket tests print NOT TESTED here)
         run: cargo test -p eid-engine --test g9_sockets -- --test-threads=1 --nocapture
       - run: python scripts/check_required.py
+        timeout-minutes: 25
       - name: PowerShell + cmd injection matrix (real Windows shells)
         run: cargo test -p eid-cli --test shell_injection -- --nocapture
         continue-on-error: false

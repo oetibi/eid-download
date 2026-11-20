@@ -31,9 +31,20 @@ for l in (root / "scripts/required_tests.txt").read_text().splitlines():
         l = name
     req.append(l)
 extra = sys.argv[1:]
-p = subprocess.run(["cargo", "test", "--workspace", "--no-fail-fast", *extra, "--", "--test-threads=4"],
-                   cwd=root, capture_output=True, text=True)
-out = p.stdout + p.stderr
+# streamed line by line (ci-windows run 44693133755 hung here for 40 minutes with nothing in the
+# log because the output was captured until the end): a test that hangs now shows up as cargo's
+# "has been running for over 60 seconds" line, and the step's timeout ends the job
+p = subprocess.Popen(["cargo", "test", "--workspace", "--no-fail-fast", *extra, "--", "--test-threads=4"],
+                     cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                     text=True, encoding="utf-8", errors="replace")
+lines = []
+for line in p.stdout:
+    lines.append(line)
+    if line.startswith("test ") or "running for over" in line or line.startswith("     Running"):
+        sys.stdout.write(line)
+        sys.stdout.flush()
+p.wait()
+out = "".join(lines)
 sys.stdout.write(out[-4000:])
 for m in re.finditer(r"^---- .*? stdout ----\n(.*?)(?=^---- |^failures:)", out, re.M | re.S):
     sys.stdout.write("\nFAILURE DETAIL: " + m.group(0)[:3000])
