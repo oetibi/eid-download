@@ -519,7 +519,12 @@ fn youtube_stand_in(url: url::Url, flags: &[String]) -> url::Url {
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("fake-youtube.json")))
         .filter(|p| p.is_file())
-        .unwrap_or_else(|| die(9, "fake-yt-dlp: a YouTube address without fake-youtube.json"));
+        .unwrap_or_else(|| {
+            die(
+                9,
+                "fake-yt-dlp: a YouTube address without fake-youtube.json",
+            )
+        });
     let cfg: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(&cfg_path).unwrap_or_else(|e| die(9, &e.to_string())),
     )
@@ -534,13 +539,17 @@ fn youtube_stand_in(url: url::Url, flags: &[String]) -> url::Url {
         out.append_pair("log", l);
     }
     let list = q("list");
-    let as_list = url.path() == "/playlist" || (list.is_some() && flags.iter().any(|f| f == "--yes-playlist"));
+    let as_list = url.path() == "/playlist"
+        || (list.is_some() && flags.iter().any(|f| f == "--yes-playlist"));
     if as_list {
         let id = list.unwrap_or_else(|| die(9, "fake-yt-dlp: playlist without list="));
         let p = &cfg["playlists"][&id];
-        let file = p["file"]
-            .as_str()
-            .unwrap_or_else(|| die(1, &format!("ERROR: [youtube:tab] {id}: The playlist does not exist")));
+        let file = p["file"].as_str().unwrap_or_else(|| {
+            die(
+                1,
+                &format!("ERROR: [youtube:tab] {id}: The playlist does not exist"),
+            )
+        });
         out.append_pair("list", file);
         out.append_pair("ptitle", p["title"].as_str().unwrap_or("Fake playlist"));
         let u = format!("https://fake.test/playlist/{id}?{}", out.finish());
