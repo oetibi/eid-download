@@ -205,7 +205,7 @@ try {
       await ev(`(() => { const i = document.querySelector('#in-vurl'); i.value = ${JSON.stringify(u)}; i.dispatchEvent(new Event('input', {bubbles:true})); document.querySelector('#btn-probe').click(); })()`);
       await until("!document.querySelector('#v-result').hidden", 8000, "probe result");
     };
-    await probeUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta&index=1");
+    await probeUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01&index=1");
     assert(!(await ev("document.querySelector('#v-scope').hidden")), "both choices offered for watch&list");
     assert(await ev("document.querySelector('#v-scope input[value=video]').checked"), "'this video' first");
     assert(await ev("document.querySelector('#v-playlist').hidden"), "no episode list for one video");
@@ -221,7 +221,7 @@ try {
     await ev("document.querySelector('#v-start').click()");
     await until("window.__eidMockLastPlaylist?.items?.length === 4", 5000, "playlist sent");
     const sent = await ev("window.__eidMockLastPlaylist");
-    assert(sent.url === "https://www.youtube.com/playlist?list=PLarafta" && JSON.stringify(sent.items) === "[2,3,4,7]", JSON.stringify(sent));
+    assert(sent.url === "https://www.youtube.com/playlist?list=PLtestlist01" && JSON.stringify(sent.items) === "[2,3,4,7]", JSON.stringify(sent));
     // back to 'this video' shows the video again (no second probe of the list needed)
     await probeUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
     assert(await ev("document.querySelector('#v-scope').hidden"), "no playlist choice without list=");
@@ -233,9 +233,9 @@ try {
     await open("");
     await ev("document.querySelector('[data-cmd=settings]').click()");
     await until("document.querySelector('#dlg-settings').open", 3000, "a dialog that must give way");
-    await ev("window.__eidMockOpenVideo('https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta')");
+    await ev("window.__eidMockOpenVideo('https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01')");
     await until("document.querySelector('#dlg-video').open && !document.querySelector('#dlg-settings').open", 5000, "the Video window");
-    assert((await ev("document.querySelector('#in-vurl').value")) === "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta", "link");
+    assert((await ev("document.querySelector('#in-vurl').value")) === "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01", "link");
     await until("!document.querySelector('#v-result').hidden && !document.querySelector('#v-scope').hidden", 8000, "probed, with 'this video' / 'the whole playlist'");
     await ev("document.querySelector('#v-cancel').click()");
   });

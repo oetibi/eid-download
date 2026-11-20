@@ -618,7 +618,7 @@
 - Brave: تسجيل مضيف الرسائل في مفتاحه (`HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts`) بمعرّفات Chrome.
 
 **الاختبارات:**
-- `scripts/ext/browser_e2e.mjs` يشغّل Firefox (WebDriver BiDi) وChrome وEdge (DevTools) بمضيف بديل يسجّل الطلبات. ستة فحوص: الزر عند التمرير، قائمة الجودات وطلب `add_video`، التنقّل إلى قائمة (87 حلقة) وطلب `add_playlist` بالحلقات المختارة، الاختفاء في الصفحة الرئيسية والعودة بـ«رجوع»، حفظ الإعدادات وتطبيقها، «فتح في Eid Download».
+- `scripts/ext/browser_e2e.mjs` يشغّل Firefox (WebDriver BiDi) وChrome وEdge (DevTools) بمضيف بديل يسجّل الطلبات. ستة فحوص: الزر عند التمرير، قائمة الجودات وطلب `add_video`، التنقّل إلى قائمة (120 فيديو) وطلب `add_playlist` بالحلقات المختارة، الاختفاء في الصفحة الرئيسية والعودة بـ«رجوع»، حفظ الإعدادات وتطبيقها، «فتح في Eid Download».
 - ci-windows run 44721795106 @ `5a88e81`: Firefox 159.0.1 6/6، Chrome 6/6، Edge 6/6.
 - @@RUN@@
 - محلياً (Linux): `cargo test --workspace` 502 ناجح 0 فاشل؛ `check_required` 416/416؛ اختبارات الإضافة 24/24؛ `logic.test` 15/15؛ ui_e2e كلها؛ browser_e2e Chrome 6/6.

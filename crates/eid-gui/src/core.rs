@@ -1166,7 +1166,7 @@ mod tests {
             show.clone(),
             open.clone(),
         );
-        let u = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta";
+        let u = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01";
         assert_eq!(
             h(Command::OpenVideo { url: u.into() }).unwrap()["opened"],
             true

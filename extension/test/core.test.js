@@ -414,12 +414,12 @@ test("v0.2 if-missing: playlist only, a fixed height only, default not sent, bad
 
 test("v0.2 open_video: one checked address; 'Open in Eid Download' sends the video with its playlist", () => {
   const id = "ext-0123456789abcdef01234567";
-  const w = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta";
+  const w = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01";
   assert.deepEqual(C.buildRequest({ cmd: "open_video", url: w, quality: "best" }, id), { v: 1, id, command: { cmd: "open_video", url: w } });
   assert.throws(() => C.buildRequest({ cmd: "open_video", url: "javascript:alert(1)" }, id), /bad_url/);
-  assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta&index=3&t=10s&si=x")), w);
+  assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist01&index=3&t=10s&si=x")), w);
   assert.equal(C.openInAppUrl(C.classifyUrl("https://youtu.be/dQw4w9WgXcQ?si=tracker")), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
-  assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/playlist?list=PLarafta")), "https://www.youtube.com/playlist?list=PLarafta");
+  assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/playlist?list=PLtestlist01")), "https://www.youtube.com/playlist?list=PLtestlist01");
   // a Mix (RD…) is not a playlist we offer: the video alone
   assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ")), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
   assert.equal(C.openInAppUrl(C.classifyUrl("https://www.youtube.com/")), null);

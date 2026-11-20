@@ -348,7 +348,7 @@ try {
     const host = JSON.parse(fs.readFileSync(m, "utf8")).path;
     const p = spawn(host, ["chrome-extension://ambokeecedpgicighhcpdfjphdnphgaa/"], { env: { ...ENV, EID_IPC_ENDPOINT: ENDPOINT }, windowsHide: true });
     procs.push(p);
-    const link = "https://www.youtube.com/watch?v=aqz-KE-bpKQ&list=PLarafta";
+    const link = "https://www.youtube.com/watch?v=aqz-KE-bpKQ&list=PLtestlist01";
     const body = Buffer.from(JSON.stringify({ v: 1, id: "ext-e2e2", command: { cmd: "open_video", url: link } }));
     const len = Buffer.alloc(4); len.writeUInt32LE(body.length);
     let out = Buffer.alloc(0);

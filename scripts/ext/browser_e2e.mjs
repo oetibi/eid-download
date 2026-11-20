@@ -13,7 +13,7 @@
 //   2. its menu asks the host (probe) and lists the qualities; a choice sends add_video with the
 //      canonical link;
 //   3. YouTube's in-page navigation (history.pushState + yt-navigate-finish, no reload) to a
-//      watch?v=…&list=… video: the button follows, the menu shows the playlist (title, 87
+//      watch?v=…&list=… video: the button follows, the menu shows the playlist (title, 120
 //      episodes), "choose" lists them, and a selection sends add_playlist with those items;
 //   4. in-page navigation to the home page hides the button; Back (popstate) brings it back;
 //   5. the options page: "always" + "top-left" + Save are applied to the page without hover.
@@ -371,8 +371,8 @@ try {
     assert(probe && probe.url === "https://www.youtube.com/watch?v=AAAAAAAAAAA", JSON.stringify(probe));
   });
 
-  await check("3. in-page navigation to watch?v=…&list=…: the button follows; the menu shows the playlist (87 episodes); a selection sends add_playlist with those items", async () => {
-    await B.evaluate("(window.__ytGo('/watch?v=BBBBBBBBBBB&list=PLarafta'), true)");
+  await check("3. in-page navigation to watch?v=…&list=…: the button follows; the menu shows the playlist (120 videos); a selection sends add_playlist with those items", async () => {
+    await B.evaluate("(window.__ytGo('/watch?v=BBBBBBBBBBB&list=PLtestlist01'), true)");
     await B.hover(5, 5);
     await hoverPlayer();
     const { b } = await until(shownButton, 8000, "the button after in-page navigation");
@@ -380,10 +380,10 @@ try {
     if (!(await B.overlay()).buttons.some((x) => x.attrs["data-act"] === "choose" || x.attrs["data-q"])) await B.click(b.ref);
     const choose = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "choose"), 15000, "the playlist section ('choose episodes')");
     const texts = (await B.overlay()).texts.join(" | ");
-    assert(/Arafta/.test(texts) && /87/.test(texts), `playlist title/count not shown: ${texts.slice(0, 400)}`);
+    assert(/Test playlist/.test(texts) && /120/.test(texts), `playlist title/count not shown: ${texts.slice(0, 400)}`);
     await B.click(choose.ref);
     const boxes = await until(async () => { const o = await B.overlay(); const c = o.buttons.filter((x) => x.attrs.type === "checkbox"); return c.length ? c : null; }, 5000, "the episode list");
-    assert(boxes.length === 87, `${boxes.length} episodes listed`);
+    assert(boxes.length === 120, `${boxes.length} episodes listed`);
     const none = (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "none");
     await B.click(none.ref);
     for (const v of ["1", "2", "40"]) await B.click(boxes.find((x) => x.attrs.value === v).ref);
@@ -391,7 +391,7 @@ try {
     await B.click(go.ref);
     await until(() => hostRequests().some((r) => r.cmd === "add_playlist"), 10000, "add_playlist at the host");
     const add = hostRequests().find((r) => r.cmd === "add_playlist");
-    assert(add.url === "https://www.youtube.com/playlist?list=PLarafta" && JSON.stringify(add.items) === "[1,2,40]", JSON.stringify(add));
+    assert(add.url === "https://www.youtube.com/playlist?list=PLtestlist01" && JSON.stringify(add.items) === "[1,2,40]", JSON.stringify(add));
   });
 
   await check("4. in-page navigation to the home page hides the button; Back (popstate) brings it back", async () => {
@@ -430,7 +430,7 @@ try {
   });
 
   await check("6. 'Open in Eid Download' sends the video WITH its playlist to the app's own Video window", async () => {
-    await B.open("https://www.youtube.com/watch?v=DDDDDDDDDDD&list=PLarafta&index=2&si=tracker");
+    await B.open("https://www.youtube.com/watch?v=DDDDDDDDDDD&list=PLtestlist01&index=2&si=tracker");
     await B.hover(3, 3);
     const { b } = await until(shownButton, 8000, "the button");
     await B.click(b.ref);
@@ -438,7 +438,7 @@ try {
     await B.click(open.ref);
     await until(() => hostRequests().some((r) => r.cmd === "open_video"), 10000, "open_video at the host");
     const r = hostRequests().find((x) => x.cmd === "open_video");
-    assert(r.url === "https://www.youtube.com/watch?v=DDDDDDDDDDD&list=PLarafta", JSON.stringify(r));
+    assert(r.url === "https://www.youtube.com/watch?v=DDDDDDDDDDD&list=PLtestlist01", JSON.stringify(r));
     await until(async () => /Opened in Eid Download/.test((await B.overlay()).texts.join(" ")), 5000, "the confirmation in the menu");
   });
 } catch (e) {

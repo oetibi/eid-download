@@ -138,8 +138,8 @@ test("video pages: the same rule as eid_engine::links::video_page", () => {
 });
 
 test("playlist of a link: watch&list offers both, playlist?list the list, bare watch nothing (never guessed)", () => {
-  assert.deepEqual(linkPlaylist("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta123&index=1"),
-    { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", listId: "PLarafta123", playlistUrl: "https://www.youtube.com/playlist?list=PLarafta123" });
+  assert.deepEqual(linkPlaylist("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtestlist0123&index=1"),
+    { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", listId: "PLtestlist0123", playlistUrl: "https://www.youtube.com/playlist?list=PLtestlist0123" });
   assert.deepEqual(linkPlaylist("https://youtu.be/dQw4w9WgXcQ?list=PLx_1-2"),
     { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", listId: "PLx_1-2", playlistUrl: "https://www.youtube.com/playlist?list=PLx_1-2" });
   assert.deepEqual(linkPlaylist("https://m.youtube.com/playlist?list=PLabc"), { listId: "PLabc", playlistUrl: "https://www.youtube.com/playlist?list=PLabc" });

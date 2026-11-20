@@ -30,8 +30,8 @@ function answer(req) {
       const list = u.searchParams.get("list");
       if (u.pathname === "/playlist" && list) {
         if (list === "PLgone") return reply(req.id, false, "unsupported url: this playlist does not exist or is private");
-        const items = Array.from({ length: 87 }, (_, i) => ({ index: i + 1, title: `Arafta - Episode ${i + 1}`, duration: 1500 + i }));
-        return reply(req.id, true, { kind: "playlist", title: "Arafta", items, qualities: QUALITIES });
+        const items = Array.from({ length: 120 }, (_, i) => ({ index: i + 1, title: `Test video ${i + 1}`, duration: 1500 + i }));
+        return reply(req.id, true, { kind: "playlist", title: "Test playlist", items, qualities: QUALITIES });
       }
       const v = u.searchParams.get("v");
       return reply(req.id, true, { kind: "video", title: `Video ${v}`, qualities: QUALITIES, duration: 120 });
