@@ -126,7 +126,7 @@ export function mockApi(params = new URLSearchParams()) {
   const warnings = [];
   window.__eidMockWarn = (id, text) => warnings.push([id, text]);
   window.__eidMockLimit = (id) => limits.get(id);
-  let browsers = ["chrome", "edge", "firefox"].map((browser) => params.get("browser") === "other"
+  let browsers = ["chrome", "edge", "firefox", "brave"].map((browser) => params.get("browser") === "other"
     ? { browser, state: "other", host: "C:\\Program Files\\Eid Download\\eid-native-host.exe" }
     : { browser, state: "none", host: null });
   const handlers = {

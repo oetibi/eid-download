@@ -11,6 +11,7 @@
 !define EID_NM_CHROME "Software\Google\Chrome\NativeMessagingHosts\${EID_NM_HOST}"
 !define EID_NM_EDGE "Software\Microsoft\Edge\NativeMessagingHosts\${EID_NM_HOST}"
 !define EID_NM_FIREFOX "Software\Mozilla\NativeMessagingHosts\${EID_NM_HOST}"
+!define EID_NM_BRAVE "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\${EID_NM_HOST}"
 
 !macro EID_NM_REGISTER KEY TAG
   ${If} ${FileExists} "$INSTDIR\${EID_NM_HOST}.${TAG}.json"
@@ -31,12 +32,14 @@
   !insertmacro EID_NM_REGISTER "${EID_NM_CHROME}" "chrome"
   !insertmacro EID_NM_REGISTER "${EID_NM_EDGE}" "edge"
   !insertmacro EID_NM_REGISTER "${EID_NM_FIREFOX}" "firefox"
+  !insertmacro EID_NM_REGISTER "${EID_NM_BRAVE}" "brave"
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
   !insertmacro EID_NM_UNREGISTER "${EID_NM_CHROME}" "chrome"
   !insertmacro EID_NM_UNREGISTER "${EID_NM_EDGE}" "edge"
   !insertmacro EID_NM_UNREGISTER "${EID_NM_FIREFOX}" "firefox"
+  !insertmacro EID_NM_UNREGISTER "${EID_NM_BRAVE}" "brave"
 !macroend
 
 ; v0.2: the unpacked browser extension is installed as resources under browser-extension\.

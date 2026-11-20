@@ -14,12 +14,18 @@ use std::path::{Path, PathBuf};
 
 pub const HOST_NAME: &str = "com.eid.download";
 const IDS: &str = include_str!("../../../extension/native-host-ids.json");
-const ALL: [Browser; 3] = [Browser::Chrome, Browser::Edge, Browser::Firefox];
+const ALL: [Browser; 4] = [
+    Browser::Chrome,
+    Browser::Edge,
+    Browser::Firefox,
+    Browser::Brave,
+];
 
 fn tag(b: Browser) -> &'static str {
     match b {
         Browser::Chrome => "chrome",
         Browser::Edge => "edge",
+        Browser::Brave => "brave",
         Browser::Firefox => "firefox",
     }
 }

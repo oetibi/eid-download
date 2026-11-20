@@ -22,12 +22,14 @@ $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Eid D
 $nm = [ordered]@{
   chrome  = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$hostName"
   edge    = "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$hostName"
+  brave   = "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\$hostName"
   firefox = "HKCU:\Software\Mozilla\NativeMessagingHosts\$hostName"
 }
 # which browsers the build registered: the same rule as native_host_manifests.py
 $expect = @{
   chrome  = @($ids.chrome).Count -gt 0
   edge    = (@($ids.edge).Count + @($ids.chrome).Count) -gt 0
+  brave   = @($ids.chrome).Count -gt 0
   firefox = @($ids.firefox).Count -gt 0
 }
 function Check([bool]$ok, [string]$what) {
@@ -145,13 +147,13 @@ try {
   "uninstall: exit code $($un.ExitCode)"
   Check ($un.ExitCode -eq 0) "uninstaller exit code 0"
   WaitFor { -not (Test-Path (Join-Path $inst "EidDownload.exe")) -and -not (Test-Path $uninstKey) } 120 "uninstall to finish"
-  foreach ($f in "EidDownload.exe", "eid.exe", "eid-native-host.exe", "uninstall.exe", "LICENSE.txt", "THIRD-PARTY-LICENSES.html", "README.txt", "$hostName.chrome.json", "$hostName.edge.json", "$hostName.firefox.json") {
+  foreach ($f in "EidDownload.exe", "eid.exe", "eid-native-host.exe", "uninstall.exe", "LICENSE.txt", "THIRD-PARTY-LICENSES.html", "README.txt", "$hostName.chrome.json", "$hostName.edge.json", "$hostName.firefox.json", "$hostName.brave.json") {
     Check (-not (Test-Path (Join-Path $inst $f))) "$f removed"
   }
   Check (-not (Test-Path $inst) -or @(Get-ChildItem -Force $inst).Count -eq 0) "install directory removed or empty"
   Check (-not (Test-Path $startMenu)) "start-menu shortcut removed"
   Check (-not (Test-Path (Join-Path ([Environment]::GetFolderPath("Desktop")) "Eid Download.lnk"))) "desktop shortcut removed"
-  Check (-not (Test-Path $nm.chrome) -and -not (Test-Path $nm.edge)) "chrome and edge Native Messaging keys removed"
+  Check (-not (Test-Path $nm.chrome) -and -not (Test-Path $nm.edge) -and -not (Test-Path $nm.brave)) "chrome, edge and brave Native Messaging keys removed"
   if ($expect.firefox) {
     Check ((KeyValue $nm.firefox) -eq $foreign) "a firefox key pointing at another copy is left alone"
     Remove-Item -Path $nm.firefox

@@ -306,7 +306,7 @@ try {
   fs.mkdirSync(dir, { recursive: true });
   for (const f of ["EidDownload.exe", "eid-native-host.exe", "eid.exe"]) fs.copyFileSync(path.join(BIN, f), path.join(dir, f));
   w = await startApp(path.join(dir, "EidDownload.exe"));
-  const KEYS = { chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.eid.download", edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.eid.download", firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts\\com.eid.download" };
+  const KEYS = { chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.eid.download", edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.eid.download", firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts\\com.eid.download", brave: "HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts\\com.eid.download" };
   const regValue = (k) => { try { return /REG_SZ\s+(.+)/.exec(execFileSync("reg", ["query", k, "/ve"], { encoding: "utf8", windowsHide: true }))?.[1].trim() ?? null; } catch { return null; } };
   const saved = Object.fromEntries(Object.entries(KEYS).map(([b, k]) => [b, regValue(k)]));
 

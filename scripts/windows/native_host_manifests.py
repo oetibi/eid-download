@@ -2,7 +2,7 @@
 """Write the Native Messaging host manifests that the Windows installer ships.
 
 Input: extension/native-host-ids.json (the one place the extension IDs live).
-Output (into OUT_DIR): <host>.chrome.json, <host>.edge.json, <host>.firefox.json, one per
+Output (into OUT_DIR): <host>.chrome.json, <host>.edge.json, <host>.firefox.json, <host>.brave.json, one per
 browser whose ID list is not empty. The installer copies them next to eid-native-host.exe and
 its NSIS hook (crates/eid-gui/installer/hooks.nsh) points the HKCU keys at the files that exist.
 
@@ -82,6 +82,12 @@ def build(cfg, release=False):
         m = base()
         m["allowed_extensions"] = list(firefox)
         out[f"{name}.firefox.json"] = m
+    # v0.2: Brave runs the Chrome build (and Chrome Web Store installs) with the Chrome IDs,
+    # but reads its own registry key
+    if chrome:
+        m = base()
+        m["allowed_origins"] = [f"chrome-extension://{i}/" for i in chrome]
+        out[f"{name}.brave.json"] = m
     return out
 
 
