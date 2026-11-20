@@ -37,13 +37,16 @@ const BROWSER = arg("--browser", "chrome");
 const CHROMIUM = ["chrome", "edge", "brave", "opera", "vivaldi"];
 if (BROWSER !== "firefox" && !CHROMIUM.includes(BROWSER)) throw new Error(`unknown --browser ${BROWSER}`);
 const ONLY = arg("--checks") ? new Set(arg("--checks").split(",").map((x) => x.trim())) : null;
-// Windows: where each browser reads its Native Messaging hosts (HKCU). Opera and Vivaldi have no
-// documented key: CI tries candidates one at a time with --nm-key (see ci-windows.yml).
+// Windows: where each browser reads its Native Messaging hosts (HKCU). Brave, Opera and Vivaldi
+// document none: CI tries candidates one at a time with --nm-key (more_browsers.ps1).
 const NM_KEYS = {
   firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts",
   chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts",
   edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts",
-  brave: "HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts",
+  // ci-windows 2026-11-20 (more_browsers.ps1): Brave 158 and Opera 140 read Chrome's key (and
+  // Chromium's), not one of their own
+  brave: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts",
+  opera: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts",
 };
 const IS_WIN = process.platform === "win32";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

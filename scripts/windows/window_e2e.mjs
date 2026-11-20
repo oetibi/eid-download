@@ -286,7 +286,7 @@ try {
     assert(sha(path.join(DOWNLOADS, "w-slow.bin")) === expected, "SHA-256 after pause/resume");
   });
 
-  const KEYS = { chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.eid.download", edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.eid.download", firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts\\com.eid.download", brave: "HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts\\com.eid.download" };
+  const KEYS = { chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.eid.download", edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.eid.download", firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts\\com.eid.download" };
   await check("6. Settings -> Connect the browsers is refused here with the 'extract the ZIP' message", async () => {
     await w.ev(click("[data-cmd=settings]"));
     await w.ev(click("#dlg-settings [data-tab=desktop]"));

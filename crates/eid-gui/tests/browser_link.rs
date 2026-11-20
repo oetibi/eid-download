@@ -31,24 +31,14 @@ fn connect_this_copy_see_another_and_never_remove_it() {
     let data = root.path().join("data");
     let a = copy_in(&root.path().join("portable"), true);
     let b = copy_in(&root.path().join("installed"), true);
-    let none = [
-        ("chrome", "none"),
-        ("edge", "none"),
-        ("firefox", "none"),
-        ("brave", "none"),
-    ];
+    let none = [("chrome", "none"), ("edge", "none"), ("firefox", "none")];
     assert_eq!(states(&status(&a, &name)), none);
 
     // connect copy A: all three point at A's eid-native-host
     let s = connect(&a, &name, &data).unwrap();
     assert_eq!(
         states(&s),
-        [
-            ("chrome", "this"),
-            ("edge", "this"),
-            ("firefox", "this"),
-            ("brave", "this")
-        ]
+        [("chrome", "this"), ("edge", "this"), ("firefox", "this")]
     );
     let m: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(

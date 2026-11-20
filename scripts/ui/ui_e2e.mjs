@@ -128,16 +128,16 @@ try {
     const tab = async () => {
       await ev("document.querySelector('[data-cmd=settings]').click()");
       await ev("document.querySelector('#dlg-settings [data-tab=desktop]').click()");
-      await until("document.querySelectorAll('#browser-list li').length === 4", 3000, "browser list");
+      await until("document.querySelectorAll('#browser-list li').length === 3", 3000, "browser list");
     };
     const st = () => ev("[...document.querySelectorAll('#browser-list li')].map((l) => l.dataset.browser + ':' + l.dataset.state).join(' ')");
     await open("?browser=other");
     await tab();
-    assert((await st()) === "chrome:other edge:other firefox:other brave:other", await st());
+    assert((await st()) === "chrome:other edge:other firefox:other", await st());
     assert(/Program Files/.test(await ev("document.querySelector('#browser-list').textContent")), "names the other copy");
     await ev("document.querySelector('#browser-disconnect').click()");
     await sleep(200);
-    assert((await st()) === "chrome:other edge:other firefox:other brave:other", "another copy is never disconnected");
+    assert((await st()) === "chrome:other edge:other firefox:other", "another copy is never disconnected");
     await ev("document.querySelector('#browser-connect').click()");
     await until("[...document.querySelectorAll('#browser-list li')].every((l) => l.dataset.state === 'this')", 3000, "connected");
     if (arg("--shots")) await shot("browser-connect-ar.png");
@@ -150,7 +150,7 @@ try {
     await ev("document.querySelector('#browser-connect').click()");
     await until("!document.querySelector('#browser-error').hidden", 3000, "refusal shown");
     assert(/استخراج الكل/.test(await ev("document.querySelector('#browser-error').textContent")), "says to extract the ZIP");
-    assert((await st()) === "chrome:none edge:none firefox:none brave:none", "nothing connected");
+    assert((await st()) === "chrome:none edge:none firefox:none", "nothing connected");
     await ev("document.querySelector('#dlg-settings').close()");
     await open("");
   });

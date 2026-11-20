@@ -16,8 +16,6 @@ pub enum Browser {
     Chrome,
     Edge,
     Firefox,
-    /// v0.2: Chromium-based (the Chrome build and IDs) but its own registration place.
-    Brave,
 }
 
 impl Browser {
@@ -25,7 +23,6 @@ impl Browser {
         match self {
             Browser::Chrome => "chrome",
             Browser::Edge => "edge",
-            Browser::Brave => "brave",
             Browser::Firefox => "firefox",
         }
     }
@@ -115,7 +112,7 @@ impl Manifest {
         );
         m.insert("type".into(), "stdio".into());
         match browser {
-            Browser::Chrome | Browser::Edge | Browser::Brave => {
+            Browser::Chrome | Browser::Edge => {
                 if self.chrome_extension_ids.is_empty() {
                     return Err(bad("no Chrome/Edge extension id given"));
                 }
@@ -181,7 +178,6 @@ mod imp {
         let base = match browser {
             Browser::Chrome => "Software\\Google\\Chrome\\NativeMessagingHosts",
             Browser::Edge => "Software\\Microsoft\\Edge\\NativeMessagingHosts",
-            Browser::Brave => "Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts",
             Browser::Firefox => "Software\\Mozilla\\NativeMessagingHosts",
         };
         format!("{base}\\{name}")
@@ -416,7 +412,6 @@ fn unix_location(b: Browser, home: &Path, name: &str) -> PathBuf {
     let dir = match b {
         Browser::Chrome => ".config/google-chrome/NativeMessagingHosts",
         Browser::Edge => ".config/microsoft-edge/NativeMessagingHosts",
-        Browser::Brave => ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
         Browser::Firefox => ".mozilla/native-messaging-hosts",
     };
     home.join(dir).join(format!("{name}.json"))
@@ -561,14 +556,9 @@ mod tests {
         // a unique, test-only host name: never touches the real `com.eid.download` keys
         m.name = format!("com.eid.test{}", std::process::id());
         let dir = d.path().join("manifests");
-        let all = [
-            Browser::Chrome,
-            Browser::Edge,
-            Browser::Firefox,
-            Browser::Brave,
-        ];
+        let all = [Browser::Chrome, Browser::Edge, Browser::Firefox];
         let r = register(&m, &all, &dir).unwrap();
-        assert_eq!(r.len(), 4);
+        assert_eq!(r.len(), 3);
         for x in &r {
             assert!(x.location.starts_with("HKCU\\Software\\"), "{x:?}");
             let back = imp::read_back(x.browser, &m.name).unwrap().unwrap();
@@ -602,14 +592,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let m = manifest(d.path());
         let (home, dir) = (d.path().join("home"), d.path().join("manifests"));
-        let all = [
-            Browser::Chrome,
-            Browser::Edge,
-            Browser::Firefox,
-            Browser::Brave,
-        ];
+        let all = [Browser::Chrome, Browser::Edge, Browser::Firefox];
         let r = register_in_home(&m, &all, &dir, &home).unwrap();
-        assert_eq!(r.len(), 4);
+        assert_eq!(r.len(), 3);
         for x in &r {
             let t = std::fs::read_to_string(&x.location).unwrap();
             assert_eq!(t, std::fs::read_to_string(&x.manifest).unwrap());
@@ -619,9 +604,6 @@ mod tests {
             .is_file());
         assert!(home
             .join(".mozilla/native-messaging-hosts/com.eid.download.json")
-            .is_file());
-        assert!(home
-            .join(".config/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.eid.download.json")
             .is_file());
     }
 

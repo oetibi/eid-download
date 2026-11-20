@@ -23,12 +23,9 @@ def cfg(**kw):
 class Build(unittest.TestCase):
     def test_three_manifests_with_relative_path_and_exact_origins(self):
         out = nhm.build(cfg())
-        self.assertEqual(sorted(out), ["com.eid.download.brave.json",
-                                       "com.eid.download.chrome.json",
+        self.assertEqual(sorted(out), ["com.eid.download.chrome.json",
                                        "com.eid.download.edge.json",
                                        "com.eid.download.firefox.json"])
-        self.assertEqual(out["com.eid.download.brave.json"]["allowed_origins"],
-                         [f"chrome-extension://{C1}/"])
         ch = out["com.eid.download.chrome.json"]
         self.assertEqual(ch["path"], "eid-native-host.exe")
         self.assertEqual(ch["type"], "stdio")
@@ -67,8 +64,8 @@ class Build(unittest.TestCase):
     def test_release_refuses_placeholders_but_a_dev_build_accepts_them(self):
         with self.assertRaises(nhm.Invalid):
             nhm.build(cfg(placeholder=True), release=True)
-        self.assertEqual(len(nhm.build(cfg(placeholder=True))), 4)
-        self.assertEqual(len(nhm.build(cfg(), release=True)), 4)
+        self.assertEqual(len(nhm.build(cfg(placeholder=True))), 3)
+        self.assertEqual(len(nhm.build(cfg(), release=True)), 3)
 
     def test_the_committed_config_is_valid(self):
         c = json.loads((ROOT / "extension/native-host-ids.json").read_text(encoding="utf-8"))

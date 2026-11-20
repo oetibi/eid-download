@@ -1655,7 +1655,8 @@ function sendTrayTexts() {
 api.on?.("tray", (action) => { if (action === "pause_all" || action === "resume_all") run(action); });
 
 // v0.2: browser extension connection (Settings > Desktop)
-const BR_NAME = { chrome: "Chrome", edge: "Edge", firefox: "Firefox", brave: "Brave" };
+// v0.2: Brave and Opera on Windows read Chrome's registration (ci-windows, browsers-more)
+const BR_NAME = { chrome: "Chrome · Brave · Opera", edge: "Edge", firefox: "Firefox" };
 function showBrowsers(list) {
   const ul = $("#browser-list");
   ul.replaceChildren(...(Array.isArray(list) ? list : []).filter((s) => Object.hasOwn(BR_NAME, s?.browser)).map((s) => {
