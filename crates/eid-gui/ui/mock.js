@@ -83,6 +83,8 @@ export function mockApi(params = new URLSearchParams()) {
   const jobs = [];
   let nextJob = 1;
   let toolsInstalled = params.get("notools") !== "1";
+  let toolsInstalling = false;
+  let toolsError = null;
   let engineSettings = { max_parallel: 3, connections: 8, speed_limit_kib: 0, schedule: null, tray: true, close_to_tray: false, clipboard: false, power_actions: false };
   // events the Rust side would emit (tray menu, clipboard); tests trigger them
   const listeners = new Map();
@@ -150,7 +152,8 @@ export function mockApi(params = new URLSearchParams()) {
       browsers = browsers.map((s) => (s.state === "this" ? { ...s, state: "none", host: null } : s));
       return browsers.map((s) => ({ ...s }));
     },
-    self_check: () => (params.get("check") ?? "").split(",").filter(Boolean),
+    // `?check=last_crash`: the previous run left a crash record
+    self_check: () => (params.get("check") ?? "").split(",").filter(Boolean).map((code) => (code === "last_crash" ? { code, path: "C:\\Users\\me\\AppData\\Local\\EidDownload\\logs\\crash-1.txt" } : { code })),
     categories: () => ["Compressed", "Documents", "Music", "Video", "Pictures", "Programs"],
     import_list: () => { const r = window.__eidMockImport ?? null; if (r) for (const u of r.urls) touch(mk({ name: u.split("/").pop(), url: u })); return r && { added: r.urls.length, refused: r.refused ?? 0, duplicates: 0, credentials_dropped: 0 }; },
     export_list: () => (window.__eidMockExportCancel ? null : items.size),
@@ -241,9 +244,20 @@ export function mockApi(params = new URLSearchParams()) {
       engineSettings = { ...s };
       return { ...engineSettings };
     },
-    tools_status: () => ({ installed: toolsInstalled, consent: toolsInstalled, ytdlp_version: toolsInstalled ? "2026.11.01 (mock)" : undefined, ffmpeg_version: toolsInstalled ? "7.1 (mock)" : undefined }),
+    // `?toolsfail=1`: the install ends with an error (the window must show it, never close)
+    tools_status: () => ({ installed: toolsInstalled, consent: toolsInstalled || toolsInstalling, installing: toolsInstalling, error: toolsError, ytdlp_version: toolsInstalled ? "2026.11.01 (mock)" : undefined, ffmpeg_version: toolsInstalled ? "7.1 (mock)" : undefined }),
     tools_consent_text: ({ lang }) => (lang === "ar" ? "نص الموافقة (تجريبي): تُنزَّل yt-dlp وFFmpeg وDeno من مصادرها الرسمية..." : "Agreement (mock): yt-dlp, FFmpeg and Deno are downloaded from their official sources..."),
-    tools_install: async ({ accept }) => { if (accept !== true) throw "consent_required"; await sleep(300); toolsInstalled = true; },
+    tools_install: async ({ accept }) => {
+      if (accept !== true) throw "consent_required";
+      toolsInstalling = true; toolsError = null;
+      setTimeout(() => {
+        toolsInstalling = false;
+        if (params.get("toolsfail") === "1") toolsError = "cannot create C:\\Users\\me\\AppData\\Local\\EidDownload\\tools: Access is denied. (os error 5)";
+        else toolsInstalled = true;
+      }, 1500);
+    },
+    app_info: () => ({ version: "0.1.2", commit: "abc1234", program: "C:\\Apps\\Eid\\EidDownload.exe", logs: "C:\\Users\\me\\AppData\\Local\\EidDownload\\logs" }),
+    open_logs: () => { window.__eidMockOpenedLogs = (window.__eidMockOpenedLogs ?? 0) + 1; },
     video_probe: async ({ url }) => {
       await sleep(600);
       if (!toolsInstalled) throw "TOOLS_MISSING: yt-dlp is not installed";

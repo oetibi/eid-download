@@ -164,6 +164,7 @@
     </div>
     <div id="checkbar" class="checkbar" role="alert" hidden>
       <ul id="check-list"></ul>
+      <button type="button" id="check-logs" class="ghost small" data-t="s_open_logs" hidden></button>
       <button type="button" id="check-close" class="ghost small" data-t="chk_close"></button>
     </div>
     <div id="clipbar" class="clipbar" role="status" hidden>
@@ -318,6 +319,11 @@
           <option value="dark" data-t="c_theme_dark"></option>
         </select>
         <label class="check"><input id="set-notify" type="checkbox"><span data-t="s_notify"></span></label>
+        <fieldset id="set-about">
+          <legend data-t="s_about"></legend>
+          <p id="about-text" class="note" dir="ltr"></p>
+          <button type="button" id="about-logs" data-t="s_open_logs"></button>
+        </fieldset>
       </div>
       <div class="tab" data-pane="downloads" hidden>
         <label data-t="s_default_folder"></label>
@@ -370,6 +376,7 @@
         <select id="set-missing"><option value="lower" data-t="fb_lower"></option><option value="higher" data-t="fb_higher"></option><option value="skip" data-t="fb_skip"></option></select>
         <label data-t="s_tools"></label>
         <p id="set-tools" class="note"></p>
+        <p id="set-tools-error" class="error" hidden></p>
         <button type="button" id="set-tools-install" hidden data-t="v_install"></button>
       </div>
       <div class="buttons">

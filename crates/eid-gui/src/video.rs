@@ -38,7 +38,11 @@ pub fn tools_consent_text(st: State<'_, AppState>, lang: String) -> Result<Strin
 /// the missing eid.exe (os error 2) failed earlier and hid it.
 #[tauri::command]
 pub async fn tools_install(st: State<'_, AppState>, accept: bool) -> Result<(), String> {
-    st.setup.install(accept)
+    let r = st.setup.install(accept);
+    if let Err(e) = &r {
+        crate::diag::log(&format!("tools_install: error shown in the window: {e}"));
+    }
+    r
 }
 
 #[tauri::command]

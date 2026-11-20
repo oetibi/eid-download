@@ -192,7 +192,7 @@ pub async fn boot(endpoint: Option<String>) -> Result<Boot, String> {
         vec![crate::worker::VIDEO_WORKER_FLAG.into()],
         PathBuf::from(&default_dir),
     )?;
-    let setup = VideoSetup::new(video.clone());
+    let setup = VideoSetup::new(video.clone()).with_log(Arc::new(|s: &str| crate::diag::log(s)));
     let handler = Arc::new(core::with_show(
         serve::handler_with_video(
             sched.clone(),
@@ -352,11 +352,42 @@ pub fn browser_disconnect() -> Result<Vec<crate::browser::LinkState>, String> {
 /// v0.2 startup self-check: problems with where the app runs (`core::install_problems`), shown
 /// once as a bar in the window.
 #[tauri::command]
-pub fn self_check() -> Vec<&'static str> {
-    match std::env::current_exe() {
-        Ok(exe) => core::install_problems(&exe, &|p| p.is_file()),
+pub fn self_check() -> Vec<serde_json::Value> {
+    let mut v: Vec<serde_json::Value> = match std::env::current_exe() {
+        Ok(exe) => core::install_problems(&exe, &|p| p.is_file())
+            .into_iter()
+            .map(|c| serde_json::json!({ "code": c }))
+            .collect(),
         Err(_) => vec![],
+    };
+    // v0.2: the previous run ended in a panic: say so once, with the record's path
+    if let Some(p) = crate::diag::take_last_crash() {
+        crate::diag::log(&format!("the previous run crashed: {}", p.display()));
+        v.push(serde_json::json!({ "code": "last_crash", "path": p.display().to_string() }));
     }
+    v
+}
+
+/// v0.2: version, build commit and the log folder (Settings > About this copy).
+#[tauri::command]
+pub fn app_info() -> serde_json::Value {
+    serde_json::json!({
+        "version": crate::diag::VERSION,
+        "commit": crate::diag::BUILD_COMMIT,
+        "program": std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
+        "logs": crate::diag::log_dir().map(|p| p.display().to_string()),
+    })
+}
+
+/// v0.2: open the log folder in Explorer (to send the log after a problem).
+#[tauri::command]
+pub fn open_logs(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let d = crate::diag::log_dir().ok_or("no per-user data folder")?;
+    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    app.opener()
+        .open_path(d.display().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

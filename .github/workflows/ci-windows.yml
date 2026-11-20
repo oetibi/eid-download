@@ -150,23 +150,6 @@ jobs:
           $f = Get-Content target\ext\firefox\manifest.json -Raw | ConvertFrom-Json
           if ($f.browser_specific_settings.gecko.id -ne 'eid-download@eid-download') { throw "Firefox id" }
           Get-ChildItem dist\ext
-      # v0.2 (owner's real-Windows report): the REAL window driven through its buttons over
-      # WebView2's DevTools port: the app alone in Explorer's "inside the ZIP" folder (startup
-      # bar, a real file with SHA-256, YouTube -> Video window with a working probe, web page
-      # refused, toolbar Pause/Resume), then an extracted copy (Connect the browsers -> HKCU
-      # keys -> its eid-native-host answers like a browser's, Disconnect). Local server only.
-      - name: Window end-to-end (real WebView2 window, clicks, files, registry, native host)
-        shell: pwsh
-        run: |
-          node scripts/windows/window_e2e.mjs --bin target\release --out window-e2e
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
-        with:
-          name: window-e2e
-          retention-days: 14
-          path: window-e2e/*
-          if-no-files-found: warn
       - name: Package EidDownload-windows-x64.zip
         shell: pwsh
         run: |
@@ -187,6 +170,33 @@ jobs:
           if ($n -lt 100) { throw "THIRD-PARTY-LICENSES.html lists only $n crates" }
           "THIRD-PARTY-LICENSES.html: $n crate entries"
           Compress-Archive -Path $d -DestinationPath dist\EidDownload-windows-x64.zip -Force
+      # v0.2 (owner's real-Windows reports): the REAL window driven through its buttons over
+      # WebView2's DevTools port, on the binaries EXTRACTED FROM THE FINAL ZIP (the package the
+      # owner downloads), not on target\release: the app alone in Explorer's "inside the ZIP"
+      # folder (startup bar, a real file with SHA-256, YouTube -> Video window with a working
+      # probe, web page refused, toolbar Pause/Resume), an extracted copy (Connect the browsers
+      # -> HKCU keys -> its eid-native-host answers like a browser's, Disconnect), and a tool
+      # install that fails (the window says why, the app stays open, the log records it).
+      # Local test server only (it is a test helper, not in the package).
+      - name: Window end-to-end on the final ZIP (real WebView2 window, clicks, files, registry, native host)
+        shell: pwsh
+        run: |
+          $pkg = Join-Path $env:RUNNER_TEMP 'final-zip'
+          if (Test-Path $pkg) { Remove-Item -Recurse -Force $pkg }
+          Expand-Archive dist\EidDownload-windows-x64.zip -DestinationPath $pkg
+          $bin = Join-Path $pkg 'EidDownload-windows-x64'
+          $h = (Get-FileHash dist\EidDownload-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "testing the package dist\EidDownload-windows-x64.zip  SHA-256 $h"
+          Get-ChildItem $bin | Format-Table Name, Length
+          node scripts/windows/window_e2e.mjs --bin $bin --server target\release\eid-testserver.exe --out window-e2e
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: window-e2e
+          retention-days: 14
+          path: window-e2e/*
+          if-no-files-found: warn
       # ---- v0.1: NSIS installer (ADR-0005). `cargo tauri bundle` packs the binaries built and
       # smoke-tested above (no recompile, --no-binary-patching), then the installer is verified
       # for real on this runner: silent per-user install, files, HKCU keys, app start, uninstall.

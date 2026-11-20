@@ -5,6 +5,7 @@ pub mod app;
 pub mod browser;
 pub mod core;
 pub mod desktop;
+pub mod diag;
 pub mod listdiff;
 pub mod power;
 pub mod segmap;

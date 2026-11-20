@@ -955,6 +955,7 @@ function openSettings() {
   fillQualitySelect($("#set-quality"), ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"], settings.quality);
   showSettingsFolder();
   showTools($("#set-tools"), $("#set-tools-install"));
+  api.call("app_info").then((i) => setText($("#about-text"), t("about", i.version, i.commit, i.program))).catch(() => {});
   fillEngineFields();
   fillDesktopFields();
   $("#dlg-settings").showModal();
@@ -1025,10 +1026,7 @@ $("#c-install").addEventListener("click", async () => {
 });
 $("#dlg-consent").addEventListener("close", () => { consentDone?.(false); consentDone = null; });
 $("#set-tools-install").addEventListener("click", async () => {
-  if (await askConsent()) {
-    toast(t("v_installing"));
-    setTimeout(() => showTools($("#set-tools"), $("#set-tools-install")), 1500);
-  }
+  if (await askConsent()) watchInstall();
 });
 
 // ---------------------------------------------------------------- video / playlist dialog
@@ -1148,7 +1146,7 @@ $("#v-pick").addEventListener("click", async () => {
   try { const p = await api.call("pick_folder"); if (p) { videoFolder = p; showVideoFolder(); } } catch (e) { failure(e); }
 });
 $("#v-install").addEventListener("click", async () => {
-  if (await askConsent()) vStatus(t("v_installing"));
+  if (await askConsent()) watchInstall();
 });
 $("#v-cancel").addEventListener("click", () => { probeSeq++; $("#dlg-video").close(); });
 $("#form-video").addEventListener("submit", async (e) => {
@@ -1650,20 +1648,61 @@ $("#clip-add").addEventListener("click", () => {
 sendTrayTexts();
 
 // ---------------------------------------------------------------- v0.2: startup self-check
-const CHECK_KEYS = { from_zip: "chk_from_zip", no_native_host: "chk_no_native_host" };
-let checkCodes = [];
+const CHECK_KEYS = { from_zip: "chk_from_zip", no_native_host: "chk_no_native_host", last_crash: "chk_last_crash" };
+let checkCodes = []; // [{ code, path }]
 function renderCheck() {
   const ul = $("#check-list");
-  ul.replaceChildren(...checkCodes.map((c) => { const li = document.createElement("li"); li.dataset.code = c; li.textContent = t(CHECK_KEYS[c]); return li; }));
+  ul.replaceChildren(...checkCodes.map((c) => { const li = document.createElement("li"); li.dataset.code = c.code; li.textContent = t(CHECK_KEYS[c.code], String(c.path ?? "")); return li; }));
+  $("#check-logs").hidden = !checkCodes.some((c) => c.code === "last_crash");
   $("#checkbar").hidden = checkCodes.length === 0;
 }
 (async () => {
   try {
     const r = await api.call("self_check");
-    checkCodes = Array.isArray(r) ? r.filter((c) => Object.hasOwn(CHECK_KEYS, c)) : [];
+    checkCodes = (Array.isArray(r) ? r : [])
+      .map((c) => (typeof c === "string" ? { code: c } : c))
+      .filter((c) => c && Object.hasOwn(CHECK_KEYS, c.code));
   } catch { checkCodes = []; }
   renderCheck();
 })();
+$("#check-logs").addEventListener("click", () => api.call("open_logs").catch(failure));
+$("#about-logs").addEventListener("click", () => api.call("open_logs").catch(failure));
+
+// v0.2: follow a started tool install to its end and SAY how it ended (before, a failure was
+// never shown: the window only said "started")
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let installWatch = null;
+function watchInstall() {
+  if (installWatch) return installWatch;
+  const show = (msg, isErr) => {
+    if ($("#dlg-video").open) { if (isErr) { vStatus(null); vError(msg); } else { vError(null); vStatus(msg); } }
+    const se = $("#set-tools-error");
+    se.hidden = !isErr; se.textContent = isErr ? msg : "";
+  };
+  show(t("tools_installing"), false);
+  installWatch = (async () => {
+    const t0 = Date.now();
+    let s = null;
+    while (Date.now() - t0 < 60 * 60 * 1000) {
+      await sleep(1000);
+      try { s = await api.call("tools_status"); } catch { s = null; continue; }
+      if (s && !s.installing) break;
+    }
+    installWatch = null;
+    if (s?.installed && !s.error) {
+      show(t("tools_done"), false);
+      toast(t("tools_done"));
+      if ($("#dlg-settings").open) showTools($("#set-tools"), $("#set-tools-install"));
+      // the link typed before the install: check it again now
+      if ($("#dlg-video").open && $("#in-vurl").value.trim()) doProbe();
+    } else {
+      const msg = t("tools_failed", errMessage(s?.error ?? "unknown"));
+      show(msg, true);
+      toast(msg);
+    }
+  })();
+  return installWatch;
+}
 $("#check-close").addEventListener("click", () => { checkCodes = []; renderCheck(); });
 
 // ---------------------------------------------------------------- v0.2: per-download speed limit

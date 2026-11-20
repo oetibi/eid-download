@@ -463,3 +463,8 @@ the_host_of_a_registered_manifest_is_resolved
 the_built_in_ids_make_a_valid_manifest_for_every_browser
 connect_this_copy_see_another_and_never_remove_it
 install_outside_the_runtime_is_an_error_not_a_crash
+# ---- v0.2 owner's report 2026-11-20: "Download the tools" closed the app; diagnostics
+utc_dates_are_exact
+the_log_redacts_rotates_and_the_crash_record_is_reported_once
+a_panic_is_written_with_its_message_and_place
+a_failed_setup_always_says_why

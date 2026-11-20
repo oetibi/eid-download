@@ -32,6 +32,9 @@ import path from "node:path";
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const BIN = path.resolve(arg("--bin", "target\\release"));
+// the local test server is a test helper, not part of the package: it may come from elsewhere
+// (ci-windows runs this test on the binaries extracted from the final ZIP)
+const SERVER = path.resolve(arg("--server", path.join(BIN, "eid-testserver.exe")));
 const OUT = path.resolve(arg("--out", "window-e2e"));
 const ONLINE = process.argv.includes("--online");
 const PEERTUBE = "https://framatube.org/w/kkGMgK9ZtnKfYAgnEtQxbv"; // "What is PeerTube?", CC BY-SA
@@ -42,7 +45,7 @@ const PROFILE = path.join(ROOT, "profile");
 for (const d of ["AppData\\Roaming", "AppData\\Local", "Downloads"]) fs.mkdirSync(path.join(PROFILE, d), { recursive: true });
 const DOWNLOADS = path.join(PROFILE, "Downloads");
 const ENDPOINT = "win" + randomBytes(4).toString("hex");
-const ENV = { ...process.env, USERPROFILE: PROFILE, APPDATA: path.join(PROFILE, "AppData\\Roaming"), LOCALAPPDATA: path.join(PROFILE, "AppData\\Local") };
+let ENV = { ...process.env, USERPROFILE: PROFILE, APPDATA: path.join(PROFILE, "AppData\\Roaming"), LOCALAPPDATA: path.join(PROFILE, "AppData\\Local") };
 const procs = [];
 let failed = 0;
 const results = [];
@@ -83,7 +86,7 @@ function item(needle) {
 
 // ---------------------------------------------------------------- the test server
 async function testServer() {
-  const p = spawn(path.join(BIN, "eid-testserver.exe"), [], { windowsHide: true, stdio: ["ignore", "pipe", "inherit"] });
+  const p = spawn(SERVER, [], { windowsHide: true, stdio: ["ignore", "pipe", "inherit"] });
   procs.push(p);
   let buf = "";
   p.stdout.on("data", (d) => { buf += d; });
@@ -346,6 +349,43 @@ try {
   });
   // put back what the runner had before (normally nothing)
   for (const [b, v] of Object.entries(saved)) if (v) execFileSync("reg", ["add", KEYS[b], "/ve", "/d", v, "/f"], { windowsHide: true });
+  assert(w.errors.length === 0, "script errors in the window: " + w.errors.join(" | "));
+  await stopApp(w);
+  w = null;
+
+  // ===== Part C (owner's report 2026-11-20: "Download the tools" closed the app on a real PC):
+  // a tool install that FAILS. A fresh profile whose tools folder cannot be created (a file is
+  // in its place), so the setup fails at its first step, before any download (no internet).
+  const prof2 = path.join(ROOT, "profile2");
+  for (const d of ["AppData\\Roaming", "AppData\\Local\\EidDownload", "Downloads"]) fs.mkdirSync(path.join(prof2, d), { recursive: true });
+  fs.writeFileSync(path.join(prof2, "AppData\\Local\\EidDownload\\tools"), "not a folder");
+  ENV = { ...ENV, USERPROFILE: prof2, APPDATA: path.join(prof2, "AppData\\Roaming"), LOCALAPPDATA: path.join(prof2, "AppData\\Local") };
+  w = await startApp(path.join(dir, "EidDownload.exe"));
+  await check("10. Download the tools -> the install fails: the window SAYS why, the app stays open, the log records it", async () => {
+    await w.ev(click(".tool[data-cmd=add_video]"));
+    await until(() => w.ev("document.querySelector('#dlg-video').open"), 5000, "video window");
+    await w.ev(typeIn("#in-vurl", "https://www.youtube.com/watch?v=aqz-KE-bpKQ"));
+    await w.ev(click("#btn-probe"));
+    await until(() => w.ev("!document.querySelector('#v-tools').hidden"), 60000, "'tools missing' box");
+    await w.ev(click("#v-install"));
+    await until(() => w.ev("document.querySelector('#dlg-consent').open && document.querySelector('#c-text').textContent.length > 20"), 30000, "agreement");
+    await w.ev("(() => { const c = document.querySelector('#c-agree'); c.checked = true; c.dispatchEvent(new Event('change')); })()");
+    await w.ev(click("#c-install"));
+    await until(() => w.ev("!document.querySelector('#v-error').hidden"), 120000, "the failure shown in the window");
+    const e = await w.ev("document.querySelector('#v-error').textContent");
+    log(`     the window says: ${e}`);
+    assert(/tools/i.test(e) || /الأدوات/.test(e), e);
+    await w.shot("C10-install-failed.png");
+    await sleep(2000);
+    assert(w.p.exitCode === null, `the app closed (exit code ${w.p.exitCode})`);
+    assert(await w.ev("document.querySelector('#dlg-video').open"), "the window is still there");
+    assert(!eid("list").startsWith("ERROR"), "the app stopped answering");
+    const logf = path.join(prof2, "AppData\\Local\\EidDownload\\logs\\eid-download.log");
+    const text = fs.readFileSync(logf, "utf8");
+    log(`     log:\n${text.split(/\r?\n/).filter(Boolean).map((l) => "       " + l).join("\n")}`);
+    assert(/start: Eid Download/.test(text) && /tools install: requested/.test(text) && /tools install: FAILED/.test(text), "log lines missing");
+    assert(!/PANIC/.test(text), "a panic was logged");
+  });
   assert(w.errors.length === 0, "script errors in the window: " + w.errors.join(" | "));
   await stopApp(w);
   w = null;

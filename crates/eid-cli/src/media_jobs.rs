@@ -548,15 +548,20 @@ impl VideoJobs {
         // stderr is drained (a full pipe would block the child); its last error line is kept
         let errs = tokio::spawn(async move {
             let mut last: Option<String> = None;
+            // v0.2: a child that dies without an "error: " line (a panic, a crash) still says
+            // something: its last non-empty line is kept as a fallback
+            let mut other: Option<String> = None;
             if let Some(e) = stderr {
                 let mut r = BufReader::new(e).lines();
                 while let Ok(Some(l)) = r.next_line().await {
                     if let Some(m) = l.strip_prefix("error: ") {
                         last = Some(crate::remote::printable(m));
+                    } else if !l.trim().is_empty() {
+                        other = Some(crate::remote::printable(l.trim()));
                     }
                 }
             }
-            last
+            last.or(other)
         });
         let mut end_err: Option<String> = None;
         if let Some(o) = stdout {

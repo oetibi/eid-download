@@ -155,6 +155,48 @@ try {
     await open("");
   });
 
+  await check("tools install: the window follows it to the end; a failure is SHOWN (never a silent close); success re-checks the link", async () => {
+    const start = async (q) => {
+      await open(q);
+      await ev("document.querySelector('.tool[data-cmd=add_video]').click()");
+      await until("document.querySelector('#dlg-video').open", 3000, "video dialog");
+      await ev(`(() => { const i = document.querySelector('#in-vurl'); i.value = 'https://www.youtube.com/watch?v=abc'; i.dispatchEvent(new Event('input', {bubbles:true})); document.querySelector('#btn-probe').click(); })()`);
+      await until("!document.querySelector('#v-tools').hidden", 5000, "tools-missing box");
+      await ev("document.querySelector('#v-install').click()");
+      await until("document.querySelector('#dlg-consent').open && document.querySelector('#c-text').textContent.length > 20", 3000, "agreement");
+      await ev("const c = document.querySelector('#c-agree'); c.checked = true; c.dispatchEvent(new Event('change'))");
+      await ev("document.querySelector('#c-install').click()");
+      await until("!document.querySelector('#dlg-consent').open", 3000, "agreement closes");
+      await until("/230/.test(document.querySelector('#v-status').textContent)", 3000, "'downloading the tools' shown");
+    };
+    await start("?notools=1&toolsfail=1");
+    await until("!document.querySelector('#v-error').hidden", 8000, "the failure is shown");
+    const e = await ev("document.querySelector('#v-error').textContent");
+    assert(/تعذّر تثبيت الأدوات/.test(e) && /os error 5/.test(e), e);
+    if (arg("--shots")) await shot("tools-install-failed-ar.png");
+    assert(await ev("document.querySelector('#dlg-video').open"), "the window is still there");
+    await ev("document.querySelector('#v-cancel').click()");
+    await start("?notools=1");
+    await until("/اكتمل تثبيت الأدوات/.test(document.querySelector('#v-status').textContent) || !document.querySelector('#v-result').hidden", 8000, "success shown");
+    await until("!document.querySelector('#v-result').hidden", 8000, "the link is checked again after the install");
+    await ev("document.querySelector('#v-cancel').click()");
+  });
+
+  await check("previous crash: the bar names the crash record and opens the logs folder; Settings shows version and build", async () => {
+    await open("?check=last_crash");
+    await until("!document.querySelector('#checkbar').hidden", 3000, "bar");
+    const li = await ev("document.querySelector('#check-list li').dataset.code + '|' + document.querySelector('#check-list li').textContent");
+    assert(li.startsWith("last_crash|") && /crash-1\.txt/.test(li) && /بشكل غير متوقع/.test(li), li);
+    assert(!(await ev("document.querySelector('#check-logs').hidden")), "logs button");
+    await ev("document.querySelector('#check-logs').click()");
+    await until("window.__eidMockOpenedLogs === 1", 2000, "logs folder opened");
+    await ev("document.querySelector('#check-close').click()");
+    await ev("document.querySelector('[data-cmd=settings]').click()");
+    await until("/abc1234/.test(document.querySelector('#about-text').textContent)", 3000, "build shown in Settings");
+    await ev("document.querySelector('#dlg-settings').close()");
+    await open("");
+  });
+
   await check("switches to English (left-to-right) and back", async () => {
     await ev("document.querySelector('#btn-lang').click()");
     await until("document.documentElement.dir === 'ltr'", 3000, "ltr");

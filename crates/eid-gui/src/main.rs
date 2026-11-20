@@ -24,8 +24,20 @@ fn main() {
     // opens a window or touches the single-instance endpoint
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some(eid_gui::worker::VIDEO_WORKER_FLAG) {
+        eid_gui::diag::install_panic_hook("video worker");
         std::process::exit(eid_gui::worker::run(&args[1..]));
     }
+    // v0.2: a panic leaves crash.txt and a log line (owner's report: the app closed with no trace)
+    eid_gui::diag::install_panic_hook("window");
+    eid_gui::diag::log(&format!(
+        "start: Eid Download {} ({}) {} on {}",
+        eid_gui::diag::VERSION,
+        eid_gui::diag::BUILD_COMMIT,
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        std::env::consts::OS
+    ));
     let state = match tauri::async_runtime::block_on(app::boot(endpoint_arg())) {
         Ok(Boot::Owner(state)) => state,
         // the open window came to the front: nothing else to show
@@ -38,6 +50,7 @@ fn main() {
             return;
         }
         Err(e) => {
+            eid_gui::diag::log(&format!("start failed: {e}"));
             fatal_message(TITLE, &fatal_text(&e));
             std::process::exit(1);
         }
@@ -64,6 +77,8 @@ fn main() {
             app::cancel_countdown,
             app::categories,
             app::self_check,
+            app::app_info,
+            app::open_logs,
             app::browser_status,
             app::browser_connect,
             app::browser_disconnect,
@@ -142,6 +157,9 @@ fn main() {
             if let Some(st) = h.try_state::<AppState>() {
                 st.shutdown_blocking();
             }
+            // "start" without this line and without a PANIC line = the process was ended from
+            // outside or by a native crash (Windows: Event Viewer > Application Error)
+            eid_gui::diag::log("exit: normal");
         }
     });
 }

@@ -16,10 +16,14 @@ struct State {
     stdin: Option<eid_platform::process::AsyncChildStdin>,
 }
 
+/// Where the setup reports its steps (the desktop app's log file).
+pub type SetupLog = Arc<dyn Fn(&str) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct VideoSetup {
     jobs: VideoJobs,
     st: Arc<Mutex<State>>,
+    log: Option<SetupLog>,
 }
 
 fn lock(m: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
@@ -32,6 +36,32 @@ impl VideoSetup {
         VideoSetup {
             jobs,
             st: Arc::new(Mutex::new(State::default())),
+            log: None,
+        }
+    }
+
+    /// v0.2: report each step (start, worker started, outcome) to `log`.
+    pub fn with_log(mut self, log: SetupLog) -> VideoSetup {
+        self.log = Some(log);
+        self
+    }
+
+    fn note(&self, s: &str) {
+        if let Some(l) = &self.log {
+            l(s);
+        }
+    }
+
+    /// The text the window shows when the worker ended without installing: its own message,
+    /// or what is known (exit code). Pure, unit tested.
+    pub fn failure_text(code: Option<i32>, err: Option<String>) -> String {
+        match (err, code) {
+            (Some(e), _) => e,
+            (None, Some(c)) => format!(
+                "the video tools were not installed: the setup ended with code {c} (0x{:08X})",
+                c as u32
+            ),
+            (None, None) => "the video tools were not installed: the setup was stopped".into(),
         }
     }
 
@@ -82,11 +112,15 @@ impl VideoSetup {
         if !accept {
             return Err("the agreement is required".into());
         }
+        self.note("tools install: requested (agreement accepted in the window)");
         // the worker process and its driver task need the async runtime; called from outside
         // it (a plain Tauri command runs on the window thread) this used to panic and close
         // the app (real-window test on Windows): refuse instead
-        let rt = tokio::runtime::Handle::try_current()
-            .map_err(|_| "internal error: the tool setup was started outside the app's runtime")?;
+        let rt = tokio::runtime::Handle::try_current().map_err(|_| {
+            let t = "internal error: the tool setup was started outside the app's runtime";
+            self.note(&format!("tools install: refused: {t}"));
+            t
+        })?;
         let _in_rt = rt.enter();
         let mut g = lock(&self.st);
         if g.running {
@@ -102,11 +136,15 @@ impl VideoSetup {
         .iter()
         .map(OsString::from)
         .collect();
-        let mut child = self
-            .jobs
-            .command(&args)
-            .spawn()
-            .map_err(|e| self.jobs.start_error(&e))?;
+        let mut child = self.jobs.command(&args).spawn().map_err(|e| {
+            let t = self.jobs.start_error(&e);
+            self.note(&format!("tools install: the worker did not start: {t}"));
+            t
+        })?;
+        self.note(&format!(
+            "tools install: worker started (pid {})",
+            child.id().map_or("?".into(), |p| p.to_string())
+        ));
         g.running = true;
         g.error = None;
         g.stdin = child.stdin.take();
@@ -117,14 +155,15 @@ impl VideoSetup {
         rt.spawn(async move {
             let _keep = _keep;
             let (code, err) = me.jobs.drive(None, child, krx).await;
+            let error = (code != Some(0)).then(|| VideoSetup::failure_text(code, err));
+            me.note(&match &error {
+                None => "tools install: finished, tools installed".to_owned(),
+                Some(e) => format!("tools install: FAILED (code {code:?}): {e}"),
+            });
             let mut g = lock(&me.st);
             g.running = false;
             g.stdin = None;
-            g.error = if code == Some(0) {
-                None
-            } else {
-                Some(err.unwrap_or_else(|| "the video tools were not installed".into()))
-            };
+            g.error = error;
         });
         Ok(())
     }
@@ -137,6 +176,20 @@ impl VideoSetup {
 
 #[cfg(test)]
 mod tests {
+    /// What the window shows when the setup ends without installing: its own message, else the
+    /// exit code (a crash code such as 0xC0000005 included), never an empty error.
+    #[test]
+    fn a_failed_setup_always_says_why() {
+        use super::VideoSetup;
+        assert_eq!(
+            VideoSetup::failure_text(Some(1), Some("no space".into())),
+            "no space"
+        );
+        let t = VideoSetup::failure_text(Some(-1073741819), None);
+        assert!(t.contains("-1073741819") && t.contains("0xC0000005"), "{t}");
+        assert!(VideoSetup::failure_text(None, None).contains("stopped"));
+    }
+
     #[test]
     fn ipc_and_media_quality_lists_are_the_same() {
         assert_eq!(eid_ipc::VIDEO_QUALITIES, eid_media::args::QUALITY_CHOICES);
