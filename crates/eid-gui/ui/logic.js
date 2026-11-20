@@ -306,6 +306,61 @@ export function videoPage(link) {
 }
 
 /**
+ * v0.2 playlists: the playlist a YouTube link carries, if any. `watch?v=X&list=Y` and
+ * `playlist?list=Y` give `{ listId, playlistUrl }` (canonical `playlist?list=` address, the form
+ * yt-dlp reads as the whole list); `videoUrl` is set when the link names one video. Lists that
+ * are personal or generated (Watch Later `WL`, Liked `LL`/`LM`, Mixes `RD…`) are not offered.
+ * A bare `watch?v=` gives no playlist: it is never guessed (from a title or anything else).
+ */
+export function linkPlaylist(link) {
+  let u;
+  try { u = new URL(String(link ?? "").trim()); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol) || u.username || u.password) return null;
+  const host = u.hostname.toLowerCase().replace(/\.$/, "");
+  const yt = host === "youtu.be" || ["youtube.com", "youtube-nocookie.com"].some((d) => ["", "www.", "m.", "music."].some((p) => host === p + d));
+  if (!yt) return null;
+  const list = u.searchParams.get("list");
+  const offer = !!list && /^[A-Za-z0-9_-]{2,64}$/.test(list) && !["WL", "LL", "LM"].includes(list) && !list.startsWith("RD");
+  const kind = videoPage(link);
+  const out = {};
+  if (kind === "video") {
+    const seg = u.pathname.split("/").filter(Boolean);
+    const v = host === "youtu.be" ? seg[0] : seg[0] === "watch" ? u.searchParams.get("v") : seg[1];
+    if (v && /^[A-Za-z0-9_-]{11}$/.test(v)) out.videoUrl = "https://www.youtube.com/watch?v=" + v;
+  }
+  if (offer) {
+    out.listId = list;
+    out.playlistUrl = "https://www.youtube.com/playlist?list=" + list;
+  }
+  return out.videoUrl || out.playlistUrl ? out : null;
+}
+
+/**
+ * v0.2: a range of playlist items typed by the user: "1-10, 15, 20-25" (also "،" and "–").
+ * `available` is the list of item numbers the playlist has. Returns `{ items: number[] }`
+ * (sorted, only available numbers) or `{ error: "empty" | "syntax" | "none" }`.
+ */
+export function parseRange(text, available) {
+  const have = new Set(available);
+  const t = String(text ?? "").replace(/[،؛;]/g, ",").replace(/[–—]/g, "-").trim();
+  if (!t) return { error: "empty" };
+  const out = new Set();
+  for (const part of t.split(",")) {
+    const p = part.trim();
+    if (!p) continue;
+    const m = /^(\d{1,6})(?:\s*-\s*(\d{1,6}))?$/.exec(p);
+    if (!m) return { error: "syntax" };
+    let a = Number(m[1]);
+    let b = m[2] === undefined ? a : Number(m[2]);
+    if (a > b) [a, b] = [b, a];
+    if (b - a > 100000) return { error: "syntax" };
+    for (let i = a; i <= b; i++) if (have.has(i)) out.add(i);
+  }
+  if (!out.size) return { error: "none" };
+  return { items: [...out].sort((x, y) => x - y) };
+}
+
+/**
  * Links in dropped or pasted text (text/uri-list or plain text): http(s) only, without
  * duplicates, at most `max`. Comment lines of a uri-list (#...) are skipped.
  */

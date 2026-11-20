@@ -1,7 +1,7 @@
 // Unit tests of the window's pure logic (node --test, no browser).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeList, categoryOf, inView, buildView, clickSelect, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, pollDelay, segmentView, matchesQuery, normalizeCols, gridTemplate, moveCol, COLUMNS, normalizeToolbar, linksFromText, finishedNow, videoPage } from "../logic.js";
+import { mergeList, categoryOf, inView, buildView, clickSelect, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, pollDelay, segmentView, matchesQuery, normalizeCols, gridTemplate, moveCol, COLUMNS, normalizeToolbar, linksFromText, finishedNow, videoPage, linkPlaylist, parseRange } from "../logic.js";
 
 const it = (id, o = {}) => ({ id, status: "pending", name: `f${id}.zip`, url: "", folder: "D", attempts: 0, error_kind: null, error: null, rate: null, ...o });
 
@@ -135,4 +135,34 @@ test("video pages: the same rule as eid_engine::links::video_page", () => {
     ["https://u:p@www.youtube.com/watch?v=abc", null], ["ftp://www.youtube.com/watch?v=abc", null],
     ["javascript:alert(1)//youtube.com/watch?v=a", null], ["https://example.com/video.mp4", null], ["not a link", null], [null, null],
   ]) assert.equal(videoPage(l), want, String(l));
+});
+
+test("playlist of a link: watch&list offers both, playlist?list the list, bare watch nothing (never guessed)", () => {
+  assert.deepEqual(linkPlaylist("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta123&index=1"),
+    { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", listId: "PLarafta123", playlistUrl: "https://www.youtube.com/playlist?list=PLarafta123" });
+  assert.deepEqual(linkPlaylist("https://youtu.be/dQw4w9WgXcQ?list=PLx_1-2"),
+    { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", listId: "PLx_1-2", playlistUrl: "https://www.youtube.com/playlist?list=PLx_1-2" });
+  assert.deepEqual(linkPlaylist("https://m.youtube.com/playlist?list=PLabc"), { listId: "PLabc", playlistUrl: "https://www.youtube.com/playlist?list=PLabc" });
+  assert.deepEqual(linkPlaylist("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" });
+  // personal or generated lists are not offered; the video still is
+  for (const l of ["WL", "LL", "LM", "RDdQw4w9WgXcQ"]) {
+    assert.deepEqual(linkPlaylist(`https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=${l}`), { videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }, l);
+  }
+  for (const no of ["https://example.com/watch?v=dQw4w9WgXcQ&list=PL1", "https://www.youtube.com/playlist?list=a/b", "https://u:p@www.youtube.com/playlist?list=PL1", "not a link", null]) {
+    assert.equal(linkPlaylist(no), null, String(no));
+  }
+});
+
+test("episode ranges: lists, ranges, Arabic separators, only existing numbers", () => {
+  const all = Array.from({ length: 87 }, (_, i) => i + 1);
+  assert.deepEqual(parseRange("1-3, 15, 20-22", all), { items: [1, 2, 3, 15, 20, 21, 22] });
+  assert.deepEqual(parseRange("5–7، 9", all), { items: [5, 6, 7, 9] });
+  assert.deepEqual(parseRange("10-8", all), { items: [8, 9, 10] });
+  assert.deepEqual(parseRange("85-200", all), { items: [85, 86, 87] });
+  assert.deepEqual(parseRange(" 3 , 3 ,", all), { items: [3] });
+  assert.deepEqual(parseRange("", all), { error: "empty" });
+  assert.deepEqual(parseRange("1-x", all), { error: "syntax" });
+  assert.deepEqual(parseRange("abc", all), { error: "syntax" });
+  assert.deepEqual(parseRange("200-300", all), { error: "none" });
+  assert.deepEqual(parseRange("1-999999", [2, 5]), { error: "syntax" });
 });

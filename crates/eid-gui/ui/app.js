@@ -10,6 +10,7 @@ import {
   ACTIVE, BUSY, CATEGORIES, mergeList, buildView, inView, categoryOf, fraction, clickSelect,
   pollDelay, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
   COLUMNS, TOOLS, normalizeCols, gridTemplate, moveCol, normalizeToolbar, linksFromText, finishedNow, videoPage,
+  linkPlaylist, parseRange,
 } from "./logic.js";
 
 const tauri = window.__TAURI__;
@@ -1031,6 +1032,8 @@ $("#set-tools-install").addEventListener("click", async () => {
 
 // ---------------------------------------------------------------- video / playlist dialog
 let probe = null; // { url, result }
+// v0.2: a link with list= : both probes, and which one the dialog shows
+let scope = null; // { ctx: linkPlaylist(), video: {url,result}|null, list: {url,result}|null }
 let probeSeq = 0;
 let videoFolder = null;
 const vStatus = (msg) => { const s = $("#v-status"); s.hidden = !msg; s.textContent = msg ?? ""; };
@@ -1067,6 +1070,7 @@ async function doProbe() {
   if (!/^https?:\/\/\S+$/i.test(url)) { vError(errText("bad_url")); return; }
   const seq = ++probeSeq;
   probe = null;
+  scope = { ctx: linkPlaylist(url), video: null, list: null };
   $("#v-result").hidden = true;
   updateVideoStart();
   $("#btn-probe").disabled = true;
@@ -1075,6 +1079,7 @@ async function doProbe() {
     const r = await api.call("video_probe", { url });
     if (seq !== probeSeq) return;
     probe = { url, result: r };
+    if (r.kind === "playlist") scope.list = probe; else scope.video = probe;
     renderProbe();
   } catch (e) {
     if (seq !== probeSeq) return;
@@ -1088,6 +1093,14 @@ async function doProbe() {
 function renderProbe() {
   const r = probe.result;
   $("#v-result").hidden = false;
+  // v0.2: a video link that carries a playlist (watch?v=…&list=…): offer both; a bare video
+  // link: say how to get a whole playlist (never guessed)
+  const ctx = scope?.ctx;
+  $("#v-scope").hidden = !(ctx?.playlistUrl && (scope.video || r.kind === "video"));
+  if (!$("#v-scope").hidden) $(`#v-scope input[value=${r.kind === "playlist" ? "list" : "video"}]`).checked = true;
+  $("#v-list-hint").hidden = !(r.kind === "video" && ctx?.videoUrl && !ctx.playlistUrl);
+  $("#v-range").value = "";
+  $("#v-range-error").hidden = true;
   setText($("#v-name"), r.title ?? "");
   const meta = [r.kind === "playlist" ? t("vd_kind_playlist") : t("vd_kind_video")];
   if (r.uploader) meta.push(`${t("vd_by")}: ${r.uploader}`);
@@ -1133,6 +1146,47 @@ function updateVideoStart() {
   $("#v-start").disabled = !ok;
 }
 
+// v0.2: "this video only" / "the whole playlist"
+$("#v-scope").addEventListener("change", async (e) => {
+  if (!scope?.ctx?.playlistUrl) return;
+  vError(null);
+  if (e.target.value === "video" && scope.video) { probe = scope.video; renderProbe(); return; }
+  if (e.target.value === "list") {
+    if (scope.list) { probe = scope.list; renderProbe(); return; }
+    const seq = ++probeSeq;
+    const url = scope.ctx.playlistUrl;
+    vStatus(t("vd_probing"));
+    $("#v-start").disabled = true;
+    try {
+      const r = await api.call("video_probe", { url });
+      if (seq !== probeSeq) return;
+      scope.list = { url, result: r };
+      probe = scope.list;
+      renderProbe();
+    } catch (err) {
+      if (seq !== probeSeq) return;
+      vError(errMessage(String(err?.message ?? err).replace(/^[A-Z_]+:\s*/, "")));
+      $("#v-scope input[value=video]").checked = true;
+    } finally {
+      if (seq === probeSeq) vStatus(null);
+      updateVideoStart();
+    }
+  }
+});
+// v0.2: select a range of episodes ("1-10, 15, 20-25")
+function applyRange() {
+  if (!probe || probe.result.kind !== "playlist") return;
+  const boxes = [...document.querySelectorAll("#v-items input")];
+  const r = parseRange($("#v-range").value, boxes.map((c) => Number(c.dataset.index)));
+  const errEl = $("#v-range-error");
+  if (r.error) { errEl.textContent = TEXT[settings.lang].vd_range_err[r.error]; errEl.hidden = false; return; }
+  errEl.hidden = true;
+  const want = new Set(r.items);
+  for (const c of boxes) c.checked = want.has(Number(c.dataset.index));
+  updateVideoStart();
+}
+$("#v-range-apply").addEventListener("click", applyRange);
+$("#v-range").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); applyRange(); } });
 $("#btn-probe").addEventListener("click", doProbe);
 $("#in-vurl").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doProbe(); } });
 $("#in-vurl").addEventListener("input", () => {

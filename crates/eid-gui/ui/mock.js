@@ -263,7 +263,9 @@ export function mockApi(params = new URLSearchParams()) {
       if (!toolsInstalled) throw "TOOLS_MISSING: yt-dlp is not installed";
       if (!/^https?:\/\//i.test(url)) throw "bad_url";
       if (/fail/i.test(url)) throw "ERROR: [youtube] This video is unavailable";
-      if (/[?&]list=/.test(url)) {
+      // like the real backend: watch?v=…&list=… is probed as the video alone (--no-playlist);
+      // the playlist itself is probed at playlist?list=… (--flat-playlist --yes-playlist)
+      if (/[?&]list=/.test(url) && !/[?&]v=/.test(url)) {
         const count = /big/.test(url) ? 300 : 12;
         return {
           kind: "playlist", title: "قائمة دروس Rust — Rust lessons", uploader: "Example Channel",
@@ -282,7 +284,7 @@ export function mockApi(params = new URLSearchParams()) {
     playlist_add: ({ url, quality, items: pick, if_missing }) => {
       if (!["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"].includes(quality)) throw "bad_quality";
       if (if_missing != null && !["lower", "higher", "skip"].includes(if_missing)) throw "invalid input: if_missing";
-      window.__eidMockLastPlaylist = { url, quality, if_missing };
+      window.__eidMockLastPlaylist = { url, quality, if_missing, items: pick ?? null };
       const count = /big/.test(url) ? 300 : 12;
       const idx = pick ?? Array.from({ length: count }, (_, i) => i + 1);
       const its = idx.map((i) => ({ index: i, title: i === 5 ? "الدرس 5 (will fail once)" : `Lesson ${i}`, state: "queued", progress: 0 }));

@@ -197,6 +197,38 @@ try {
     await open("");
   });
 
+  await check("playlist link: watch&list offers 'this video' or 'the whole playlist'; a range picks episodes; bare watch says how to get a list", async () => {
+    await open("");
+    const probeUrl = async (u) => {
+      await ev("document.querySelector('.tool[data-cmd=add_video]').click()");
+      await until("document.querySelector('#dlg-video').open", 3000, "video dialog");
+      await ev(`(() => { const i = document.querySelector('#in-vurl'); i.value = ${JSON.stringify(u)}; i.dispatchEvent(new Event('input', {bubbles:true})); document.querySelector('#btn-probe').click(); })()`);
+      await until("!document.querySelector('#v-result').hidden", 8000, "probe result");
+    };
+    await probeUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLarafta&index=1");
+    assert(!(await ev("document.querySelector('#v-scope').hidden")), "both choices offered for watch&list");
+    assert(await ev("document.querySelector('#v-scope input[value=video]').checked"), "'this video' first");
+    assert(await ev("document.querySelector('#v-playlist').hidden"), "no episode list for one video");
+    await ev("(() => { const r = document.querySelector('#v-scope input[value=list]'); r.checked = true; r.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    await until("!document.querySelector('#v-playlist').hidden && document.querySelectorAll('#v-items input').length === 12", 8000, "the playlist's episodes");
+    if (arg("--shots")) await shot("playlist-scope-ar.png");
+    // a wrong range is explained, a good one selects exactly those episodes
+    await ev("document.querySelector('#v-range').value = '1-x'; document.querySelector('#v-range-apply').click()");
+    assert(!(await ev("document.querySelector('#v-range-error').hidden")), "bad range not explained");
+    await ev("document.querySelector('#v-range').value = '2-4، 7'; document.querySelector('#v-range-apply').click()");
+    const picked = await ev("[...document.querySelectorAll('#v-items input:checked')].map((c) => Number(c.dataset.index))");
+    assert(JSON.stringify(picked) === "[2,3,4,7]", JSON.stringify(picked));
+    await ev("document.querySelector('#v-start').click()");
+    await until("window.__eidMockLastPlaylist?.items?.length === 4", 5000, "playlist sent");
+    const sent = await ev("window.__eidMockLastPlaylist");
+    assert(sent.url === "https://www.youtube.com/playlist?list=PLarafta" && JSON.stringify(sent.items) === "[2,3,4,7]", JSON.stringify(sent));
+    // back to 'this video' shows the video again (no second probe of the list needed)
+    await probeUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    assert(await ev("document.querySelector('#v-scope').hidden"), "no playlist choice without list=");
+    assert(!(await ev("document.querySelector('#v-list-hint').hidden")), "the hint about list= links");
+    await ev("document.querySelector('#v-cancel').click()");
+  });
+
   await check("switches to English (left-to-right) and back", async () => {
     await ev("document.querySelector('#btn-lang').click()");
     await until("document.documentElement.dir === 'ltr'", 3000, "ltr");

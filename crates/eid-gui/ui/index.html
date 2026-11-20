@@ -399,6 +399,11 @@
         <button type="button" id="v-install" data-t="v_install"></button>
       </div>
       <div id="v-result" hidden>
+        <div id="v-scope" class="v-scope" role="radiogroup" hidden>
+          <label class="check"><input type="radio" name="vscope" value="video" checked><span data-t="vd_scope_video"></span></label>
+          <label class="check"><input type="radio" name="vscope" value="list"><span data-t="vd_scope_list"></span></label>
+        </div>
+        <p id="v-list-hint" class="note" data-t="vd_list_hint" hidden></p>
         <h3><bdi id="v-name" dir="auto"></bdi></h3>
         <p id="v-meta" class="note"></p>
         <label for="v-quality" data-t="vd_quality"></label>
@@ -416,6 +421,12 @@
               <button type="button" id="v-none" class="ghost small" data-t="vd_none"></button>
             </span>
           </div>
+          <div class="row v-range">
+            <label for="v-range" data-t="vd_range"></label>
+            <input id="v-range" type="text" dir="ltr" spellcheck="false" autocomplete="off" placeholder="1-10, 15, 20-25">
+            <button type="button" id="v-range-apply" class="ghost small" data-t="vd_range_apply"></button>
+          </div>
+          <p id="v-range-error" class="error" hidden></p>
           <ul id="v-items" class="v-items"></ul>
           <p id="v-folder-note" class="note"></p>
         </div>
