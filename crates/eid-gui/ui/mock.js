@@ -273,20 +273,20 @@ export function mockApi(params = new URLSearchParams()) {
         const count = /big/.test(url) ? 300 : 12;
         return {
           kind: "playlist", title: "قائمة دروس Rust — Rust lessons", uploader: "Example Channel",
-          qualities: ["360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best", "audio"], // 4320p must be hidden by the UI
+          qualities: ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "8640p", "best", "audio"], // 8640p must be hidden by the UI
           items: Array.from({ length: count }, (_, i) => ({ index: i + 1, id: `id${i + 1}`, title: i === 4 ? "الدرس 5 (will fail once)" : `Lesson ${i + 1}: ${["ownership", "borrowing", "traits", "async", "errors"][i % 5]}`, duration: 300 + i * 17 })),
         };
       }
       return { kind: "video", title: "Big Buck Bunny — sample video", uploader: "Example Channel", duration: 596, qualities: QUALS };
     },
     video_add: ({ url, quality }) => {
-      if (!["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"].includes(quality)) throw "bad_quality";
+      if (!["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best", "audio"].includes(quality)) throw "bad_quality";
       const j = { job: nextJob++, kind: "video", title: "Big Buck Bunny — sample video", url, state: "queued", quality, done_items: 0, total_items: 1, failed_items: 0, bytes: 0, total_bytes: null, speed: 0, items: [{ index: 1, title: "Big Buck Bunny — sample video", state: "queued", progress: 0 }] };
       jobs.unshift(j);
       return { job: j.job };
     },
     playlist_add: ({ url, quality, items: pick, if_missing }) => {
-      if (!["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"].includes(quality)) throw "bad_quality";
+      if (!["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best", "audio"].includes(quality)) throw "bad_quality";
       if (if_missing != null && !["lower", "higher", "skip"].includes(if_missing)) throw "invalid input: if_missing";
       window.__eidMockLastPlaylist = { url, quality, if_missing, items: pick ?? null };
       const count = /big/.test(url) ? 300 : 12;

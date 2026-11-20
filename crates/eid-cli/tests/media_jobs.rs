@@ -140,8 +140,8 @@ async fn body() {
     assert_eq!(p["kind"], "playlist");
     assert_eq!(p["items"].as_array().unwrap().len(), 3);
     assert!(
-        v.add(Kind::Playlist, &purl, "4320p", None, None).is_err(),
-        "no 8K"
+        v.add(Kind::Playlist, &purl, "8640p", None, None).is_err(),
+        "nothing above 8K"
     );
     assert!(v
         .add(Kind::Video, &purl, "720p", Some(vec![1]), None)

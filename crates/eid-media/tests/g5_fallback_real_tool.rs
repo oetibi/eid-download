@@ -96,9 +96,13 @@ fn real_ytdlp_picks_what_each_fallback_promises() {
         assert_eq!(pick(&ytdlp, &crop, &sel), v("v1012+a"), "{sel}");
     }
 
-    // only 8K above the asked height: "higher" never takes 8K, falls back to the shorter one
-    let only8k = info_json(d.path(), &[480, 4320, 4321, 4322]);
-    assert_eq!(pick(&ytdlp, &only8k, &higher_selector(2160)), v("v480+a"));
-    assert_eq!(pick(&ytdlp, &only8k, &height_selector(2160)), v("v480+a"));
-    assert_eq!(pick(&ytdlp, &only8k, &exact_selector(2160)), None);
+    // owner 2026-11-20: 8K is the tallest; "higher" from 4K takes 8K, never anything taller
+    let tall = info_json(d.path(), &[480, 4320, 8640]);
+    assert_eq!(pick(&ytdlp, &tall, &higher_selector(2160)), v("v4320+a"));
+    assert_eq!(pick(&ytdlp, &tall, &height_selector(2160)), v("v480+a"));
+    assert_eq!(pick(&ytdlp, &tall, &exact_selector(2160)), None);
+    // only above 8K above the asked height: falls back to the shorter one
+    let above8k = info_json(d.path(), &[480, 8640, 8641]);
+    assert_eq!(pick(&ytdlp, &above8k, &higher_selector(2160)), v("v480+a"));
+    assert_eq!(pick(&ytdlp, &above8k, &height_selector(4320)), v("v480+a"));
 }

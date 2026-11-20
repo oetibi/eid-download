@@ -402,7 +402,7 @@ the_background_server_refuses_show_and_the_app_answers_it
 fatal_text_keeps_the_reason_and_drops_control_characters
 # ---- v0.1 video jobs machine interface (fake tool; NOT proof that real YouTube works)
 probe_refuses_before_consent_and_tools_and_installs_nothing
-probe_of_a_video_offers_only_available_heights_never_above_2160
+probe_of_a_video_offers_only_available_heights_never_above_4320
 probe_of_a_playlist_lists_its_items_in_order
 playlist_events_and_items_selection
 single_video_events_report_the_height_obtained
@@ -427,7 +427,7 @@ a_state_file_of_another_download_or_an_unsafe_name_is_never_shown
 a_state_file_behind_a_symlink_is_not_followed
 finished_items_show_a_full_map
 # ---- v0.2 video quality fallback (lower/higher/skip); real-yt-dlp selector check is #[ignore] (STATUS)
-fallback_names_and_selectors_never_go_above_4k
+fallback_names_and_selectors_never_go_above_8k
 a_v01_saved_job_without_a_fallback_loads_as_lower_and_bad_fallbacks_are_refused
 # ---- v0.2 desktop: tray, close-to-tray, clipboard (the Windows clipboard round trip runs on ci-windows)
 a_v01_settings_file_loads_with_tray_on_and_clipboard_off

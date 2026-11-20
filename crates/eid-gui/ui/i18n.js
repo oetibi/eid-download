@@ -156,7 +156,7 @@ export const TEXT = {
     vd_none_selected: "اختر عنصراً واحداً على الأقل.",
     vd_kind_video: "فيديو", vd_kind_playlist: "قائمة تشغيل",
     vd_by: "القناة", vd_duration: "المدة", vd_items: (n) => `${n} عنصر`,
-    q_best: "أفضل جودة متاحة (حتى 4K)", q_audio: "صوت فقط (MP3)", q_2160p: "2160p (4K)",
+    q_best: "أفضل جودة متاحة (حتى 8K)", q_audio: "صوت فقط (MP3)", q_2160p: "2160p (4K)", q_4320p: "4320p (8K)",
     video_added: "أُضيفت مهمة الفيديو.",
     // jobs
     jobs_empty: "لا توجد مهام فيديو. اضغط «تحميل فيديو أو قائمة تشغيل».",
@@ -364,7 +364,7 @@ export const TEXT = {
     vd_none_selected: "Select at least one item.",
     vd_kind_video: "Video", vd_kind_playlist: "Playlist",
     vd_by: "Channel", vd_duration: "Duration", vd_items: (n) => `${n} items`,
-    q_best: "Best available (up to 4K)", q_audio: "Audio only (MP3)", q_2160p: "2160p (4K)",
+    q_best: "Best available (up to 8K)", q_audio: "Audio only (MP3)", q_2160p: "2160p (4K)", q_4320p: "4320p (8K)",
     video_added: "Video job added.",
     jobs_empty: "No video jobs. Click “Download video or playlist”.",
     jobs_unavailable: "Video jobs are not available in this version of the app.",

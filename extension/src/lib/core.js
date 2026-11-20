@@ -19,13 +19,13 @@
   const MAX_TEXT = 300;
 
   /**
-   * Owner's quality policy (docs/V0.1-CONTRACT.md): fixed choices, nothing taller than 2160p.
-   * Order is the display order.
+   * Owner's quality policy (2026-11-20): fixed choices from 144p to 4320p (8K), nothing taller.
+   * Order is the display order (tallest first).
    */
-  const QUALITIES = ["2160p", "1440p", "1080p", "720p", "480p", "360p"];
+  const QUALITIES = ["4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p"];
   const SPECIAL = ["best", "audio"];
   const ALL_QUALITIES = QUALITIES.concat(SPECIAL);
-  const MAX_HEIGHT = 2160;
+  const MAX_HEIGHT = 4320;
 
   const YT_HOSTS = new Set([
     "youtube.com",
@@ -141,7 +141,7 @@
 
   /**
    * Keep only policy qualities, in policy order, without duplicates. Anything taller than
-   * 2160p (8K, "4320p", "2880p"…) or unknown is dropped. `best` and `audio` are kept only if
+   * 4320p ("8640p"…), a height outside the fixed list ("2880p") or unknown is dropped. `best` and `audio` are kept only if
    * the app offered them (the app knows whether audio extraction is possible).
    */
   function filterQualities(list) {

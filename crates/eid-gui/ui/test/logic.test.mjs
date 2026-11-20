@@ -35,8 +35,9 @@ test("sorting is stable newest-first on ties; selection with ctrl/shift", () => 
   assert.deepEqual([...r.selected].sort(), [1, 3]);
 });
 
-test("quality policy never offers more than 2160p", () => {
-  assert.deepEqual(safeQualities(["4320p", "2880p", "2160p", "best", "audio", "junk"]), ["2160p", "best", "audio"]);
+test("quality policy: 144p to 4320p tallest first, nothing taller, only known choices", () => {
+  assert.deepEqual(safeQualities(["8640p", "2880p", "144p", "audio", "4320p", "best", "2160p", "junk", "240p"]),
+    ["4320p", "2160p", "240p", "144p", "best", "audio"]);
 });
 
 test("formatting and job progress", () => {

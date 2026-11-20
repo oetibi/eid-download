@@ -24,7 +24,7 @@ $ver = (Get-Item $bin).VersionInfo.ProductVersion
 Write-Host "$Browser $ver at $bin"
 
 $candidates = @{
-  brave   = @('HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts')
+  brave   = @('HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts', 'HKCU\Software\Google\Chrome\NativeMessagingHosts', 'HKCU\Software\Chromium\NativeMessagingHosts')
   opera   = @('HKCU\Software\Opera Software\NativeMessagingHosts', 'HKCU\Software\Google\Chrome\NativeMessagingHosts', 'HKCU\Software\Chromium\NativeMessagingHosts')
   vivaldi = @('HKCU\Software\Vivaldi\NativeMessagingHosts', 'HKCU\Software\Google\Chrome\NativeMessagingHosts', 'HKCU\Software\Chromium\NativeMessagingHosts')
 }[$Browser]

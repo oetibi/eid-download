@@ -11,10 +11,10 @@ pub const MAX_NAME_LEN: usize = 255;
 pub const MAX_TOKEN_LEN: usize = 128;
 /// Most playlist items one `add_playlist` may name.
 pub const MAX_ITEMS: usize = 5000;
-/// The only video qualities accepted (v0.1 policy, docs/V0.1-CONTRACT.md: nothing above 4K).
+/// The only video qualities accepted (owner 2026-11-20: 144p to 4320p (8K), nothing taller).
 /// Same list as the media crate's `QUALITY_CHOICES` (checked by a test in eid-cli).
 pub const VIDEO_QUALITIES: &[&str] = &[
-    "360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio",
+    "144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best", "audio",
 ];
 /// v0.2: what to do when the chosen height is missing. Same list as the media crate's
 /// `FALLBACK_CHOICES` (checked by a test in eid-cli). Absent = `lower` (the v0.1 behaviour).
@@ -343,7 +343,7 @@ mod tests {
             matches!(r.command, Command::AddVideo { if_missing: Some(ref f), .. } if f == "higher")
         );
         for bad in [
-            r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"4320p"}}"#,
+            r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"8640p"}}"#,
             r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"bv*+ba"}}"#,
             r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"720p","if_missing":"any"}}"#,
             r#"{"v":1,"id":"x","command":{"cmd":"add_video","url":"https://y.test/w","quality":"720p","if_missing":"--exec x"}}"#,

@@ -496,12 +496,15 @@ select { font: inherit; padding: 3px 6px; border: 1px solid #d1d5db; border-radi
   const Q_KEYS = {
     best: "qBest",
     audio: "qAudio",
+    "4320p": "q4320",
     "2160p": "q2160",
     "1440p": "q1440",
     "1080p": "q1080",
     "720p": "q720",
     "480p": "q480",
     "360p": "q360",
+    "240p": "q240",
+    "144p": "q144",
   };
   // the menu lists "best" first, then heights from tall to short, then audio
   function menuOrder(qs) {

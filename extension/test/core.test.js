@@ -92,20 +92,20 @@ test("classifyUrl: non-video YouTube pages, other sites, junk", () => {
   }
 });
 
-test("filterQualities: policy order, 2160p cap, no 8K, no unknowns, no duplicates", () => {
+test("filterQualities: tallest first, 4320p cap, nothing above 8K, no unknowns, no duplicates", () => {
   assert.deepEqual(
-    C.filterQualities(["audio", "720p", "4320p", "2160p", "best", "720p", "8k", "2880p", "144p", 1080, null, "1080p"]),
-    ["2160p", "1080p", "720p", "best", "audio"],
+    C.filterQualities(["audio", "720p", "4320p", "2160p", "best", "720p", "8k", "2880p", "144p", 1080, null, "1080p", "240p"]),
+    ["4320p", "2160p", "1080p", "720p", "240p", "144p", "best", "audio"],
   );
-  assert.deepEqual(C.filterQualities(["4320p", "2880p", "8K", "8640p"]), []);
+  assert.deepEqual(C.filterQualities(["2880p", "8K", "8640p", "4321p"]), []);
   assert.deepEqual(C.filterQualities("1080p"), []);
   assert.deepEqual(C.filterQualities(undefined), []);
   for (const q of C.ALL_QUALITIES) {
     const h = C.heightOf(q);
     assert.ok(h === null || h <= C.MAX_HEIGHT, q);
   }
-  assert.equal(C.MAX_HEIGHT, 2160);
-  assert.deepEqual(C.ALL_QUALITIES, ["2160p", "1440p", "1080p", "720p", "480p", "360p", "best", "audio"]);
+  assert.equal(C.MAX_HEIGHT, 4320);
+  assert.deepEqual(C.ALL_QUALITIES, ["4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p", "best", "audio"]);
 });
 
 test("normalizeProbe: validates shape, filters qualities, cleans text, bounds items", () => {
@@ -117,10 +117,10 @@ test("normalizeProbe: validates shape, filters qualities, cleans text, bounds it
     title: "  Hello\u202e\u0000 world\n ",
     uploader: 7,
     duration: -1,
-    qualities: ["4320p", "1080p", "best", "audio"],
+    qualities: ["8640p", "4320p", "1080p", "best", "audio"],
     extra: "ignored",
   });
-  assert.deepEqual(v, { kind: "video", title: "Hello world", qualities: ["1080p", "best", "audio"] });
+  assert.deepEqual(v, { kind: "video", title: "Hello world", qualities: ["4320p", "1080p", "best", "audio"] });
   const long = C.normalizeProbe({ kind: "video", title: "x".repeat(1000), qualities: [] });
   assert.ok(long.title.length <= 300);
   const p = C.normalizeProbe({
@@ -192,7 +192,7 @@ test("buildRequest: rejects everything outside the browser allow-list and policy
     [{ cmd: "probe", url: "https://h/" + "a".repeat(9000) }, "bad_url"],
     [{ cmd: "probe" }, "bad_url"],
     [{ cmd: "add", url: "data:video/mp4;base64,AAAA" }, "bad_url"],
-    [{ cmd: "add_video", url: WATCH, quality: "4320p" }, "bad_quality"],
+    [{ cmd: "add_video", url: WATCH, quality: "8640p" }, "bad_quality"],
     [{ cmd: "add_video", url: WATCH, quality: "8k" }, "bad_quality"],
     [{ cmd: "add_video", url: WATCH, quality: "2160" }, "bad_quality"],
     [{ cmd: "add_video", url: WATCH }, "bad_quality"],

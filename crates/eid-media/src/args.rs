@@ -31,17 +31,18 @@ pub const EJS_JITLESS: &str = "youtube-ejs:jitless=true";
 pub const REMUX_VIDEO: &str = "mp4";
 /// Longest URL we accept.
 pub const MAX_URL: usize = 8192;
-/// Tallest video we ever ask for: 2160 (4K). The owner's policy is "no 8K": anything taller is
-/// refused everywhere, and `best` means the best available up to this height (v0.1 contract).
-pub const MAX_HEIGHT: u32 = 2160;
+/// Tallest video we ever ask for: 4320 (8K). Owner's decision 2026-11-20 (it replaces the v0.1
+/// "no 8K" rule): 8K is offered when the video has it; anything taller is refused everywhere,
+/// and `best` means the best available up to this height.
+pub const MAX_HEIGHT: u32 = 4320;
 
-/// The fixed quality choices of the v0.1 policy, in the order the UI shows them.
+/// The fixed quality choices, shortest first (the menus show the heights tallest first).
 pub const QUALITY_CHOICES: &[&str] = &[
-    "360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio",
+    "144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best", "audio",
 ];
 
 /// The fixed heights of [`QUALITY_CHOICES`].
-pub const POLICY_HEIGHTS: &[u32] = &[360, 480, 720, 1080, 1440, 2160];
+pub const POLICY_HEIGHTS: &[u32] = &[144, 240, 360, 480, 720, 1080, 1440, 2160, 4320];
 
 /// Every flag we may emit, and whether it takes a value. A valued flag is always emitted as a
 /// single `--flag=value` argument, so a value can never be mistaken for a flag.
@@ -250,7 +251,7 @@ pub enum Fallback {
     /// The tallest format below it, else the shortest one (the v0.1 behaviour).
     #[default]
     Lower,
-    /// The nearest taller format up to 4K, else the nearest shorter one.
+    /// The nearest taller format up to 8K, else the nearest shorter one.
     Higher,
     /// Do not download that item.
     Skip,
@@ -341,9 +342,9 @@ impl Quality {
 ///
 /// 1. `bv*[height<=h]+ba` / `b[height<=h]`: the best video not taller than `h` (+ best audio);
 /// 2. `wv*[height<=MAX]+ba` / `w[height<=MAX]`: nothing that short exists, so the *worst* (the
-///    shortest) video, still capped at 4K;
+///    shortest) video, still capped at 8K;
 /// 3. `b[height<=?MAX]`: sites that publish no height at all (the `?` lets an unknown height
-///    through; a known one above 4K still never does).
+///    through; a known one above 8K still never does).
 pub fn height_selector(h: u32) -> String {
     let m = MAX_HEIGHT;
     format!("bv*[height<={h}]+ba/b[height<={h}]/wv*[height<={m}]+ba/w[height<={m}]/b[height<=?{m}]")
@@ -378,8 +379,8 @@ pub fn exact_selector(h: u32) -> String {
 
 /// Which of the fixed heights to offer for a video, from the heights of its formats: a choice
 /// is offered when some video format is taller than the previous choice and not taller than
-/// it (so a 1012-pixel "1080p" crop shows as 1080p, a 144p-only video as 360p and the job then
-/// reports the 144 it got). Heights above [`MAX_HEIGHT`] are never offered.
+/// it (so a 1012-pixel "1080p" crop shows as 1080p). Heights above [`MAX_HEIGHT`] are never
+/// offered.
 pub fn offered_heights(heights: impl IntoIterator<Item = u32>) -> Vec<u32> {
     let hs: Vec<u32> = heights.into_iter().collect();
     let mut prev = 0;
@@ -477,7 +478,7 @@ pub fn build(
             a.push("--no-mtime".into());
             match quality {
                 Quality::Best => {
-                    // best available, capped at 4K (owner: no 8K)
+                    // best available, capped at 8K (owner 2026-11-20)
                     a.push(kv("--format", &height_selector(MAX_HEIGHT)));
                     a.push(kv("--merge-output-format", "mp4"));
                     a.push(kv("--remux-video", REMUX_VIDEO));
@@ -575,7 +576,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fallback_names_and_selectors_never_go_above_4k() {
+    fn fallback_names_and_selectors_never_go_above_8k() {
         for (n, f) in [
             ("lower", Fallback::Lower),
             ("higher", Fallback::Higher),
@@ -612,13 +613,17 @@ mod tests {
         assert_eq!(Quality::Exactly(360).policy_name().as_deref(), Some("360p"));
         assert_eq!(
             higher_selector(720),
-            "bv*[height<=720][height>480]+ba/b[height<=720][height>480]/wv*[height>720][height<=2160]+ba/w[height>720][height<=2160]/bv*[height<=720]+ba/b[height<=720]/wv*[height<=2160]+ba/w[height<=2160]/b[height<=?2160]"
+            "bv*[height<=720][height>480]+ba/b[height<=720][height>480]/wv*[height>720][height<=4320]+ba/w[height>720][height<=4320]/bv*[height<=720]+ba/b[height<=720]/wv*[height<=4320]+ba/w[height<=4320]/b[height<=?4320]"
         );
         assert_eq!(
             exact_selector(360),
-            "bv*[height<=360][height>0]+ba/b[height<=360][height>0]"
+            "bv*[height<=360][height>240]+ba/b[height<=360][height>240]"
         );
-        // every height bound in every selector is <= 2160 (no 8K through any fallback)
+        assert_eq!(
+            exact_selector(144),
+            "bv*[height<=144][height>0]+ba/b[height<=144][height>0]"
+        );
+        // every height bound in every selector is <= 4320 (nothing above 8K through any fallback)
         for h in POLICY_HEIGHTS {
             for sel in [height_selector(*h), higher_selector(*h), exact_selector(*h)] {
                 for part in sel.split(['[', ']']) {
@@ -638,42 +643,45 @@ mod tests {
     }
 
     #[test]
-    fn quality_policy_accepts_only_the_fixed_list_and_never_above_4k() {
+    fn quality_policy_accepts_only_the_fixed_list_and_never_above_8k() {
         for (s, q) in [
+            ("144p", Quality::MaxHeight(144)),
+            ("240p", Quality::MaxHeight(240)),
             ("360p", Quality::MaxHeight(360)),
             ("480p", Quality::MaxHeight(480)),
             ("720p", Quality::MaxHeight(720)),
             ("1080p", Quality::MaxHeight(1080)),
             ("1440p", Quality::MaxHeight(1440)),
             ("2160p", Quality::MaxHeight(2160)),
+            ("4320p", Quality::MaxHeight(4320)),
             ("best", Quality::Best),
             ("audio", Quality::AudioMp3),
         ] {
             assert_eq!(Quality::from_policy(s).unwrap(), q, "{s}");
             assert_eq!(q.policy_name().as_deref(), Some(s));
         }
-        assert_eq!(QUALITY_CHOICES.len(), 8);
+        assert_eq!(QUALITY_CHOICES.len(), 11);
         for bad in [
-            "4320p", "8640p", "2161p", "240p", "720", "0720p", "+720p", "720P", "1080p60", "4k",
-            "8k", "Best", "mp3", "", " 720p", "bv*+ba", "-1p",
+            "8640p", "4321p", "2161p", "250p", "720", "0720p", "+720p", "720P", "1080p60", "4k",
+            "8k", "Best", "mp3", "", " 720p", "bv*+ba", "-1p", "0p",
         ] {
             assert!(Quality::from_policy(bad).is_err(), "{bad:?} accepted");
         }
-        assert_eq!(Quality::MaxHeight(240).policy_name(), None);
+        assert_eq!(Quality::MaxHeight(250).policy_name(), None);
         assert_eq!(Quality::Format("18".into()).policy_name(), None);
         assert_eq!(Quality::AudioMp3.ext(), "mp3");
         assert_eq!(Quality::Best.ext(), "mp4");
     }
 
     #[test]
-    fn every_selector_is_capped_at_4k_and_falls_back_to_the_shortest() {
-        assert_eq!(MAX_HEIGHT, 2160, "owner: no 8K");
+    fn every_selector_is_capped_at_8k_and_falls_back_to_the_shortest() {
+        assert_eq!(MAX_HEIGHT, 4320, "owner 2026-11-20: up to 8K, never taller");
         let s = height_selector(1440);
         assert_eq!(
             s,
-            "bv*[height<=1440]+ba/b[height<=1440]/wv*[height<=2160]+ba/w[height<=2160]/b[height<=?2160]"
+            "bv*[height<=1440]+ba/b[height<=1440]/wv*[height<=4320]+ba/w[height<=4320]/b[height<=?4320]"
         );
-        // no alternative of any selector is without a cap (an uncapped `/b` would allow 8K)
+        // no alternative of any selector is without a cap (an uncapped `/b` would allow 16K)
         for h in POLICY_HEIGHTS {
             for alt in height_selector(*h).split('/') {
                 for atom in alt.split('+').filter(|a| *a != "ba") {
@@ -692,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn building_refuses_heights_above_4k_and_best_is_capped() {
+    fn building_refuses_heights_above_8k_and_best_is_capped() {
         let t = ToolPaths {
             ytdlp: std::env::temp_dir().join("yt-dlp"),
             ffmpeg: std::env::temp_dir().join("ffmpeg"),
@@ -710,16 +718,17 @@ mod tests {
                 },
             )
         };
-        for h in [2161, 4320, 8640, u32::MAX] {
+        for h in [0, 4321, 8640, u32::MAX] {
             assert!(dl(Quality::MaxHeight(h)).is_err(), "{h}");
         }
+        assert!(dl(Quality::MaxHeight(4320)).is_ok());
         let a = dl(Quality::Best).unwrap();
         let f = a
             .iter()
             .find_map(|x| x.to_str()?.strip_prefix("--format="))
             .unwrap()
             .to_string();
-        assert_eq!(f, height_selector(2160));
+        assert_eq!(f, height_selector(4320));
         assert!(!f.contains("bv*+ba/b"), "uncapped best: {f}");
     }
 
@@ -727,14 +736,20 @@ mod tests {
     fn offered_heights_bucket_real_heights_into_the_fixed_list() {
         assert_eq!(
             offered_heights([144, 240, 360, 480, 720, 1080, 1440, 2160, 4320]),
-            [360, 480, 720, 1080, 1440, 2160]
+            [144, 240, 360, 480, 720, 1080, 1440, 2160, 4320]
         );
         assert_eq!(offered_heights([1012, 534]), [720, 1080], "crops");
-        assert_eq!(offered_heights([144]), [360]);
+        assert_eq!(offered_heights([144]), [144]);
         assert_eq!(
-            offered_heights([4320, 2880]),
+            offered_heights([90]),
+            [144],
+            "shorter than 144 counts as 144p"
+        );
+        assert_eq!(offered_heights([2880]), [4320], "5K counts as the 8K class");
+        assert_eq!(
+            offered_heights([8640, 4321]),
             Vec::<u32>::new(),
-            "only above 4K"
+            "only above 8K"
         );
         assert_eq!(offered_heights([]), Vec::<u32>::new());
     }

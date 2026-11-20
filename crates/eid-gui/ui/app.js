@@ -8,7 +8,7 @@
 import { TEXT } from "./i18n.js";
 import {
   ACTIVE, BUSY, CATEGORIES, mergeList, buildView, inView, categoryOf, fraction, clickSelect,
-  pollDelay, safeQualities, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
+  pollDelay, safeQualities, QUALITIES, fmtSize, fmtClock, jobFraction, isToolsMissing, segmentView,
   COLUMNS, TOOLS, normalizeCols, gridTemplate, moveCol, normalizeToolbar, linksFromText, finishedNow, videoPage,
   linkPlaylist, parseRange,
 } from "./logic.js";
@@ -931,7 +931,7 @@ function openInfo(title, body) {
 
 // ---------------------------------------------------------------- settings dialog
 function qualityLabel(q) {
-  return q === "best" ? t("q_best") : q === "audio" ? t("q_audio") : q === "2160p" ? t("q_2160p") : q;
+  return q === "best" ? t("q_best") : q === "audio" ? t("q_audio") : q === "2160p" ? t("q_2160p") : q === "4320p" ? t("q_4320p") : q;
 }
 function fillQualitySelect(sel, list, pick) {
   sel.replaceChildren(...list.map((q) => { const o = el("option", null, qualityLabel(q)); o.value = q; return o; }));
@@ -959,7 +959,7 @@ function openSettings() {
   $("#set-missing").value = settings.missing;
   $("#set-lang").value = settings.lang;
   $("#set-theme").value = settings.theme;
-  fillQualitySelect($("#set-quality"), ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"], settings.quality);
+  fillQualitySelect($("#set-quality"), QUALITIES, settings.quality);
   showSettingsFolder();
   showTools($("#set-tools"), $("#set-tools-install"));
   api.call("app_info").then((i) => setText($("#about-text"), t("about", i.version, i.commit, i.program))).catch(() => {});
@@ -978,7 +978,7 @@ $("#set-lang").addEventListener("change", (e) => {
   openSettingsTexts();
 });
 function openSettingsTexts() {
-  fillQualitySelect($("#set-quality"), ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"], settings.quality);
+  fillQualitySelect($("#set-quality"), QUALITIES, settings.quality);
   $("#set-theme").value = settings.theme;
   showSettingsFolder();
   showTools($("#set-tools"), $("#set-tools-install"));

@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 pub const HELP: &str = "eid video - video and audio through yt-dlp (after your consent)\n\n\
 USAGE:\n  eid video info <page-url> [--yes-i-agree] [--lang ar|en]\n\
-  eid video get <page-url> [-d DIR] [--quality 360p|480p|720p|1080p|1440p|2160p|best|audio] [--if-missing lower|higher|skip] [--limit RATE] [--yes-i-agree] [--lang ar|en] [-q]\n\
+  eid video get <page-url> [-d DIR] [--quality 144p|240p|360p|480p|720p|1080p|1440p|2160p|4320p|best|audio] [--if-missing lower|higher|skip] [--limit RATE] [--yes-i-agree] [--lang ar|en] [-q]\n\
   eid video playlist <playlist-url> [-d DIR] [--quality Q] [--if-missing F] [--limit RATE] [--skip 2,5] [--retry-failed 3,7|all] [--list] [--yes-i-agree] [-q]
 \n                                     every item, numbered 01 - ... in a folder named after the playlist;
 \n                                     an item that failed 3 runs in a row, or that the site refused
@@ -114,13 +114,13 @@ fn parse_numbers(s: &str) -> Result<Vec<u32>, String> {
         .collect()
 }
 
-/// The fixed v0.1 policy (`360p` ... `2160p`, `best` = best up to 4K, `audio`); `mp3` is kept
-/// as an alias of `audio`. Anything taller than 2160 is refused (owner: no 8K).
+/// The fixed policy (`144p` ... `4320p`, `best` = best up to 8K, `audio`); `mp3` is kept as an
+/// alias of `audio`. Anything taller than 4320 is refused (owner 2026-11-20).
 fn parse_quality(s: &str) -> Result<Quality, String> {
     let s = if s == "mp3" { "audio" } else { s };
     Quality::from_policy(s).map_err(|_| {
         format!(
-            "bad quality '{s}' (one of {}; nothing above 2160p)",
+            "bad quality '{s}' (one of {}; nothing above 4320p)",
             eid_media::args::QUALITY_CHOICES.join(", ")
         )
     })
@@ -612,7 +612,7 @@ async fn publish_retrying(
 
 /// The `probe` answer (the shape of the desktop app's `video_probe`, docs/V0.1-CONTRACT.md):
 /// qualities offered for a video come from its formats ([`eid_media::args::offered_heights`],
-/// never above 2160p) plus `best` and `audio`; a playlist offers every policy choice (its items
+/// never above 4320p) plus `best` and `audio`; a playlist offers every policy choice (its items
 /// are not inspected one by one) and lists its items in order, numbered from 1.
 pub fn probe_json(p: &eid_media::info::Probed) -> serde_json::Value {
     use eid_media::info::Probed;

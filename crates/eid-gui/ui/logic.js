@@ -146,8 +146,9 @@ export function pollDelay({ hidden, busy }) {
   return busy ? 500 : 2500;
 }
 
-/** Quality policy (docs/V0.1-CONTRACT.md): never above 2160p, only the known choices. */
-export const QUALITIES = ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"];
+/** Quality policy (owner 2026-11-20): 144p to 4320p (8K), tallest first, then best and audio;
+ * only the known choices, nothing taller. */
+export const QUALITIES = ["4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p", "best", "audio"];
 export function safeQualities(list) {
   const got = new Set(Array.isArray(list) ? list : []);
   return QUALITIES.filter((q) => got.has(q));

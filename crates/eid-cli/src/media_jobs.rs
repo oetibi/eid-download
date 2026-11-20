@@ -192,7 +192,7 @@ pub fn check_fallback(f: &str) -> Result<(), String> {
     }
 }
 
-/// Quality strings accepted everywhere (no 8K): [`eid_ipc::VIDEO_QUALITIES`].
+/// Quality strings accepted everywhere (up to 8K): [`eid_ipc::VIDEO_QUALITIES`].
 pub fn check_quality(q: &str) -> Result<(), String> {
     if eid_ipc::VIDEO_QUALITIES.contains(&q) {
         Ok(())
@@ -875,11 +875,12 @@ mod tests {
     #[test]
     fn quality_is_only_the_fixed_list() {
         for q in [
-            "360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio",
+            "144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "4320p", "best",
+            "audio",
         ] {
             assert!(check_quality(q).is_ok(), "{q}");
         }
-        for q in ["4320p", "8k", "", "bv*", "720", "1080p60"] {
+        for q in ["8640p", "4321p", "8k", "", "bv*", "720", "1080p60"] {
             assert!(check_quality(q).is_err(), "{q}");
         }
     }

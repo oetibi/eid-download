@@ -59,9 +59,9 @@ async fn ipc_probe_and_add_video_through_eid_serve() {
         other => panic!("{other:?}"),
     }
     assert_eq!(e.tool_requests(), 0);
-    // no 8K, no raw format strings, no folder from the caller
+    // nothing above 8K, no raw format strings, no folder from the caller
     // (an invalid request is answered, then that connection is closed: a fresh one each time)
-    for quality in ["4320p", "bv*+ba"] {
+    for quality in ["8640p", "bv*+ba"] {
         let mut cl = Client::connect(&ep).await.unwrap();
         match cl
             .call(Command::AddVideo {

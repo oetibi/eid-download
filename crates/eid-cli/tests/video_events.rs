@@ -74,16 +74,19 @@ async fn probe_refuses_before_consent_and_tools_and_installs_nothing() {
 }
 
 #[tokio::test]
-async fn probe_of_a_video_offers_only_available_heights_never_above_2160() {
+async fn probe_of_a_video_offers_only_available_heights_never_above_4320() {
     let e = Env::new().await;
     setup(&e).await;
-    let url = e.url("video/abc", "&title=Clip&heights=360,1080,4320");
+    let url = e.url("video/abc", "&title=Clip&heights=144,360,1080,4320,8640");
     let o = e.run(&["video", "probe", &url]).await;
     assert!(o.status.success(), "{}", text(&o));
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["kind"], "video");
     assert_eq!(v["title"], "Clip");
-    assert_eq!(v["qualities"], json!(["360p", "1080p", "best", "audio"]));
+    assert_eq!(
+        v["qualities"],
+        json!(["144p", "360p", "1080p", "4320p", "best", "audio"])
+    );
 }
 
 #[tokio::test]
@@ -114,7 +117,7 @@ async fn probe_of_a_playlist_lists_its_items_in_order() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|q| q == "4320p"));
+        .any(|q| q == "8640p"));
 }
 
 #[tokio::test]

@@ -282,7 +282,7 @@ try {
     const n = await ev("document.querySelectorAll('#v-items input').length");
     assert(n === 12, `items: ${n}`);
     const qs = await ev("[...document.querySelectorAll('#v-quality option')].map(o => o.value)");
-    assert(!qs.includes("4320p") && qs.includes("2160p") && qs.includes("best") && qs.includes("audio"), `qualities ${qs}`);
+    assert(!qs.includes("8640p") && qs[0] === "4320p" && qs.indexOf("2160p") === 1 && qs.includes("144p") && qs.at(-2) === "best" && qs.at(-1) === "audio", `qualities, tallest first: ${qs}`);
     await ev("document.querySelector('#v-none').click()");
     await ev("const b = document.querySelectorAll('#v-items input'); b[0].checked = true; b[3].checked = true; b[0].dispatchEvent(new Event('change', {bubbles:true}))");
     assert(!(await ev("document.querySelector('#v-start').disabled")), "start disabled with 2 items");
