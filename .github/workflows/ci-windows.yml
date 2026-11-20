@@ -19,6 +19,39 @@ concurrency:
   group: ci-windows-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  # The browser extension in REAL browsers on Windows (owner's report 2026-11-20: on Firefox 160
+  # the button never appeared over YouTube videos): stand-in pages served at the real YouTube
+  # addresses by the browser's own interception (nothing goes to YouTube), YouTube's in-page
+  # navigation, the playlist menu, the options page, and a stand-in native host that records
+  # what the extension sent (scripts/ext/browser_e2e.mjs). No Rust build needed.
+  browsers:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [firefox, chrome, edge]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Extension unit tests
+        shell: pwsh
+        run: |
+          Push-Location extension; node --test; $rc = $LASTEXITCODE; Pop-Location
+          if ($rc -ne 0) { exit 1 }
+      - name: ${{ matrix.browser }} end-to-end (button over the player, in-page navigation, playlist, options, native host)
+        shell: pwsh
+        run: |
+          node scripts/ext/browser_e2e.mjs --browser ${{ matrix.browser }} --out browser-e2e
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: browser-e2e-${{ matrix.browser }}
+          retention-days: 14
+          path: browser-e2e/*
+          if-no-files-found: warn
   windows:
     runs-on: windows-latest
     timeout-minutes: 90
