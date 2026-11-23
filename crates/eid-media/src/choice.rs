@@ -128,7 +128,7 @@ pub fn video_options(formats: &[Format]) -> Vec<VideoOption> {
             .iter()
             .filter(|f| f.has_video)
             .filter(|f| {
-                f.height
+                f.class_height()
                     .is_some_and(|x| x > floor && x <= h && x <= MAX_HEIGHT)
             })
             .max_by_key(|f| {
@@ -156,7 +156,7 @@ pub fn video_options(formats: &[Format]) -> Vec<VideoOption> {
         };
         out.push(VideoOption {
             height: h,
-            real_height: v.height.unwrap_or(h),
+            real_height: v.class_height().unwrap_or(h),
             format,
             fps: v.fps,
             codec: v.vcodec.as_deref().map(codec_name).unwrap_or_default(),
@@ -213,6 +213,7 @@ mod tests {
             }
             .into(),
             height: Some(h),
+            width: None,
             has_video: true,
             has_audio: false,
             filesize: size,
@@ -229,6 +230,7 @@ mod tests {
             format_id: id.into(),
             ext: ext.into(),
             height: None,
+            width: None,
             has_video: false,
             has_audio: true,
             filesize: size,
@@ -404,6 +406,40 @@ mod tests {
         let opus = vec![a("251", "webm", "opus", 135, None)];
         let o = audio_options(&opus);
         assert_eq!(o.iter().map(|x| x.quality).collect::<Vec<_>>(), ["audio"]);
+    }
+
+    /// Owner's feedback 2026-11-23 ("qualities higher than the video's"): a vertical video is
+    /// named by its short side, so a 1080x1920 Short is 1080p, never 4K.
+    #[test]
+    fn a_vertical_video_is_named_by_its_short_side() {
+        let vert = |id: &str, w: u32, h: u32| Format {
+            width: Some(w),
+            ..v(id, h, 30, "avc1", "SDR", w, None)
+        };
+        let f = vec![
+            vert("617", 1080, 1920),
+            vert("616", 720, 1280),
+            vert("605", 360, 640),
+            a("140", "m4a", "mp4a.40.2", 129, None),
+        ];
+        let o = video_options(&f);
+        assert_eq!(
+            o.iter()
+                .map(|x| (x.height, x.real_height))
+                .collect::<Vec<_>>(),
+            [(1080, 1080), (720, 720), (360, 360)]
+        );
+        assert_eq!(o[0].format, "617+140");
+        // a horizontal video keeps its height; an ultra-wide one is named by its short side
+        let wide = Format {
+            width: Some(2560),
+            ..v("w", 1080, 30, "avc1", "SDR", 1, None)
+        };
+        assert_eq!(wide.class_height(), Some(1080));
+        assert_eq!(
+            v("n", 720, 30, "avc1", "SDR", 1, None).class_height(),
+            Some(720)
+        );
     }
 
     #[test]

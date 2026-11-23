@@ -14,7 +14,8 @@
 //      canonical link;
 //   3. YouTube's in-page navigation (history.pushState + yt-navigate-finish, no reload) to a
 //      watch?v=…&list=… video: the button follows, the menu shows the playlist (title, 120
-//      episodes), "choose" lists them, and a selection sends add_playlist with those items;
+//      episodes), "choose" lists them, "Next" shows the video's own qualities (one list, no dropdown)
+//      and a quality sends add_playlist with those items;
 //   4. in-page navigation to the home page hides the button; Back (popstate) brings it back;
 //   5. the options page: "always" + "top-left" + Save are applied to the page without hover.
 //
@@ -252,12 +253,13 @@ async function chromium(kind) {
     async hover(x, y) { await S("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }); await sleep(400); },
     async overlay() {
       const { root } = await S("DOM.getDocument", { depth: -1, pierce: true });
-      const out = { buttons: [], texts: [], host: false };
+      const out = { buttons: [], texts: [], host: false, selects: 0 };
       const textOf = (n) => (n.nodeType === 3 ? n.nodeValue : "") + (n.children ?? []).map(textOf).join("");
       const walk = (n, inside) => {
         for (const s of n.shadowRoots ?? []) if (s.shadowRootType === "closed" && n.nodeName === "EID-DOWNLOAD-OVERLAY") { out.host = true; walk(s, true); }
         if (inside && n.nodeType === 1 && n.nodeName !== "STYLE") {
           const a = {}; const l = n.attributes ?? []; for (let i = 0; i < l.length; i += 2) a[l[i]] = l[i + 1];
+          if (n.nodeName === "SELECT") out.selects++;
           if (n.nodeName === "BUTTON" || n.nodeName === "INPUT") out.buttons.push({ tag: n.nodeName.toLowerCase(), attrs: a, text: textOf(n).trim(), ref: n.backendNodeId });
         }
         if (inside && n.nodeType === 3 && n.nodeValue.trim()) out.texts.push(n.nodeValue.trim());
@@ -361,7 +363,7 @@ async function firefox() {
     async overlay() {
       const r = await bidi("script.callFunction", { functionDeclaration: "function () { return document.querySelector('eid-download-overlay'); }", target: { context }, awaitPromise: false,
         serializationOptions: { maxDomDepth: 40, includeShadowTree: "all" } });
-      const out = { buttons: [], texts: [], host: false };
+      const out = { buttons: [], texts: [], host: false, selects: 0 };
       const host = r.result;
       if (!host || host.type !== "node") return out;
       out.host = true;
@@ -369,6 +371,7 @@ async function firefox() {
       const walk = (n) => {
         const v = n.value ?? {};
         if (v.nodeType === 1 && v.localName === "style") return;
+        if (v.nodeType === 1 && v.localName === "select") out.selects++;
         if (v.nodeType === 1 && (v.localName === "button" || v.localName === "input")) out.buttons.push({ tag: v.localName, attrs: v.attributes ?? {}, text: textOf(n).trim(), ref: n.sharedId });
         if (v.nodeType === 3 && v.nodeValue?.trim()) out.texts.push(v.nodeValue.trim());
         for (const c of v.children ?? []) walk(c);
@@ -543,6 +546,11 @@ async function realChecks({ shownButton, hoverPlayer }) {
     const offered = (await B.overlay()).buttons.map((x) => x.attrs["data-q"]).filter(Boolean);
     assert(JSON.stringify(offered) === JSON.stringify(["best", "720p", "360p", "m4a", "audio"]), `lines: ${offered}`);
     assert(q360.attrs["data-format"] === "v360+140", JSON.stringify(q360.attrs));
+    // owner's feedback 2026-11-23: only this video's own qualities, nothing taller is even named
+    const o1 = await B.overlay();
+    assert(o1.selects === 0, "a quality dropdown besides the list");
+    const best = o1.buttons.find((x) => x.attrs["data-q"] === "best");
+    assert(/720p/.test(best.text) && !/4320|2160|1440|1080|8K|4K/.test(o1.texts.join(" ")), `taller than the video named: ${o1.texts.join(" | ")}`);
     await B.click(q360.ref);
     const f = path.join(REAL_OUT, "Sample clip.mp4");
     await until(() => fs.existsSync(f), 60000, `the file ${f} (out: ${listDir(REAL_OUT)})`);
@@ -567,7 +575,9 @@ async function realChecks({ shownButton, hoverPlayer }) {
     const boxes = (await B.overlay()).buttons.filter((x) => x.tag === "input");
     await B.click(boxes[0].ref);
     await B.click(boxes[2].ref);
-    await B.click((await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "download-selected").ref);
+    await B.click((await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "next").ref);
+    const pick = await playlistStep(["best", "720p", "360p", "m4a", "audio"]);
+    await pick("360p");
     const dir = path.join(REAL_OUT, "Test playlist");
     await until(() => listDir(dir).filter((n) => n.endsWith(".mp4")).length === 2, 90000, `two episodes in ${dir} (now: ${listDir(dir)})`);
     const got = listDir(dir).filter((n) => n.endsWith(".mp4"));
@@ -579,6 +589,7 @@ async function realChecks({ shownButton, hoverPlayer }) {
     const entire = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 30000, "'Download Entire Playlist'");
     assert(/\(4 /.test(entire.text) || /4/.test(entire.text), entire.text);
     await B.click(entire.ref);
+    await (await playlistStep(["best", "720p", "360p", "m4a", "audio"]))("best");
     const dir = path.join(REAL_OUT, "Test playlist");
     await until(() => listDir(dir).includes("002 - Episode two.mp4"), 90000, `episode 2 (now: ${listDir(dir)})`);
     await sleep(3000);
@@ -587,6 +598,14 @@ async function realChecks({ shownButton, hoverPlayer }) {
     for (const id of ["EIDEP000001", "EIDEP000003"]) assert(downloads(id).length === 1, `${id} downloaded ${downloads(id).length} times`);
     assert(downloads("EIDEP000004").length === 0, "the private episode was not attempted");
   });
+}
+
+/** The playlist's quality step: the one list, exactly the qualities of the video on the page. */
+async function playlistStep(expected) {
+  const qs = await until(async () => { const o = await B.overlay(); const q = o.buttons.filter((x) => x.attrs["data-q"]).map((x) => x.attrs["data-q"]); return q.length ? q : null; }, 30000, "the playlist's quality list");
+  assert(JSON.stringify(qs) === JSON.stringify(expected), `playlist qualities ${JSON.stringify(qs)}, expected the video's own ${JSON.stringify(expected)}`);
+  assert((await B.overlay()).selects === 0, "a quality dropdown is shown besides the list");
+  return (q) => B.overlay().then((o) => B.click(o.buttons.find((x) => x.attrs["data-q"] === q).ref));
 }
 
 let restoreHost = () => {};
@@ -629,6 +648,9 @@ try {
     await until(() => hoverRequests().some((r) => r.cmd === "add_video"), 10000, "add_video at the host");
     const add = hostRequests().find((r) => r.cmd === "add_video");
     assert(add.url === "https://www.youtube.com/watch?v=AAAAAAAAAAA" && add.quality === "720p" && add.format === "298+140", JSON.stringify(add));
+    // owner's feedback: after the choice the menu closes and says so over the video
+    await until(async () => { const o = await B.overlay(); return !o.buttons.some((x) => x.attrs["data-q"]) && /Added to Eid Download: 720p/.test(o.texts.join(" ")); }, 5000, "the menu closed with 'Added to Eid Download: 720p'");
+    await B.shot(`menu-after-choice-${BROWSER}.png`).catch(() => {});
     const probe = hostRequests().find((r) => r.cmd === "probe");
     assert(probe && probe.url === "https://www.youtube.com/watch?v=AAAAAAAAAAA", JSON.stringify(probe));
   });
@@ -649,11 +671,15 @@ try {
     const none = (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "none");
     await B.click(none.ref);
     for (const v of ["1", "2", "40"]) await B.click(boxes.find((x) => x.attrs.value === v).ref);
-    const go = (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "download-selected");
+    const go = (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "next");
     await B.click(go.ref);
+    // the same one list: the qualities of the video on the page, nothing invented
+    const pick = await playlistStep(["best", "4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]);
+    await pick("720p");
     await until(() => hostRequests().some((r) => r.cmd === "add_playlist"), 10000, "add_playlist at the host");
     const add = hostRequests().find((r) => r.cmd === "add_playlist");
-    assert(add.url === "https://www.youtube.com/playlist?list=PLtestlist01" && JSON.stringify(add.items) === "[1,2,40]", JSON.stringify(add));
+    assert(add.url === "https://www.youtube.com/playlist?list=PLtestlist01" && JSON.stringify(add.items) === "[1,2,40]" && add.quality === "720p", JSON.stringify(add));
+    await until(async () => (await B.overlay()).texts.some((x) => /Added to Eid Download: 720p/.test(x)), 5000, "the confirmation");
   });
 
   await check("4. in-page navigation to the home page hides the button; Back (popstate) brings it back", async () => {
@@ -716,11 +742,14 @@ try {
     const last = bs[bs.length - 1];
     assert(last.attrs["data-act"] === "entire", `last button: ${JSON.stringify(last.attrs)} ${last.text}`);
     assert(/Download Entire Playlist/.test(entire.text) && /120/.test(entire.text), entire.text);
+    assert((await B.overlay()).selects === 0, "the menu shows a quality dropdown besides the list");
     const before = hostRequests().length;
     await B.click(entire.ref);
+    await B.shot(`menu-playlist-quality-${BROWSER}.png`).catch((e) => console.log(`     (no screenshot: ${e.message})`));
+    await (await playlistStep(["best", "4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]))("best");
     await until(() => hostRequests().slice(before).some((r) => r.cmd === "open_video"), 10000, "open_video at the host");
     const r = hostRequests().slice(before).find((x) => x.cmd === "open_video");
-    // the quality chosen in the menu's playlist part goes with it (the first of the select)
+    // the quality chosen from the video's own list goes with it
     assert(r.url === "https://www.youtube.com/playlist?list=PLtestlist01" && r.quality === "best", JSON.stringify(r));
     await until(async () => /The playlist is open in Eid Download/.test((await B.overlay()).texts.join(" ")), 5000, "the confirmation");
     // the headless app ("no window"): the whole playlist is downloaded in one operation
@@ -731,9 +760,10 @@ try {
     const e2 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 15000, "'Download Entire Playlist'");
     const n0 = hostRequests().length;
     await B.click(e2.ref);
+    await (await playlistStep(["best", "4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]))("1080p");
     await until(() => hostRequests().slice(n0).some((x) => x.cmd === "add_playlist"), 10000, "add_playlist after 'no window'");
     const ap = hostRequests().slice(n0).find((x) => x.cmd === "add_playlist");
-    assert(ap.url === "https://www.youtube.com/playlist?list=PLnowindow" && ap.items === undefined, JSON.stringify(ap));
+    assert(ap.url === "https://www.youtube.com/playlist?list=PLnowindow" && ap.items === undefined && ap.quality === "1080p", JSON.stringify(ap));
     // an app from before open_video: the same, never an error
     await B.open("https://www.youtube.com/watch?v=GGGGGGGGGGG&list=PLoldapp");
     await B.hover(3, 3);
@@ -742,6 +772,7 @@ try {
     const e3 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 15000, "'Download Entire Playlist'");
     const n1 = hostRequests().length;
     await B.click(e3.ref);
+    await (await playlistStep(["best", "4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]))("best");
     await until(() => hostRequests().slice(n1).some((x) => x.cmd === "add_playlist"), 10000, "add_playlist after 'app too old'");
   });
 

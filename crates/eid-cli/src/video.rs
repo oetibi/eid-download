@@ -638,7 +638,7 @@ pub fn probe_json(p: &eid_media::info::Probed) -> serde_json::Value {
                 .formats
                 .iter()
                 .filter(|f| f.has_video)
-                .filter_map(|f| f.height);
+                .filter_map(|f| f.class_height());
             let mut q: Vec<String> = eid_media::args::offered_heights(hs)
                 .into_iter()
                 .map(|h| format!("{h}p"))

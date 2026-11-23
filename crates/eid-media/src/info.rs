@@ -25,6 +25,9 @@ pub struct Format {
     pub format_id: String,
     pub ext: String,
     pub height: Option<u32>,
+    /// v0.2: with `height`, the short side names the quality class (a vertical 1080x1920 video
+    /// is 1080p, as YouTube labels it) — see [`Format::class_height`].
+    pub width: Option<u32>,
     pub has_video: bool,
     pub has_audio: bool,
     pub filesize: Option<u64>,
@@ -40,6 +43,17 @@ pub struct Format {
     pub abr: Option<u32>,
     /// Total bitrate in kbit/s, rounded (orders formats of the same height).
     pub tbr: Option<u32>,
+}
+
+impl Format {
+    /// The height that names this format's quality: the short side when the width is known
+    /// (vertical videos), else the height.
+    pub fn class_height(&self) -> Option<u32> {
+        match (self.height, self.width) {
+            (Some(h), Some(w)) if w > 0 => Some(h.min(w)),
+            (h, _) => h,
+        }
+    }
 }
 
 /// A flat playlist (`--flat-playlist -J`).
@@ -67,6 +81,7 @@ struct RawFormat {
     format_id: Option<String>,
     ext: Option<String>,
     height: Option<f64>,
+    width: Option<f64>,
     vcodec: Option<String>,
     acodec: Option<String>,
     filesize: Option<f64>,
@@ -199,6 +214,7 @@ fn video_from(mut r: RawInfo) -> Result<MediaInfo, MediaError> {
                 format_id,
                 ext: bounded(f.ext),
                 height: non_neg(f.height).and_then(|h| u32::try_from(h).ok()),
+                width: non_neg(f.width).and_then(|w| u32::try_from(w).ok()),
                 has_video: has(&f.vcodec),
                 has_audio: has(&f.acodec),
                 filesize: non_neg(f.filesize).or(non_neg(f.filesize_approx)),

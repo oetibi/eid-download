@@ -13,9 +13,8 @@
   "menuPlaylistCount": { "message": "$COUNT$ عنصراً", "placeholders": { "count": { "content": "$1" } } },
   "menuWholePlaylist": { "message": "تحميل قائمة التشغيل كاملة" },
   "menuChooseItems": { "message": "اختيار عناصر…" },
-  "menuPlaylistQuality": { "message": "الجودة" },
   "menuDownloadFile": { "message": "تحميل ملف الفيديو" },
-  "qBest": { "message": "الأفضل (حتى 8K)" },
+  "qBest": { "message": "أفضل جودة" },
   "qAudio": { "message": "صوت فقط (MP3)" },
   "q4320": { "message": "4320p (8K)" },
   "q2160": { "message": "2160p (4K)" },
@@ -30,7 +29,6 @@
   "pickAll": { "message": "تحديد الكل" },
   "pickNone": { "message": "إلغاء التحديد" },
   "pickSelected": { "message": "محدَّد $N$ من $TOTAL$", "placeholders": { "n": { "content": "$1" }, "total": { "content": "$2" } } },
-  "pickDownload": { "message": "تحميل المحدَّد" },
   "pickBack": { "message": "رجوع" },
   "pickUntitled": { "message": "العنصر $N$", "placeholders": { "n": { "content": "$1" } } },
   "sent": { "message": "أُرسل إلى Eid Download." },
@@ -106,5 +104,10 @@
   "optSize": { "message": "≈ $S$", "placeholders": { "s": { "content": "$1" } } },
   "menuEntirePlaylist": { "message": "تنزيل قائمة التشغيل كاملة ($COUNT$ فيديو)", "placeholders": { "count": { "content": "$1" } } },
   "openedPlaylistInApp": { "message": "فُتحت قائمة التشغيل في Eid Download: راجع المجلد والجودة ثم اضغط «ابدأ»." },
-  "optBestMeta": { "message": "أعلى جودة في هذا الفيديو، MP4 مع الصوت" }
+  "optBestMeta": { "message": "$Q$، أعلى جودة في هذا الفيديو · MP4 مع الصوت", "placeholders": { "q": { "content": "$1" } } },
+  "sentWhere": { "message": "التحميل في قائمة Eid Download." },
+  "sentQuality": { "message": "أُضيف إلى Eid Download: $Q$", "placeholders": { "q": { "content": "$1" } } },
+  "pickNext": { "message": "التالي: اختر الجودة" },
+  "plChooseQuality": { "message": "اختر الجودة" },
+  "plQualityNote": { "message": "هذه جودات الفيديو المفتوح في الصفحة. الفيديو الذي ليست فيه الجودة المختارة يتبع إعدادك «إن لم تتوفر الجودة»." }
 }

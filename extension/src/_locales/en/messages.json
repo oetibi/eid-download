@@ -13,9 +13,8 @@
   "menuPlaylistCount": { "message": "$COUNT$ items", "placeholders": { "count": { "content": "$1" } } },
   "menuWholePlaylist": { "message": "Download whole playlist" },
   "menuChooseItems": { "message": "Choose items…" },
-  "menuPlaylistQuality": { "message": "Quality" },
   "menuDownloadFile": { "message": "Download the video file" },
-  "qBest": { "message": "Best (up to 8K)" },
+  "qBest": { "message": "Best quality" },
   "qAudio": { "message": "Audio only (MP3)" },
   "q4320": { "message": "4320p (8K)" },
   "q2160": { "message": "2160p (4K)" },
@@ -30,7 +29,6 @@
   "pickAll": { "message": "Select all" },
   "pickNone": { "message": "Select none" },
   "pickSelected": { "message": "$N$ of $TOTAL$ selected", "placeholders": { "n": { "content": "$1" }, "total": { "content": "$2" } } },
-  "pickDownload": { "message": "Download selected" },
   "pickBack": { "message": "Back" },
   "pickUntitled": { "message": "Item $N$", "placeholders": { "n": { "content": "$1" } } },
   "sent": { "message": "Sent to Eid Download." },
@@ -106,5 +104,10 @@
   "optSize": { "message": "≈ $S$", "placeholders": { "s": { "content": "$1" } } },
   "menuEntirePlaylist": { "message": "Download Entire Playlist ($COUNT$ videos)", "placeholders": { "count": { "content": "$1" } } },
   "openedPlaylistInApp": { "message": "The playlist is open in Eid Download: check the folder and quality, then Start." },
-  "optBestMeta": { "message": "the tallest this video has, MP4 with audio" }
+  "optBestMeta": { "message": "$Q$, the tallest this video has · MP4 with audio", "placeholders": { "q": { "content": "$1" } } },
+  "sentWhere": { "message": "The download is in Eid Download's list." },
+  "sentQuality": { "message": "Added to Eid Download: $Q$", "placeholders": { "q": { "content": "$1" } } },
+  "pickNext": { "message": "Next: choose the quality" },
+  "plChooseQuality": { "message": "Choose the quality" },
+  "plQualityNote": { "message": "These are the qualities of the video on this page. A video without the chosen one follows your “if a quality is missing” setting." }
 }
