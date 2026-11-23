@@ -210,8 +210,8 @@ async fn real_youtube_video_audio_and_playlist_jobs() {
         "{q:?}"
     );
     assert!(
-        !q.iter().any(|x| x == "4320p" || x == "2880p"),
-        "no 8K/5K offered: {q:?}"
+        !q.iter().any(|x| x == "8640p" || x == "2880p"),
+        "only the fixed heights, nothing above 8K: {q:?}"
     );
 
     println!("== video 360p");

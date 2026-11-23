@@ -204,10 +204,19 @@ pub fn handler_with_video(
             url,
             quality,
             if_missing,
+            format,
         } => {
             let v = video.as_ref().ok_or("video is not available here")?;
             let f = if_missing.as_deref().unwrap_or("lower");
-            let job = v.add_with(Kind::Video, &url, &quality, f, None, None)?;
+            let job = v.add_full(
+                Kind::Video,
+                &url,
+                &quality,
+                f,
+                None,
+                None,
+                format.as_deref(),
+            )?;
             Ok(json!({"job": job}))
         }
         Command::AddPlaylist {
@@ -287,6 +296,9 @@ pub fn handler_with_video(
         // the desktop app answers this itself (eid-gui wraps this handler); the headless
         // server has no window to show
         Command::Show {} => Err("no window: this is the background server".into()),
+        Command::OpenVideo { .. } => {
+            Err("no window: this is the background server; open Eid Download and use Video".into())
+        }
     }
 }
 

@@ -12,17 +12,17 @@ Eid Download - تثبيت إضافة المتصفح / Installing the browser ext
      ملف ZIP دون استخراج.
   ب. شغّل EidDownload.exe من المجلد المستخرج.
   ج. الإعدادات ← «سطح المكتب» ← «إضافة المتصفح» ← «ربط المتصفحات بهذه النسخة».
-     يجب أن يظهر: Chrome / Edge / Firefox: مربوط بهذه النسخة.
+     يجب أن يظهر: Chrome · Brave · Opera / Edge / Firefox: مربوط بهذه النسخة.
   د. إن نقلت المجلد لاحقاً، اضغط الزر مرة أخرى.
 
 2) تثبيت الإضافة
 ----------------
 المجلد browser-extension بجانب البرنامج فيه:
-  chrome-edge   لـ Google Chrome وMicrosoft Edge
+  chrome-edge   لـ Google Chrome وMicrosoft Edge وBrave وOpera
   firefox       لـ Mozilla Firefox
 
-Chrome أو Edge:
-  1. افتح chrome://extensions (أو edge://extensions في Edge).
+Chrome أو Edge أو Brave أو Opera:
+  1. افتح chrome://extensions (أو edge://extensions في Edge، أو brave://extensions في Brave، أو opera://extensions في Opera).
   2. فعّل «وضع المطوّر» (Developer mode).
   3. «تحميل إضافة غير مضغوطة» (Load unpacked) ← اختر المجلد browser-extension\chrome-edge.
   4. تأكد أن رقم الإضافة (ID) هو: ambokeecedpgicighhcpdfjphdnphgaa
@@ -46,7 +46,8 @@ Firefox:
   المتصفح «مربوط بهذه النسخة»، ثم أعد تشغيل المتصفح.
 
 ما لم يُختبر يدوياً بعد: التثبيت الفعلي للإضافة في Chrome وEdge وFirefox على Windows حقيقي
-(الاختبارات الآلية تشغّل الإضافة في Chrome على Linux وتتحقق من التسجيل في Windows).
+(الاختبارات الآلية تشغّل الإضافة في Firefox وChrome وEdge على Windows بصفحات يوتيوب بديلة،
+وفي Brave وOpera على Windows أيضاً، وتتحقق من التسجيل).
 
 
 Installing the browser extension (English)
@@ -62,7 +63,7 @@ Two steps: (1) connect the app to the browsers, (2) install the extension in the
   Press it again if you move the folder.
 
 2) Install the extension (folder browser-extension next to the app)
-Chrome / Edge: open chrome://extensions (edge://extensions), turn on Developer mode,
+Chrome / Edge / Brave / Opera: open chrome://extensions (edge://, brave://, opera://extensions), turn on Developer mode,
   "Load unpacked", pick browser-extension\chrome-edge. The ID must be
   ambokeecedpgicighhcpdfjphdnphgaa. Do not move or delete the folder afterwards. Restart the browser.
 Firefox: release Firefox installs permanently only extensions signed by Mozilla; this one is
@@ -74,4 +75,5 @@ Firefox: release Firefox installs permanently only extensions signed by Mozilla;
 video page shows the Eid button over the video.
 
 Not tested by hand yet: installing the extension in Chrome, Edge and Firefox on a real Windows
-PC (the automated tests run the extension in Chrome on Linux and check the registration on Windows).
+PC (the automated tests run the extension in Firefox, Chrome and Edge on Windows on stand-in
+YouTube pages, and in Brave and Opera on Windows too, and check the registration).

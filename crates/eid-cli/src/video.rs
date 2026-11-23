@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 pub const HELP: &str = "eid video - video and audio through yt-dlp (after your consent)\n\n\
 USAGE:\n  eid video info <page-url> [--yes-i-agree] [--lang ar|en]\n\
-  eid video get <page-url> [-d DIR] [--quality 360p|480p|720p|1080p|1440p|2160p|best|audio] [--if-missing lower|higher|skip] [--limit RATE] [--yes-i-agree] [--lang ar|en] [-q]\n\
+  eid video get <page-url> [-d DIR] [--quality 144p|240p|360p|480p|720p|1080p|1440p|2160p|4320p|best|audio|m4a] [--format VIDEO+AUDIO] [--if-missing lower|higher|skip] [--limit RATE] [--yes-i-agree] [--lang ar|en] [-q]\n\
   eid video playlist <playlist-url> [-d DIR] [--quality Q] [--if-missing F] [--limit RATE] [--skip 2,5] [--retry-failed 3,7|all] [--list] [--yes-i-agree] [-q]
 \n                                     every item, numbered 01 - ... in a folder named after the playlist;
 \n                                     an item that failed 3 runs in a row, or that the site refused
@@ -114,13 +114,13 @@ fn parse_numbers(s: &str) -> Result<Vec<u32>, String> {
         .collect()
 }
 
-/// The fixed v0.1 policy (`360p` ... `2160p`, `best` = best up to 4K, `audio`); `mp3` is kept
-/// as an alias of `audio`. Anything taller than 2160 is refused (owner: no 8K).
+/// The fixed policy (`144p` ... `4320p`, `best` = best up to 8K, `audio`); `mp3` is kept as an
+/// alias of `audio`. Anything taller than 4320 is refused (owner 2026-11-20).
 fn parse_quality(s: &str) -> Result<Quality, String> {
     let s = if s == "mp3" { "audio" } else { s };
     Quality::from_policy(s).map_err(|_| {
         format!(
-            "bad quality '{s}' (one of {}; nothing above 2160p)",
+            "bad quality '{s}' (one of {}; nothing above 4320p)",
             eid_media::args::QUALITY_CHOICES.join(", ")
         )
     })
@@ -144,6 +144,7 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         }
     };
     let mut fallback = Fallback::Lower;
+    let mut pin: Option<String> = None;
     let mut a = VideoArgs {
         sub,
         url: None,
@@ -164,6 +165,14 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         match x.as_str() {
             "-d" => a.dir = Some(PathBuf::from(it.next().ok_or("-d needs a folder")?)),
             "--quality" => a.quality = parse_quality(it.next().ok_or("--quality needs a value")?)?,
+            // v0.2 (the download menu): the exact formats the menu showed, `video+audio`
+            "--format" => {
+                pin = Some(
+                    it.next()
+                        .ok_or("--format needs format ids from `eid video probe`, e.g. 299+140")?
+                        .clone(),
+                )
+            }
             // v0.2: what to do when the chosen height is not available (default: lower)
             "--if-missing" => {
                 fallback = Fallback::from_name(
@@ -221,6 +230,12 @@ pub fn parse(argv: &[String]) -> Result<VideoArgs, String> {
         }
     }
     a.quality = a.quality.with_fallback(fallback);
+    if let Some(spec) = pin {
+        if a.sub != Sub::Get {
+            return Err("--format only applies to `eid video get` (one video)".into());
+        }
+        a.quality = a.quality.pinned(&spec).map_err(|e| e.to_string())?;
+    }
     let needs_url = matches!(a.sub, Sub::Info | Sub::Get | Sub::Playlist | Sub::Probe);
     if needs_url != a.url.is_some() {
         return Err(if needs_url {
@@ -612,7 +627,7 @@ async fn publish_retrying(
 
 /// The `probe` answer (the shape of the desktop app's `video_probe`, docs/V0.1-CONTRACT.md):
 /// qualities offered for a video come from its formats ([`eid_media::args::offered_heights`],
-/// never above 2160p) plus `best` and `audio`; a playlist offers every policy choice (its items
+/// never above 4320p) plus `best` and `audio`; a playlist offers every policy choice (its items
 /// are not inspected one by one) and lists its items in order, numbered from 1.
 pub fn probe_json(p: &eid_media::info::Probed) -> serde_json::Value {
     use eid_media::info::Probed;
@@ -623,7 +638,7 @@ pub fn probe_json(p: &eid_media::info::Probed) -> serde_json::Value {
                 .formats
                 .iter()
                 .filter(|f| f.has_video)
-                .filter_map(|f| f.height);
+                .filter_map(|f| f.class_height());
             let mut q: Vec<String> = eid_media::args::offered_heights(hs)
                 .into_iter()
                 .map(|h| format!("{h}p"))
@@ -632,10 +647,35 @@ pub fn probe_json(p: &eid_media::info::Probed) -> serde_json::Value {
             if i.formats.iter().any(|f| f.has_audio) || i.formats.is_empty() {
                 q.push("audio".into());
             }
+            // v0.2 the download menu: one exact format pair per height, tallest first, and
+            // the audio choices (original AAC, converted MP3); details only from the tool
+            let options: Vec<serde_json::Value> = eid_media::choice::video_options(&i.formats)
+                .into_iter()
+                .map(|o| {
+                    serde_json::json!({
+                        "quality": format!("{}p", o.height), "height": o.real_height,
+                        "format": o.format, "container": "mp4", "fps": o.fps,
+                        "codec": o.codec, "hdr": o.hdr, "audio": o.audio, "size": o.size,
+                    })
+                })
+                .collect();
+            let audio: Vec<serde_json::Value> = eid_media::choice::audio_options(&i.formats)
+                .into_iter()
+                .map(|o| {
+                    serde_json::json!({
+                        "quality": o.quality, "original": o.original, "format": o.format,
+                        "codec": o.codec, "kbps": o.kbps, "size": o.size,
+                    })
+                })
+                .collect();
+            if audio.iter().any(|a| a["quality"] == "m4a") {
+                q.push("m4a".into());
+            }
             serde_json::json!({
                 "kind": "video", "id": pr(&i.id), "title": pr(&i.title),
                 "uploader": i.uploader.as_deref().map(pr), "duration": i.duration_secs,
-                "is_live": i.is_live, "qualities": q,
+                "is_live": i.is_live, "qualities": q, "options": options,
+                "audio_options": audio,
             })
         }
         Probed::Playlist(l) => {
@@ -879,11 +919,7 @@ async fn get(
             return Err(Fail::media(e));
         }
     };
-    let ext = if a.quality == Quality::AudioMp3 {
-        "mp3"
-    } else {
-        "mp4"
-    };
+    let ext = a.quality.ext();
     events::emit(serde_json::json!({
         "ev": "plan", "kind": "video", "title": info.title, "folder": out_dir.display().to_string(),
         "items": [{"n": 0, "title": info.title, "state": "todo"}],
@@ -1128,11 +1164,7 @@ async fn playlist(
     let item_ev = |n: u32, st: &str, err: Option<String>| {
         events::emit(serde_json::json!({"ev": "item", "n": n, "state": st, "error": err}))
     };
-    let ext = if a.quality == Quality::AudioMp3 {
-        "mp3"
-    } else {
-        "mp4"
-    };
+    let ext = a.quality.ext();
     let (mut got, mut skipped, mut gone, mut failed) = (0u32, 0u32, 0u32, 0u32);
     let mut gave_up: Vec<u32> = vec![];
     let empty = |s: &Path| std::fs::read_dir(s).is_ok_and(|mut d| d.next().is_none());

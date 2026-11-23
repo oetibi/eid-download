@@ -1,0 +1,808 @@
+#!/usr/bin/env node
+// End-to-end test of the browser extension in REAL browsers: Chrome / Edge (Chromium, driven over
+// the DevTools protocol) and Firefox (driven over WebDriver BiDi through geckodriver). Zero npm
+// dependencies (Node >= 22: fetch + WebSocket).
+//
+// Owner's report (2026-11-20, Firefox 160 on Windows): the extension loaded, "Test connection"
+// said "Eid Download answered", but the "Download this video" button never appeared over
+// YouTube videos. This test proves the button in each browser, on stand-in pages served AT the
+// real YouTube addresses (the browser's own request interception answers them: nothing is sent
+// to YouTube), and the whole chain to a stand-in native host (scripts/ext/stub-host.mjs, which
+// records what the extension sent):
+//   1. watch?v=… : hovering the player shows the button at the top-right of the player;
+//   2. its menu asks the host (probe) and lists the qualities; a choice sends add_video with the
+//      canonical link;
+//   3. YouTube's in-page navigation (history.pushState + yt-navigate-finish, no reload) to a
+//      watch?v=…&list=… video: the button follows, the menu shows the playlist (title, 120
+//      episodes), "choose" lists them, "Next" shows the video's own qualities (one list, no dropdown)
+//      and a quality sends add_playlist with those items;
+//   4. in-page navigation to the home page hides the button; Back (popstate) brings it back;
+//   5. the options page: "always" + "top-left" + Save are applied to the page without hover.
+//
+//   node scripts/ext/browser_e2e.mjs --browser chrome|edge|brave|opera|vivaldi|firefox [--bin PATH]
+//        [--nm-key HKCU\\...\\NativeMessagingHosts]   (Windows: the ONE registry key the stand-in
+//        host is registered under; default: that browser's known key)
+//        [--checks 1,2]   (only these checks; the others are printed as NOT RUN, never as passed)
+//        [--headed]       (Chromium-based: a normal window instead of headless)
+//        [--cdp-port]     (Chromium-based: DevTools over a local port + --load-extension, for a
+//                          browser that does not serve --remote-debugging-pipe)
+//        [--max-minutes N] (the whole run is stopped with a reason after N minutes; default 10)
+//        [--real]          (the whole chain for real: the REAL eid-native-host and app
+//                          (`eid serve`), video tools installed after consent (yt-dlp is the
+//                          offline stand-in, answering YouTube addresses from a local file),
+//                          and real files checked by name and SHA-256. Needs
+//                          `cargo build -p eid-cli --features test-hooks -p eid-native-host
+//                          -p eid-fake-ytdlp` first.)
+import { spawn, execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { zip } from "./package.mjs";
+import http from "node:http";
+import { createHash } from "node:crypto";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
+const BROWSER = arg("--browser", "chrome");
+const CHROMIUM = ["chrome", "edge", "brave", "opera", "vivaldi"];
+if (BROWSER !== "firefox" && !CHROMIUM.includes(BROWSER)) throw new Error(`unknown --browser ${BROWSER}`);
+const ONLY = arg("--checks") ? new Set(arg("--checks").split(",").map((x) => x.trim())) : null;
+const REAL = process.argv.includes("--real");
+// Windows: where each browser reads its Native Messaging hosts (HKCU). Brave, Opera and Vivaldi
+// document none: CI tries candidates one at a time with --nm-key (more_browsers.ps1).
+const NM_KEYS = {
+  firefox: "HKCU\\Software\\Mozilla\\NativeMessagingHosts",
+  chrome: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts",
+  edge: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts",
+  // ci-windows 2026-11-20 (more_browsers.ps1): Brave 158 and Opera 140 read Chrome's key (and
+  // Chromium's), not one of their own
+  brave: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts",
+  opera: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts",
+};
+const IS_WIN = process.platform === "win32";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const CHROME_ID = "ambokeecedpgicighhcpdfjphdnphgaa";
+const FIREFOX_ID = "eid-download@eid-download";
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "eid-browser-e2e-"));
+const STUB_LOG = path.join(TMP, "host-requests.jsonl");
+const OUT = path.resolve(arg("--out", path.join(ROOT, "browser-e2e")));
+fs.mkdirSync(OUT, { recursive: true });
+
+// ---------------------------------------------------------------- the extension build
+execFileSync(process.execPath, [path.join(ROOT, "scripts", "ext", "build.mjs"), "--out", path.join(TMP, "ext")], { stdio: "ignore" });
+const EXT_DIR = path.join(TMP, "ext", BROWSER === "firefox" ? "firefox" : "chrome");
+
+// ---------------------------------------------------------------- the stand-in native host
+function registerHost(realHost) {
+  const stub = path.join(ROOT, "scripts", "ext", "stub-host.mjs");
+  let exe;
+  if (realHost) {
+    exe = realHost;
+  } else if (IS_WIN) {
+    exe = path.join(TMP, "stub-host.bat");
+    fs.writeFileSync(exe, `@echo off\r\n"${process.execPath}" "${stub}" %*\r\n`);
+  } else {
+    exe = path.join(TMP, "stub-host.sh");
+    fs.writeFileSync(exe, `#!/bin/sh\nexec "${process.execPath}" "${stub}" "$@"\n`, { mode: 0o755 });
+  }
+  const m = { name: "com.eid.download", description: "Eid Download (test stand-in)", path: exe, type: "stdio" };
+  if (BROWSER === "firefox") m.allowed_extensions = [FIREFOX_ID];
+  else m.allowed_origins = [`chrome-extension://${CHROME_ID}/`];
+  const manifest = path.join(TMP, "com.eid.download.json");
+  fs.writeFileSync(manifest, JSON.stringify(m));
+  const restore = [];
+  if (IS_WIN) {
+    const base = arg("--nm-key", NM_KEYS[BROWSER]);
+    if (!base) throw new Error(`--nm-key is required for ${BROWSER} on Windows (no known key)`);
+    const key = `${base}\\com.eid.download`;
+    console.log(`     native host registered ONLY under ${key}`);
+    let before = null;
+    try { before = /REG_SZ\s+(.+)/.exec(execFileSync("reg", ["query", key, "/ve"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }))?.[1].trim() ?? null; } catch {}
+    execFileSync("reg", ["add", key, "/ve", "/d", manifest, "/f"], { stdio: "ignore" });
+    restore.push(() => { try { if (before) execFileSync("reg", ["add", key, "/ve", "/d", before, "/f"], { stdio: "ignore" }); else execFileSync("reg", ["delete", key, "/f"], { stdio: "ignore" }); } catch {} });
+  } else if (BROWSER === "firefox") {
+    // Firefox reads ~/.mozilla/native-messaging-hosts: HOME is this test's own folder
+    const d = path.join(TMP, "home", ".mozilla", "native-messaging-hosts");
+    fs.mkdirSync(d, { recursive: true });
+    fs.copyFileSync(manifest, path.join(d, "com.eid.download.json"));
+  } else {
+    // Chromium-based browsers on Linux read <user-data-dir>/NativeMessagingHosts
+    const d = path.join(TMP, "profile", "NativeMessagingHosts");
+    fs.mkdirSync(d, { recursive: true });
+    fs.copyFileSync(manifest, path.join(d, "com.eid.download.json"));
+  }
+  return () => restore.forEach((f) => f());
+}
+const hostRequests = () => (fs.existsSync(STUB_LOG) ? fs.readFileSync(STUB_LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+
+// ---------------------------------------------------------------- the stand-in YouTube page
+// A YouTube-like watch page: #movie_player with a 854x480 <video>, and the in-page navigation
+// YouTube uses (pushState + yt-navigate-finish on the document, no reload).
+function ytPage(title) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title} - YouTube</title></head>
+<body style="margin:0;background:#0f0f0f;color:#fff;font:14px sans-serif">
+<div id="masthead" style="height:56px">YouTube (stand-in)</div>
+<div id="movie_player" class="html5-video-player" style="position:relative;width:854px;height:480px;margin:0 0 0 24px">
+  <video class="html5-main-video" width="854" height="480" style="display:block;background:#000"></video>
+</div>
+<script>
+  // YouTube's single-page navigation: the address changes, the page does not reload
+  window.__ytGo = (url) => {
+    history.pushState({}, "", url);
+    document.title = (new URL(location.href).searchParams.get("v") || "Home") + " - YouTube";
+    document.dispatchEvent(new CustomEvent("yt-navigate-finish", { bubbles: true }));
+  };
+  window.addEventListener("popstate", () => document.dispatchEvent(new CustomEvent("yt-navigate-finish", { bubbles: true })));
+</script>
+</body></html>`;
+}
+
+// ---------------------------------------------------------------- drivers
+/**
+ * Common driver interface:
+ *   open(url)                full navigation (served by interception for www.youtube.com)
+ *   evaluate(expr)           JSON-serialisable result of an expression in the page
+ *   hover(x, y)              real pointer move
+ *   overlay()                {buttons:[{tag,attrs,text,ref}], texts:[]} inside the closed shadow root
+ *   click(ref)               el.click() on a node of the overlay
+ *   options(fn)              run `fn` (a function source) in the extension's options page
+ */
+async function chromium(kind) {
+  const DEFAULT_BIN = {
+    chrome: IS_WIN ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" : "google-chrome",
+    edge: IS_WIN ? "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" : "microsoft-edge",
+    brave: IS_WIN ? "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" : "brave-browser",
+    opera: "opera",
+    vivaldi: "vivaldi",
+  };
+  const bin = arg("--bin", DEFAULT_BIN[kind]);
+  const prof = path.join(TMP, "profile");
+  fs.mkdirSync(prof, { recursive: true });
+  // --headed: a normal window (a browser that does not run headless; the runner has a desktop)
+  const headless = process.argv.includes("--headed") ? [] : ["--headless=new"];
+  // --cdp-port: DevTools over a local port (a browser that does not serve --remote-debugging-pipe);
+  // the extension is then loaded with --load-extension (Extensions.loadUnpacked needs the pipe)
+  const PORT_MODE = process.argv.includes("--cdp-port");
+  const control = PORT_MODE
+    ? ["--remote-debugging-port=0", `--load-extension=${EXT_DIR}`, `--disable-extensions-except=${EXT_DIR}`]
+    : ["--remote-debugging-pipe", "--enable-unsafe-extension-debugging"];
+  const proc = spawn(bin, [...headless, "--no-sandbox", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+    ...control, `--user-data-dir=${prof}`, "--window-size=1280,900", "about:blank"],
+  { stdio: PORT_MODE ? ["ignore", "ignore", "pipe"] : ["ignore", "ignore", "pipe", "pipe", "pipe"], env: { ...process.env, EID_STUB_LOG: STUB_LOG } });
+  let err = ""; proc.stderr.on("data", (d) => { err += d; });
+  let seq = 0, buf = Buffer.alloc(0);
+  const pending = new Map(), hooks = [];
+  const dispatch = (m) => {
+    if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.rej(new Error(JSON.stringify(m.error))) : p.res(m.result); }
+    else for (const h of hooks) h(m);
+  };
+  let write;
+  if (PORT_MODE) {
+    // the browser writes the port it chose into <user-data-dir>/DevToolsActivePort
+    const portFile = path.join(prof, "DevToolsActivePort");
+    const t0 = Date.now();
+    while (!fs.existsSync(portFile) || fs.readFileSync(portFile, "utf8").split("\n").length < 2) {
+      if (Date.now() - t0 > 60000) throw new Error(`${kind} opened no DevTools port within 60 s (stderr: ${err.slice(-800)})`);
+      await sleep(200);
+    }
+    const [port, wsPath] = fs.readFileSync(portFile, "utf8").split("\n").map((x) => x.trim());
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${wsPath}`);
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error(`${kind}: DevTools WebSocket failed`)); });
+    ws.onmessage = (e) => dispatch(JSON.parse(String(e.data)));
+    write = (s) => ws.send(s);
+  } else {
+    const w = proc.stdio[3], r = proc.stdio[4];
+    r.on("data", (d) => {
+      buf = Buffer.concat([buf, d]);
+      let i;
+      while ((i = buf.indexOf(0)) >= 0) {
+        const m = JSON.parse(buf.subarray(0, i).toString("utf8")); buf = buf.subarray(i + 1);
+        dispatch(m);
+      }
+    });
+    write = (s) => w.write(s + "\0");
+  }
+  const send = (method, params = {}, sessionId) => new Promise((res, rej) => { const id = ++seq; pending.set(id, { res, rej }); write(JSON.stringify({ id, method, params, sessionId })); });
+  if (PORT_MODE) {
+    // --load-extension: wait for the extension's service worker (its id is pinned by the key)
+    await until(async () => (await send("Target.getTargets")).targetInfos.some((x) => x.url.startsWith(`chrome-extension://${CHROME_ID}/`)), 30000, `${kind}: the extension loaded with --load-extension`);
+  } else {
+    // a browser that never answers on the DevTools pipe fails here with a reason, not at the job timeout
+    const { id } = await Promise.race([
+      send("Extensions.loadUnpacked", { path: EXT_DIR }),
+      sleep(60000).then(() => { throw new Error(`${kind} did not answer on the DevTools pipe within 60 s (stderr: ${err.slice(-800)})`); }),
+    ]);
+    if (id !== CHROME_ID) throw new Error(`extension id ${id}`);
+  }
+  const attach = async (url) => {
+    const { targetId } = await send("Target.createTarget", { url: "about:blank" });
+    const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
+    const S = (m, p) => send(m, p, sessionId);
+    S.targetId = targetId;
+    await S("Page.enable"); await S("Runtime.enable"); await S("DOM.enable");
+    if (url) await S("Page.navigate", { url });
+    return S;
+  };
+  const S = await attach();
+  // answer www.youtube.com from here (nothing goes to YouTube)
+  hooks.push((m) => {
+    if (m.method !== "Fetch.requestPaused") return;
+    const u = new URL(m.params.request.url);
+    const doc = m.params.resourceType === "Document";
+    const body = doc ? ytPage(u.searchParams.get("v") || "Home") : "";
+    send("Fetch.fulfillRequest", { requestId: m.params.requestId, responseCode: doc ? 200 : 404,
+      responseHeaders: [{ name: "content-type", value: "text/html; charset=utf-8" }], body: Buffer.from(body).toString("base64") }, m.sessionId).catch(() => {});
+  });
+  await S("Fetch.enable", { patterns: [{ urlPattern: "https://www.youtube.com/*", requestStage: "Request" }] });
+  const evaluate = async (expr, s = S) => {
+    const res = await s("Runtime.evaluate", { expression: `(async () => JSON.stringify(await (${expr})))()`, returnByValue: true, awaitPromise: true });
+    if (res.exceptionDetails) throw new Error(res.exceptionDetails.exception?.description ?? res.exceptionDetails.text);
+    return res.result.value === undefined ? undefined : JSON.parse(res.result.value);
+  };
+  return {
+    name: kind,
+    async open(url) {
+      await S("Page.navigate", { url });
+      for (let i = 0; i < 50; i++) { await sleep(100); try { if ((await evaluate("document.readyState")) === "complete") break; } catch {} }
+      await sleep(500);
+    },
+    evaluate,
+    async shot(name) { const r = await S("Page.captureScreenshot", { format: "png" }); fs.writeFileSync(path.join(OUT, name), Buffer.from(r.data, "base64")); },
+    async hover(x, y) { await S("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }); await sleep(400); },
+    async overlay() {
+      const { root } = await S("DOM.getDocument", { depth: -1, pierce: true });
+      const out = { buttons: [], texts: [], host: false, selects: 0 };
+      const textOf = (n) => (n.nodeType === 3 ? n.nodeValue : "") + (n.children ?? []).map(textOf).join("");
+      const walk = (n, inside) => {
+        for (const s of n.shadowRoots ?? []) if (s.shadowRootType === "closed" && n.nodeName === "EID-DOWNLOAD-OVERLAY") { out.host = true; walk(s, true); }
+        if (inside && n.nodeType === 1 && n.nodeName !== "STYLE") {
+          const a = {}; const l = n.attributes ?? []; for (let i = 0; i < l.length; i += 2) a[l[i]] = l[i + 1];
+          if (n.nodeName === "SELECT") out.selects++;
+          if (n.nodeName === "BUTTON" || n.nodeName === "INPUT") out.buttons.push({ tag: n.nodeName.toLowerCase(), attrs: a, text: textOf(n).trim(), ref: n.backendNodeId });
+        }
+        if (inside && n.nodeType === 3 && n.nodeValue.trim()) out.texts.push(n.nodeValue.trim());
+        if (n.nodeName === "STYLE") return;
+        for (const c of n.children ?? []) walk(c, inside);
+      };
+      walk(root, false);
+      return out;
+    },
+    async click(ref) {
+      const { object } = await S("DOM.resolveNode", { backendNodeId: ref });
+      await S("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: "function () { this.click(); }" });
+      await sleep(300);
+    },
+    async options(fnSource) {
+      const O = await attach(`chrome-extension://${CHROME_ID}/options.html`);
+      for (let i = 0; i < 50; i++) { await sleep(100); try { if ((await evaluate("document.readyState", O)) === "complete") break; } catch {} }
+      await sleep(500);
+      const v = await evaluate(`(${fnSource})()`, O);
+      // back to the page tab: a background tab gets no animation frames (the button is drawn in one)
+      await send("Target.closeTarget", { targetId: O.targetId });
+      await send("Target.activateTarget", { targetId: S.targetId });
+      return v;
+    },
+    async close() { try { proc.kill("SIGKILL"); } catch {} },
+    stderr: () => err,
+  };
+}
+
+async function firefox() {
+  const gdDir = process.env.GECKOWEBDRIVER;
+  const gd = arg("--geckodriver", gdDir ? path.join(gdDir, IS_WIN ? "geckodriver.exe" : "geckodriver") : "geckodriver");
+  const port = 4444 + Math.floor(Math.random() * 1000);
+  // MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: lets the test open the options tab from the browser's own
+  // context (run 44717763588); the page under test runs as an ordinary web page either way
+  const env = { ...process.env, EID_STUB_LOG: STUB_LOG, MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: "1" };
+  if (!IS_WIN) env.HOME = path.join(TMP, "home");
+  const proc = spawn(gd, ["--port", String(port)], { stdio: ["ignore", "pipe", "pipe"], env });
+  let err = ""; proc.stderr.on("data", (d) => { err += d; }); proc.stdout.on("data", (d) => { err += d; });
+  const http = async (method, p, body) => {
+    const r = await fetch(`http://127.0.0.1:${port}${p}`, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+    const j = await r.json();
+    if (j.value?.error) throw new Error(`${p}: ${j.value.error}: ${j.value.message}`);
+    return j.value;
+  };
+  for (let i = 0; i < 100; i++) { try { await http("GET", "/status"); break; } catch { await sleep(200); } }
+  const uuid = randomUUID();
+  const prefs = {
+    "extensions.webextensions.uuids": JSON.stringify({ [FIREFOX_ID]: uuid }),
+    "dom.security.https_first": false,
+    "browser.shell.checkDefaultBrowser": false,
+  };
+  const opts = { args: ["-headless"], prefs };
+  if (arg("--bin")) opts.binary = arg("--bin");
+  const sess = await http("POST", "/session", { capabilities: { alwaysMatch: { browserName: "firefox", webSocketUrl: true, acceptInsecureCerts: true, "moz:firefoxOptions": opts } } });
+  const sid = sess.sessionId;
+  console.log(`     Firefox ${sess.capabilities.browserVersion} (${sess.capabilities.platformName})`);
+  // a temporary add-on, exactly like about:debugging > "Load Temporary Add-on"
+  const xpi = path.join(TMP, "eid-download.xpi");
+  const files = []; const walk = (d, b = d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p, b); else files.push(path.relative(b, p).split(path.sep).join("/")); } };
+  walk(EXT_DIR);
+  fs.writeFileSync(xpi, zip(files.sort().map((n) => ({ name: n, data: fs.readFileSync(path.join(EXT_DIR, n)) }))));
+  const addonId = await http("POST", `/session/${sid}/moz/addon/install`, { path: xpi, temporary: true });
+  if (addonId !== FIREFOX_ID) throw new Error(`add-on id ${addonId}`);
+  // WebDriver BiDi
+  const ws = new WebSocket(sess.capabilities.webSocketUrl);
+  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+  let seq = 0; const pending = new Map(); const logs = [];
+  const bidi = (method, params = {}) => new Promise((res, rej) => { const id = ++seq; pending.set(id, { res, rej }); ws.send(JSON.stringify({ id, method, params })); });
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.type === "error" ? p.rej(new Error(`${m.error}: ${m.message}`)) : p.res(m.result); return; }
+    if (m.method === "network.beforeRequestSent" && m.params.isBlocked) {
+      const u = new URL(m.params.request.url);
+      const doc = m.params.navigation != null || /^\/(watch|playlist|$)/.test(u.pathname);
+      const body = doc ? ytPage(u.searchParams.get("v") || "Home") : "";
+      bidi("network.provideResponse", { request: m.params.request.request, statusCode: doc ? 200 : 404, reasonPhrase: doc ? "OK" : "Not Found",
+        headers: [{ name: "content-type", value: { type: "string", value: "text/html; charset=utf-8" } }], body: { type: "string", value: body } }).catch((e) => logs.push(String(e)));
+    }
+    if (m.method === "log.entryAdded") logs.push(`${m.params.level}: ${m.params.text}`);
+  };
+  const { contexts } = await bidi("browsingContext.getTree", {});
+  let context = contexts[0].context;
+  await bidi("session.subscribe", { events: ["network.beforeRequestSent", "log.entryAdded"] });
+  await bidi("network.addIntercept", { phases: ["beforeRequestSent"], urlPatterns: [{ type: "pattern", protocol: "https", hostname: "www.youtube.com" }] });
+  const evaluate = async (expr, ctx = context) => {
+    const r = await bidi("script.evaluate", { expression: `(async () => JSON.stringify(await (${expr})))()`, target: { context: ctx }, awaitPromise: true });
+    if (r.type === "exception") throw new Error(r.exceptionDetails.text);
+    return r.result.value === undefined ? undefined : JSON.parse(r.result.value);
+  };
+  return {
+    name: "firefox",
+    logs,
+    async open(url) { await bidi("browsingContext.navigate", { context, url, wait: "complete" }); await sleep(800); },
+    evaluate,
+    async shot(name) { const r = await bidi("browsingContext.captureScreenshot", { context }); fs.writeFileSync(path.join(OUT, name), Buffer.from(r.data, "base64")); },
+    async hover(x, y) {
+      await bidi("input.performActions", { context, actions: [{ type: "pointer", id: "mouse", parameters: { pointerType: "mouse" }, actions: [{ type: "pointerMove", x: Math.round(x), y: Math.round(y), duration: 0 }] }] });
+      await sleep(400);
+    },
+    async overlay() {
+      const r = await bidi("script.callFunction", { functionDeclaration: "function () { return document.querySelector('eid-download-overlay'); }", target: { context }, awaitPromise: false,
+        serializationOptions: { maxDomDepth: 40, includeShadowTree: "all" } });
+      const out = { buttons: [], texts: [], host: false, selects: 0 };
+      const host = r.result;
+      if (!host || host.type !== "node") return out;
+      out.host = true;
+      const textOf = (n) => (n.value?.nodeType === 3 ? n.value.nodeValue : "") + (n.value?.children ?? []).map(textOf).join("");
+      const walk = (n) => {
+        const v = n.value ?? {};
+        if (v.nodeType === 1 && v.localName === "style") return;
+        if (v.nodeType === 1 && v.localName === "select") out.selects++;
+        if (v.nodeType === 1 && (v.localName === "button" || v.localName === "input")) out.buttons.push({ tag: v.localName, attrs: v.attributes ?? {}, text: textOf(n).trim(), ref: n.sharedId });
+        if (v.nodeType === 3 && v.nodeValue?.trim()) out.texts.push(v.nodeValue.trim());
+        for (const c of v.children ?? []) walk(c);
+      };
+      if (host.value?.shadowRoot) walk(host.value.shadowRoot);
+      return out;
+    },
+    async click(ref) {
+      await bidi("script.callFunction", { functionDeclaration: "function (el) { el.click(); }", arguments: [{ sharedId: ref }], target: { context }, awaitPromise: false });
+      await sleep(300);
+    },
+    async options(fnSource) {
+      // WebDriver BiDi refuses to navigate a tab to moz-extension: (run 44717375680), so the tab
+      // is opened from the browser's own (chrome) context through Marionette, like a user would
+      const url = `moz-extension://${uuid}/options.html`;
+      await http("POST", `/session/${sid}/moz/context`, { context: "chrome" });
+      try {
+        await http("POST", `/session/${sid}/execute/sync`, { script: "const w = Services.wm.getMostRecentWindow('navigator:browser'); w.gBrowser.selectedTab = w.gBrowser.addTab(arguments[0], { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() }); return true;", args: [url] });
+      } finally {
+        await http("POST", `/session/${sid}/moz/context`, { context: "content" });
+      }
+      const oc = await until(async () => {
+        const { contexts: cs } = await bidi("browsingContext.getTree", {});
+        return cs.find((c) => c.url === url)?.context;
+      }, 10000, "the options tab");
+      await sleep(1000);
+      const v = await evaluate(`(${fnSource})()`, oc);
+      await bidi("browsingContext.close", { context: oc });
+      await bidi("browsingContext.activate", { context });
+      return v;
+    },
+    async close() { try { await http("DELETE", `/session/${sid}`); } catch {} try { proc.kill(); } catch {} },
+    stderr: () => err,
+  };
+}
+
+// ---------------------------------------------------------------- the scenario
+let failed = 0;
+const results = [];
+async function check(name, fn) {
+  if (ONLY && !ONLY.has(name.split(".")[0])) { console.log(`NOT RUN ${name} (--checks)`); return; }
+  console.log(`...  ${name}`);
+  try { await fn(); results.push({ name, ok: true }); console.log(`ok   ${name}`); }
+  catch (e) { failed++; results.push({ name, ok: false, error: String(e?.stack ?? e) }); console.log(`FAIL ${name}\n     ${e?.stack ?? e}`); }
+}
+const assert = (c, m) => { if (!c) throw new Error(m); };
+async function until(fn, ms, what) {
+  const t0 = Date.now(); let last;
+  while (Date.now() - t0 < ms) { try { last = await fn(); if (last) return last; } catch (e) { last = e; } await sleep(200); }
+  throw new Error(`timed out (${ms} ms): ${what}; last: ${last?.message ?? JSON.stringify(last)?.slice(0, 600)}`);
+}
+
+// the whole run is bounded: a hang anywhere ends with a reason after 10 minutes
+const MAX_MIN = Number(arg("--max-minutes", "10"));
+setTimeout(() => { console.log(`FAIL the run took longer than ${MAX_MIN} minutes (${BROWSER}); stopped`); process.exit(1); }, MAX_MIN * 60000).unref();
+
+// ---------------------------------------------------------------- --real: the whole chain
+// The REAL native host and app (`eid serve`), the video tools installed through the app after
+// consent from a local server (yt-dlp is the offline stand-in, which answers YouTube addresses
+// from fake-youtube.json next to it), and the files it really writes.
+const EXE = IS_WIN ? ".exe" : "";
+const BIN = (n) => path.join(ROOT, "target", "debug", n + EXE);
+const sha = (b) => createHash("sha256").update(b).digest("hex");
+const REAL_DIR = path.join(TMP, "real");
+const REAL_OUT = path.join(REAL_DIR, "out");
+const REAL_LOG = path.join(REAL_DIR, "ytdlp-calls.jsonl");
+let realServe = null, toolSrv = null;
+async function realSetup() {
+  for (const n of ["eid", "eid-native-host", "fake-yt-dlp"]) {
+    if (!fs.existsSync(BIN(n))) throw new Error(`${BIN(n)} is missing: cargo build -p eid-cli --features test-hooks -p eid-native-host -p eid-fake-ytdlp`);
+  }
+  for (const d of ["cfg", "data", "out"]) fs.mkdirSync(path.join(REAL_DIR, d), { recursive: true });
+  // the tool assets, served locally (EID_TEST_TOOLS_BASE) and pinned by a test manifest
+  const ytdlp = fs.readFileSync(BIN("fake-yt-dlp"));
+  const ffmpeg = Buffer.alloc(1000, 1), ffprobe = Buffer.alloc(1000, 2), deno = Buffer.alloc(1000, 3);
+  const ffzip = zip([{ name: "b/ffmpeg.exe", data: ffmpeg }, { name: "b/ffprobe.exe", data: ffprobe }]);
+  const dzip = zip([{ name: "deno.exe", data: deno }]);
+  const assets = { "/yt-dlp.exe": ytdlp, "/ffmpeg.zip": ffzip, "/deno.zip": dzip };
+  toolSrv = http.createServer((q, s) => {
+    const b = assets[q.url];
+    if (!b) { s.writeHead(404); s.end(); return; }
+    const etag = `"${sha(b).slice(0, 16)}"`;
+    const m = /^bytes=(\d+)-(\d*)$/.exec(q.headers.range ?? "");
+    if (m) {
+      const from = Number(m[1]), to = m[2] ? Math.min(Number(m[2]), b.length - 1) : b.length - 1;
+      if (from >= b.length || from > to) { s.writeHead(416, { "content-range": `bytes */${b.length}` }); s.end(); return; }
+      s.writeHead(206, { "content-length": to - from + 1, "content-range": `bytes ${from}-${to}/${b.length}`, "accept-ranges": "bytes", etag, "content-type": "application/octet-stream" });
+      s.end(q.method === "HEAD" ? undefined : b.subarray(from, to + 1));
+      return;
+    }
+    s.writeHead(200, { "content-length": b.length, "accept-ranges": "bytes", etag, "content-type": "application/octet-stream" });
+    s.end(q.method === "HEAD" ? undefined : b);
+  });
+  await new Promise((r) => toolSrv.listen(0, "127.0.0.1", r));
+  const base = "https://github.com/test/tools/releases/download/v1";
+  const file = (entry, name, b) => ({ entry, name, size: b.length, sha256: sha(b) });
+  const manifest = path.join(REAL_DIR, "manifest.json");
+  fs.writeFileSync(manifest, JSON.stringify({
+    schema: 1, id: "test-1", allowed_hosts: ["github.com"],
+    tools: [
+      { name: "yt-dlp", version: "fake", license: "test", source: "local", url: `${base}/yt-dlp.exe`, size: ytdlp.length, sha256: sha(ytdlp), files: [file(null, "yt-dlp.exe", ytdlp)] },
+      { name: "ffmpeg", version: "fake", license: "test", source: "local", url: `${base}/ffmpeg.zip`, size: ffzip.length, sha256: sha(ffzip), files: [file("b/ffmpeg.exe", "ffmpeg.exe", ffmpeg), file("b/ffprobe.exe", "ffprobe.exe", ffprobe)] },
+      { name: "deno", version: "fake", license: "test", source: "local", url: `${base}/deno.zip`, size: dzip.length, sha256: sha(dzip), files: [file("deno.exe", "deno.exe", deno)] },
+    ],
+  }));
+  const endpoint = `e2e${process.pid}`;
+  const tokenFile = path.join(REAL_DIR, "token");
+  const env = {
+    APPDATA: path.join(REAL_DIR, "cfg"), LOCALAPPDATA: path.join(REAL_DIR, "data"),
+    XDG_CONFIG_HOME: path.join(REAL_DIR, "cfg"), XDG_DATA_HOME: path.join(REAL_DIR, "data"),
+    EID_TEST_MANIFEST: manifest, EID_TEST_TOOLS_BASE: `http://127.0.0.1:${toolSrv.address().port}`,
+    EID_IPC_ENDPOINT: endpoint, EID_IPC_TOKEN_FILE: tokenFile, EID_NATIVE_HOST_APP: BIN("eid"),
+  };
+  // the browser (and so the native host it starts) gets the same environment
+  Object.assign(process.env, env);
+  // consent + tools, exactly as the app's "Download the tools" does
+  // asynchronously: the tool server above lives in this process (a synchronous call would block it)
+  await new Promise((res, rej) => {
+    const p = spawn(BIN("eid"), ["video", "setup", "--yes-i-agree", "-q"], { env: process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    let o = "";
+    p.stdout.on("data", (d) => { o += d; });
+    p.stderr.on("data", (d) => { o += d; });
+    p.on("exit", (c) => (c === 0 ? res() : rej(new Error(`eid video setup failed (${c}): ${o.slice(-1500)}`))));
+  });
+  // the stand-in's YouTube answers, next to the installed yt-dlp
+  const found = [];
+  const walk = (d) => { for (const x of fs.readdirSync(d, { withFileTypes: true })) { const q = path.join(d, x.name); if (x.isDirectory()) walk(q); else if (/^yt-dlp(\.exe)?$/.test(x.name)) found.push(q); } };
+  walk(path.join(REAL_DIR, "data"));
+  if (!found.length) throw new Error("the video tools were not installed");
+  const list1 = path.join(REAL_DIR, "PLeidtest01.json");
+  fs.writeFileSync(list1, JSON.stringify([
+    { id: "EIDEP000001", title: "Episode one" },
+    { id: "EIDEP000002", title: "Episode two" },
+    { id: "EIDEP000003", title: "Episode three" },
+    { id: "EIDEP000004", title: "Episode four", availability: "private" },
+  ]));
+  const cfg = {
+    log: REAL_LOG,
+    videos: { EIDVIDEO001: { title: "Sample clip", heights: "360,720" }, EIDEP000002: { title: "Episode two", heights: "360,720" } },
+    playlists: { PLeidtest01: { title: "Test playlist", file: list1 } },
+  };
+  for (const f of found) fs.writeFileSync(path.join(path.dirname(f), "fake-youtube.json"), JSON.stringify(cfg));
+  // the app: `eid serve` (no window: "Download Entire Playlist" then downloads directly)
+  realServe = spawn(BIN("eid"), ["serve", "-q", "-d", REAL_OUT, "--queues", path.join(REAL_DIR, "queues.json"), "--endpoint", endpoint, "--token-file", tokenFile], { env: process.env, stdio: ["pipe", "ignore", "pipe"], windowsHide: true });
+  let serr = ""; realServe.stderr.on("data", (d) => { serr += d; });
+  realServe.on("exit", (c) => { if (c) console.log(`     eid serve exited ${c}: ${serr.slice(-800)}`); });
+  await until(() => fs.existsSync(tokenFile), 20000, "eid serve listening (token file)");
+  console.log(`     real chain: eid serve on ${endpoint}, tools from ${env.EID_TEST_TOOLS_BASE}, downloads into ${REAL_OUT}`);
+}
+function realCleanup() {
+  try { realServe?.kill(); } catch {}
+  try { toolSrv?.close(); } catch {}
+}
+const ytCalls = () => (fs.existsSync(REAL_LOG) ? fs.readFileSync(REAL_LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+// a download call of video `id` (logged with the address as the app passed it: the YouTube page
+// for a single video, the playlist entry's address for an episode); listings are not downloads
+const downloads = (id) => ytCalls().filter((c) => !c.argv.includes("--dump-single-json") && (c.argv.at(-1).includes(`/video/${id}`) || c.argv.at(-1).includes(`v=${id}`)));
+const listDir = (d) => (fs.existsSync(d) ? fs.readdirSync(d).sort() : []);
+
+async function realChecks({ shownButton, hoverPlayer }) {
+  const clip = fs.readFileSync(path.join(ROOT, "crates", "eid-fake-ytdlp", "fixtures", "clip.mp4"));
+  const menuOf = async (url) => {
+    await B.open(url);
+    await B.hover(3, 3);
+    await hoverPlayer();
+    const { b } = await until(shownButton, 8000, "the button");
+    await B.click(b.ref);
+  };
+  await check("R1. the real chain: a video page -> its menu (the real app probes it) -> the 360p line -> the file really downloaded, at that quality", async () => {
+    await menuOf("https://www.youtube.com/watch?v=EIDVIDEO001");
+    const q360 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-q"] === "360p"), 30000, "the 360p line from the real probe");
+    const offered = (await B.overlay()).buttons.map((x) => x.attrs["data-q"]).filter(Boolean);
+    assert(JSON.stringify(offered) === JSON.stringify(["best", "720p", "360p", "m4a", "audio"]), `lines: ${offered}`);
+    assert(q360.attrs["data-format"] === "v360+140", JSON.stringify(q360.attrs));
+    // owner's feedback 2026-11-23: only this video's own qualities, nothing taller is even named
+    const o1 = await B.overlay();
+    assert(o1.selects === 0, "a quality dropdown besides the list");
+    const best = o1.buttons.find((x) => x.attrs["data-q"] === "best");
+    assert(/720p/.test(best.text) && !/4320|2160|1440|1080|8K|4K/.test(o1.texts.join(" ")), `taller than the video named: ${o1.texts.join(" | ")}`);
+    await B.click(q360.ref);
+    const f = path.join(REAL_OUT, "Sample clip.mp4");
+    await until(() => fs.existsSync(f), 60000, `the file ${f} (out: ${listDir(REAL_OUT)})`);
+    assert(sha(fs.readFileSync(f)) === sha(clip), "SHA-256 of the downloaded file");
+    const dl = downloads("EIDVIDEO001");
+    assert(dl.length === 1 && dl[0].argv.some((a) => a.startsWith("--format=v360+140/")), `the tool was asked for exactly the 360p line: ${JSON.stringify(dl.map((c) => c.argv.filter((a) => a.startsWith("--format"))))}`);
+  });
+  await check("R2. the original audio line downloads an .m4a (not converted)", async () => {
+    await menuOf("https://www.youtube.com/watch?v=EIDVIDEO001");
+    const m = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-q"] === "m4a"), 30000, "the m4a line");
+    await B.click(m.ref);
+    const f = path.join(REAL_OUT, "Sample clip.m4a");
+    await until(() => fs.existsSync(f), 60000, `the file ${f} (out: ${listDir(REAL_OUT)})`);
+    assert(!downloads("EIDVIDEO001").at(-1).argv.includes("--extract-audio"), "not converted");
+  });
+  await check("R3. a video in a playlist: 'Choose items' -> episodes 1 and 3 -> '001 - Episode one.mp4' and '003 - Episode three.mp4' only", async () => {
+    await menuOf("https://www.youtube.com/watch?v=EIDEP000002&list=PLeidtest01");
+    const choose = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "choose"), 30000, "'Choose items' (the real app listed the playlist)");
+    await B.click(choose.ref);
+    await until(async () => (await B.overlay()).buttons.filter((x) => x.tag === "input").length === 4, 8000, "4 episodes listed");
+    await B.click((await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "none").ref);
+    const boxes = (await B.overlay()).buttons.filter((x) => x.tag === "input");
+    await B.click(boxes[0].ref);
+    await B.click(boxes[2].ref);
+    await B.click((await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "next").ref);
+    const pick = await playlistStep(["best", "720p", "360p", "m4a", "audio"]);
+    await pick("360p");
+    const dir = path.join(REAL_OUT, "Test playlist");
+    await until(() => listDir(dir).filter((n) => n.endsWith(".mp4")).length === 2, 90000, `two episodes in ${dir} (now: ${listDir(dir)})`);
+    const got = listDir(dir).filter((n) => n.endsWith(".mp4"));
+    assert(JSON.stringify(got) === JSON.stringify(["001 - Episode one.mp4", "003 - Episode three.mp4"]), `files: ${got}`);
+    for (const n of got) assert(sha(fs.readFileSync(path.join(dir, n))) === sha(clip), `SHA-256 of ${n}`);
+  });
+  await check("R4. 'Download Entire Playlist' (an app without a window downloads it all): episode 2 is added, 1 and 3 are not downloaded again, the private one is skipped", async () => {
+    await menuOf("https://www.youtube.com/watch?v=EIDEP000002&list=PLeidtest01");
+    const entire = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 30000, "'Download Entire Playlist'");
+    assert(/\(4 /.test(entire.text) || /4/.test(entire.text), entire.text);
+    await B.click(entire.ref);
+    await (await playlistStep(["best", "720p", "360p", "m4a", "audio"]))("best");
+    const dir = path.join(REAL_OUT, "Test playlist");
+    await until(() => listDir(dir).includes("002 - Episode two.mp4"), 90000, `episode 2 (now: ${listDir(dir)})`);
+    await sleep(3000);
+    const got = listDir(dir).filter((n) => n.endsWith(".mp4"));
+    assert(JSON.stringify(got) === JSON.stringify(["001 - Episode one.mp4", "002 - Episode two.mp4", "003 - Episode three.mp4"]), `files: ${got}`);
+    for (const id of ["EIDEP000001", "EIDEP000003"]) assert(downloads(id).length === 1, `${id} downloaded ${downloads(id).length} times`);
+    assert(downloads("EIDEP000004").length === 0, "the private episode was not attempted");
+  });
+}
+
+/** The playlist's quality step: the one list, exactly the qualities of the video on the page. */
+async function playlistStep(expected) {
+  const qs = await until(async () => { const o = await B.overlay(); const q = o.buttons.filter((x) => x.attrs["data-q"]).map((x) => x.attrs["data-q"]); return q.length ? q : null; }, 30000, "the playlist's quality list");
+  assert(JSON.stringify(qs) === JSON.stringify(expected), `playlist qualities ${JSON.stringify(qs)}, expected the video's own ${JSON.stringify(expected)}`);
+  assert((await B.overlay()).selects === 0, "a quality dropdown is shown besides the list");
+  return (q) => B.overlay().then((o) => B.click(o.buttons.find((x) => x.attrs["data-q"] === q).ref));
+}
+
+let restoreHost = () => {};
+let B = null;
+try {
+  if (REAL) await realSetup();
+  restoreHost = registerHost(REAL ? BIN("eid-native-host") : null);
+  B = BROWSER === "firefox" ? await firefox() : await chromium(BROWSER);
+  const player = () => B.evaluate("(() => { const r = document.querySelector('video').getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()");
+  const hoverPlayer = async () => { const p = await player(); await B.hover(p.x + p.w / 2, p.y + p.h / 2); return p; };
+  const mainButton = (o) => o.buttons.find((b) => /\bbtn\b/.test(b.attrs.class ?? ""));
+  const shownButton = async () => { const o = await B.overlay(); const b = mainButton(o); return b && /\bshow\b/.test(b.attrs.class ?? "") ? { o, b } : null; };
+  const leftOf = (b) => Number(/left:\s*(-?\d+)/.exec(b.attrs.style ?? "")?.[1]);
+
+  if (REAL) await realChecks({ shownButton, hoverPlayer });
+  else {
+  await check("1. YouTube watch page: hovering the player shows the button at its top-right", async () => {
+    await B.open("https://www.youtube.com/watch?v=AAAAAAAAAAA");
+    const p = await hoverPlayer();
+    const { b } = await until(shownButton, 8000, "the button over the player");
+    const left = leftOf(b);
+    assert(left > p.x + p.w / 2 && left < p.x + p.w, `button left ${left} is not at the top-right of the player ${JSON.stringify(p)}`);
+  });
+
+  await check("2. its menu asks the app (probe): video lines tallest first with their real details, then audio; 720p sends add_video with its exact formats and the canonical link", async () => {
+    const { b } = await until(shownButton, 5000, "button");
+    await B.click(b.ref);
+    const q720 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-q"] === "720p"), 15000, "the 720p choice (probe through the native host)");
+    const bs = (await B.overlay()).buttons;
+    const offered = bs.map((x) => x.attrs["data-q"]).filter(Boolean);
+    assert(JSON.stringify(offered) === JSON.stringify(["best", "4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]), `order: ${offered}`);
+    const text = (q) => bs.find((x) => x.attrs["data-q"] === q).text;
+    assert(/4320p/.test(text("4320p")) && /AV1/.test(text("4320p")) && /603/.test(text("4320p")), `8K line: ${text("4320p")}`);
+    assert(/HDR10/.test(text("2160p")) && !/≈/.test(text("2160p")), `4K line (HDR, no size from the app): ${text("2160p")}`);
+    assert(/60 fps/.test(text("720p")) && /H\.264/.test(text("720p")) && /with audio/.test(text("720p")), `720p line: ${text("720p")}`);
+    assert(/AAC/.test(text("m4a")) && /original/.test(text("m4a")), `m4a line: ${text("m4a")}`);
+    assert(/MP3/.test(text("audio")) && /converted/.test(text("audio")) && !/≈/.test(text("audio")), `mp3 line: ${text("audio")}`);
+    await B.shot(`menu-video-${BROWSER}.png`).catch((e) => console.log(`     (no screenshot: ${e.message})`));
+    await B.click(q720.ref);
+    await until(() => hoverRequests().some((r) => r.cmd === "add_video"), 10000, "add_video at the host");
+    const add = hostRequests().find((r) => r.cmd === "add_video");
+    assert(add.url === "https://www.youtube.com/watch?v=AAAAAAAAAAA" && add.quality === "720p" && add.format === "298+140", JSON.stringify(add));
+    // owner's feedback: after the choice the menu closes and says so over the video
+    await until(async () => { const o = await B.overlay(); return !o.buttons.some((x) => x.attrs["data-q"]) && /Added to Eid Download: 720p/.test(o.texts.join(" ")); }, 5000, "the menu closed with 'Added to Eid Download: 720p'");
+    await B.shot(`menu-after-choice-${BROWSER}.png`).catch(() => {});
+    const probe = hostRequests().find((r) => r.cmd === "probe");
+    assert(probe && probe.url === "https://www.youtube.com/watch?v=AAAAAAAAAAA", JSON.stringify(probe));
+  });
+
+  await check("3. in-page navigation to watch?v=…&list=…: the button follows; the menu shows the playlist (120 videos); a selection sends add_playlist with those items", async () => {
+    await B.evaluate("(window.__ytGo('/watch?v=BBBBBBBBBBB&list=PLtestlist01'), true)");
+    await B.hover(5, 5);
+    await hoverPlayer();
+    const { b } = await until(shownButton, 8000, "the button after in-page navigation");
+    await B.click(b.ref); // closes the menu still open from check 2, if any
+    if (!(await B.overlay()).buttons.some((x) => x.attrs["data-act"] === "choose" || x.attrs["data-q"])) await B.click(b.ref);
+    const choose = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "choose"), 15000, "the playlist section ('choose episodes')");
+    const texts = (await B.overlay()).texts.join(" | ");
+    assert(/Test playlist/.test(texts) && /120/.test(texts), `playlist title/count not shown: ${texts.slice(0, 400)}`);
+    await B.click(choose.ref);
+    const boxes = await until(async () => { const o = await B.overlay(); const c = o.buttons.filter((x) => x.attrs.type === "checkbox"); return c.length ? c : null; }, 5000, "the episode list");
+    assert(boxes.length === 120, `${boxes.length} episodes listed`);
+    const none = (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "none");
+    await B.click(none.ref);
+    for (const v of ["1", "2", "40"]) await B.click(boxes.find((x) => x.attrs.value === v).ref);
+    const go = (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "next");
+    await B.click(go.ref);
+    // the same one list: the qualities of the video on the page, nothing invented
+    const pick = await playlistStep(["best", "4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]);
+    await pick("720p");
+    await until(() => hostRequests().some((r) => r.cmd === "add_playlist"), 10000, "add_playlist at the host");
+    const add = hostRequests().find((r) => r.cmd === "add_playlist");
+    assert(add.url === "https://www.youtube.com/playlist?list=PLtestlist01" && JSON.stringify(add.items) === "[1,2,40]" && add.quality === "720p", JSON.stringify(add));
+    await until(async () => (await B.overlay()).texts.some((x) => /Added to Eid Download: 720p/.test(x)), 5000, "the confirmation");
+  });
+
+  await check("4. in-page navigation to the home page hides the button; Back (popstate) brings it back", async () => {
+    const o0 = await B.overlay();
+    const x = o0.buttons.find((b) => /\bx\b/.test(b.attrs.class ?? ""));
+    if (x) await B.click(x.ref);
+    await B.evaluate("(window.__ytGo('/'), true)");
+    await hoverPlayer();
+    await sleep(1500);
+    assert(!(await shownButton()), "the button is still shown on the home page");
+    await B.evaluate("(history.back(), true)");
+    await sleep(500);
+    await hoverPlayer();
+    await until(shownButton, 8000, "the button after Back");
+    assert(/[?&]v=BBBBBBBBBBB/.test(await B.evaluate("location.href")), "Back did not return to the watch page");
+  });
+
+  await check("5. options page: 'always' + 'top-left' + Save are applied on the page (no hover needed)", async () => {
+    const saved = await B.options(`async () => {
+      document.querySelector('input[name=visibility][value=always]').click();
+      document.querySelector('input[name=position][value=top-left]').click();
+      document.querySelector('#f button[type=submit]').click();
+      await new Promise((r) => setTimeout(r, 800));
+      const access = document.getElementById('access');
+      return { msg: document.getElementById('msg').textContent, accessShown: access ? !access.hidden : null };
+    }`);
+    console.log(`     options page said: ${JSON.stringify(saved)}`);
+    // the extension may run on web pages (else the options page says so and offers to allow it)
+    assert(saved.accessShown === false, "the options page says the extension is NOT allowed on web pages");
+    await B.open("https://www.youtube.com/watch?v=CCCCCCCCCCC");
+    await B.hover(3, 3);
+    const p = await player();
+    const { b } = await until(shownButton, 8000, "the button without hover ('always')");
+    const left = leftOf(b);
+    assert(left >= p.x && left < p.x + p.w / 2, `button left ${left} is not at the top-left of the player ${JSON.stringify(p)}`);
+  });
+
+  await check("6. 'Open in Eid Download' sends the video WITH its playlist to the app's own Video window", async () => {
+    await B.open("https://www.youtube.com/watch?v=DDDDDDDDDDD&list=PLtestlist01&index=2&si=tracker");
+    await B.hover(3, 3);
+    const { b } = await until(shownButton, 8000, "the button");
+    await B.click(b.ref);
+    const open = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "open-app"), 8000, "'Open in Eid Download' in the menu");
+    await B.click(open.ref);
+    await until(() => hostRequests().some((r) => r.cmd === "open_video"), 10000, "open_video at the host");
+    const r = hostRequests().find((x) => x.cmd === "open_video");
+    assert(r.url === "https://www.youtube.com/watch?v=DDDDDDDDDDD&list=PLtestlist01", JSON.stringify(r));
+    await until(async () => /Opened in Eid Download/.test((await B.overlay()).texts.join(" ")), 5000, "the confirmation in the menu");
+  });
+
+  await check("7. 'Download Entire Playlist' is the menu's last choice (after every video and audio line) and opens the whole playlist in the app; a headless app downloads it all directly", async () => {
+    await B.open("https://www.youtube.com/watch?v=EEEEEEEEEEE&list=PLtestlist01");
+    await B.hover(3, 3);
+    const { b } = await until(shownButton, 8000, "the button");
+    await B.click(b.ref);
+    const entire = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 15000, "'Download Entire Playlist'");
+    await until(async () => (await B.overlay()).buttons.some((x) => x.attrs["data-q"] === "audio"), 15000, "the video and audio lines");
+    const bs = (await B.overlay()).buttons;
+    await B.shot(`menu-playlist-${BROWSER}.png`).catch((e) => console.log(`     (no screenshot: ${e.message})`));
+    const last = bs[bs.length - 1];
+    assert(last.attrs["data-act"] === "entire", `last button: ${JSON.stringify(last.attrs)} ${last.text}`);
+    assert(/Download Entire Playlist/.test(entire.text) && /120/.test(entire.text), entire.text);
+    assert((await B.overlay()).selects === 0, "the menu shows a quality dropdown besides the list");
+    const before = hostRequests().length;
+    await B.click(entire.ref);
+    await B.shot(`menu-playlist-quality-${BROWSER}.png`).catch((e) => console.log(`     (no screenshot: ${e.message})`));
+    await (await playlistStep(["best", "4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]))("best");
+    await until(() => hostRequests().slice(before).some((r) => r.cmd === "open_video"), 10000, "open_video at the host");
+    const r = hostRequests().slice(before).find((x) => x.cmd === "open_video");
+    // the quality chosen from the video's own list goes with it
+    assert(r.url === "https://www.youtube.com/playlist?list=PLtestlist01" && r.quality === "best", JSON.stringify(r));
+    await until(async () => /The playlist is open in Eid Download/.test((await B.overlay()).texts.join(" ")), 5000, "the confirmation");
+    // the headless app ("no window"): the whole playlist is downloaded in one operation
+    await B.open("https://www.youtube.com/watch?v=FFFFFFFFFFF&list=PLnowindow");
+    await B.hover(3, 3);
+    const s2 = await until(shownButton, 8000, "the button");
+    await B.click(s2.b.ref);
+    const e2 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 15000, "'Download Entire Playlist'");
+    const n0 = hostRequests().length;
+    await B.click(e2.ref);
+    await (await playlistStep(["best", "4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]))("1080p");
+    await until(() => hostRequests().slice(n0).some((x) => x.cmd === "add_playlist"), 10000, "add_playlist after 'no window'");
+    const ap = hostRequests().slice(n0).find((x) => x.cmd === "add_playlist");
+    assert(ap.url === "https://www.youtube.com/playlist?list=PLnowindow" && ap.items === undefined && ap.quality === "1080p", JSON.stringify(ap));
+    // an app from before open_video: the same, never an error
+    await B.open("https://www.youtube.com/watch?v=GGGGGGGGGGG&list=PLoldapp");
+    await B.hover(3, 3);
+    const s3 = await until(shownButton, 8000, "the button");
+    await B.click(s3.b.ref);
+    const e3 = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-act"] === "entire"), 15000, "'Download Entire Playlist'");
+    const n1 = hostRequests().length;
+    await B.click(e3.ref);
+    await (await playlistStep(["best", "4320p", "2160p", "1080p", "720p", "360p", "m4a", "audio"]))("best");
+    await until(() => hostRequests().slice(n1).some((x) => x.cmd === "add_playlist"), 10000, "add_playlist after 'app too old'");
+  });
+
+  await check("8. an app from before the details (qualities only) still works: plain lines, no exact formats sent", async () => {
+    await B.open("https://www.youtube.com/watch?v=OLDAPPOLDAP");
+    await B.hover(3, 3);
+    const { b } = await until(shownButton, 8000, "the button");
+    await B.click(b.ref);
+    const q = await until(async () => (await B.overlay()).buttons.find((x) => x.attrs["data-q"] === "720p"), 15000, "the 720p choice");
+    assert(!q.attrs["data-format"], JSON.stringify(q.attrs));
+    const n0 = hostRequests().length;
+    await B.click(q.ref);
+    await until(() => hostRequests().slice(n0).some((x) => x.cmd === "add_video"), 10000, "add_video");
+    const add = hostRequests().slice(n0).find((x) => x.cmd === "add_video");
+    assert(add.quality === "720p" && add.format === undefined, JSON.stringify(add));
+  });
+  }
+} catch (e) {
+  failed++;
+  console.log(`FAIL (setup) ${e?.stack ?? e}`);
+} finally {
+  if (B?.logs?.length) console.log("browser log:\n  " + B.logs.slice(-40).join("\n  "));
+  if (failed && B) console.log("driver/browser output (tail):\n" + B.stderr().slice(-3000));
+  console.log("host requests:", JSON.stringify(hostRequests()).slice(0, 1500));
+  await B?.close();
+  restoreHost();
+  realCleanup();
+  fs.writeFileSync(path.join(OUT, `browser-e2e-${BROWSER}.json`), JSON.stringify(results, null, 1));
+}
+function hoverRequests() { return hostRequests(); }
+if (!failed && results.length === 0) { failed = 1; console.log("FAIL no check ran"); }
+console.log(failed ? `BROWSER E2E (${BROWSER}): ${failed} check(s) FAILED` : `BROWSER E2E (${BROWSER}): all ${results.length} checks passed${ONLY ? ` (only checks ${[...ONLY].join(",")}; the others NOT RUN)` : ""}`);
+process.exit(failed ? 1 : 0);

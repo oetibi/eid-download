@@ -134,6 +134,10 @@ fn formats(heights: Option<&str>) -> Vec<Fmt> {
 fn passes(f: &Fmt, filters: &str) -> bool {
     filters.split(']').filter(|x| !x.is_empty()).all(|flt| {
         let flt = flt.trim_start_matches('[');
+        // v0.2 `ba[ext=m4a]`: video formats are mp4, audio-only ones m4a (as in info_json)
+        if let Some(e) = flt.strip_prefix("ext=") {
+            return e == if f.video { "mp4" } else { "m4a" };
+        }
         let (lenient, n) = match flt.strip_prefix("height<=?") {
             Some(n) => (true, n),
             None => (
@@ -178,10 +182,26 @@ fn pick<'a>(fs: &'a [Fmt], atom: &str) -> Option<&'a Fmt> {
 /// The video height `--format` selects from `fs` (`Some(None)`: a selection without a known
 /// height); `None` when nothing matches.
 fn select(fs: &[Fmt], spec: &str) -> Option<Option<u32>> {
-    spec.split('/').find_map(|alt| {
-        let parts: Option<Vec<&Fmt>> = alt.split('+').map(|a| pick(fs, a)).collect();
-        parts.map(|p| p.iter().filter(|f| f.video).filter_map(|f| f.height).max())
-    })
+    selected(fs, spec).map(|p| p.iter().filter(|f| f.video).filter_map(|f| f.height).max())
+}
+
+/// The formats of the first alternative of `spec` that matches.
+fn selected<'a>(fs: &'a [Fmt], spec: &str) -> Option<Vec<&'a Fmt>> {
+    spec.split('/')
+        .find_map(|alt| alt.split('+').map(|a| pick(fs, a)).collect())
+}
+
+/// The extension of the file a download writes: mp3 with `--extract-audio`, m4a when the
+/// selection is audio only (v0.2 `m4a`), else mp4 (or the WebM source, see [`Remux`]).
+fn out_ext(flags: &[String], heights: Option<&str>) -> &'static str {
+    if flags.iter().any(|f| f == "--extract-audio") {
+        return "mp3";
+    }
+    let fs = formats(heights);
+    match value(flags, "--format").and_then(|s| selected(&fs, s)) {
+        Some(p) if !p.is_empty() && p.iter().all(|f| !f.video) => "m4a",
+        _ => "mp4",
+    }
 }
 
 fn info_json(id: &str, title: &str, heights: Option<&str>) -> String {
@@ -189,11 +209,19 @@ fn info_json(id: &str, title: &str, heights: Option<&str>) -> String {
         let fs: Vec<serde_json::Value> = formats(heights)
             .iter()
             .map(|f| {
+                // v0.2 details for the download menu: 60 fps from 720p, sizes and bitrates
+                // that grow with the height, audio 128 kbit/s
+                let h = f.height.unwrap_or(0);
                 serde_json::json!({
                     "format_id": f.id, "ext": if f.video { "mp4" } else { "m4a" },
                     "height": f.height,
-                    "vcodec": if f.video { "avc1" } else { "none" },
+                    "vcodec": if f.video { "avc1.64001f" } else { "none" },
                     "acodec": if f.audio { "mp4a.40.2" } else { "none" },
+                    "fps": if f.video { Some(if h >= 720 { 60.0 } else { 30.0 }) } else { None },
+                    "dynamic_range": if f.video { Some("SDR") } else { None },
+                    "filesize": if f.video { u64::from(h) * 10_000 } else { 5_000 },
+                    "tbr": if f.video { f64::from(h) } else { 128.0 },
+                    "abr": if f.audio { Some(128.0) } else { None },
                 })
             })
             .collect();
@@ -304,6 +332,9 @@ fn download(
     let webm = webm_bytes();
     let (data, ext): (&[u8], &str) = if audio {
         (CLIP_MP3, "mp3")
+    } else if out_ext(flags, heights) == "m4a" {
+        // the fixture clip is an MP4 file; as audio only it stands in for an M4A stream
+        (CLIP_MP4, "m4a")
     } else if remux.container.as_deref() == Some("webm") {
         (&webm, "webm")
     } else {
@@ -473,6 +504,68 @@ fn playlist_json(name: &str, url: &url::Url) -> String {
     .to_string()
 }
 
+/// v0.2 (the browser end-to-end test): real YouTube page addresses, as the extension sends them,
+/// answered from `fake-youtube.json` next to this program (the test writes it into the tool
+/// folder after installing):
+/// `{"log": FILE, "videos": {"ID": {"title": T, "heights": "360,720"}},
+///   "playlists": {"LIST": {"title": T, "file": ENTRIES_JSON}}}`.
+/// Like the real yt-dlp, `watch?v=ID&list=LIST` is the playlist with `--yes-playlist` and the
+/// video with `--no-playlist`. Without that file a YouTube address is refused (never online).
+fn youtube_stand_in(url: url::Url, flags: &[String]) -> url::Url {
+    if !matches!(url.host_str(), Some("www.youtube.com" | "youtube.com")) {
+        return url;
+    }
+    let cfg_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("fake-youtube.json")))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| {
+            die(
+                9,
+                "fake-yt-dlp: a YouTube address without fake-youtube.json",
+            )
+        });
+    let cfg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&cfg_path).unwrap_or_else(|e| die(9, &e.to_string())),
+    )
+    .unwrap_or_else(|e| die(9, &format!("fake-yt-dlp: fake-youtube.json: {e}")));
+    let q = |k: &str| {
+        url.query_pairs()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.into_owned())
+    };
+    let mut out = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(l) = cfg["log"].as_str() {
+        out.append_pair("log", l);
+    }
+    let list = q("list");
+    let as_list = url.path() == "/playlist"
+        || (list.is_some() && flags.iter().any(|f| f == "--yes-playlist"));
+    if as_list {
+        let id = list.unwrap_or_else(|| die(9, "fake-yt-dlp: playlist without list="));
+        let p = &cfg["playlists"][&id];
+        let file = p["file"].as_str().unwrap_or_else(|| {
+            die(
+                1,
+                &format!("ERROR: [youtube:tab] {id}: The playlist does not exist"),
+            )
+        });
+        out.append_pair("list", file);
+        out.append_pair("ptitle", p["title"].as_str().unwrap_or("Fake playlist"));
+        let u = format!("https://fake.test/playlist/{id}?{}", out.finish());
+        return url::Url::parse(&u).unwrap();
+    }
+    let id = q("v").unwrap_or_else(|| die(9, "fake-yt-dlp: a YouTube address without v="));
+    let v = &cfg["videos"][&id];
+    if let Some(t) = v["title"].as_str() {
+        out.append_pair("title", t);
+    }
+    if let Some(h) = v["heights"].as_str() {
+        out.append_pair("heights", h);
+    }
+    url::Url::parse(&format!("https://fake.test/video/{id}?{}", out.finish())).unwrap()
+}
+
 /// Append one JSON line per invocation to the file named by the URL's `log` parameter.
 fn log_call(path: &str, argv: &[String], resumed_from: Option<u64>) {
     let line = serde_json::json!({
@@ -512,6 +605,7 @@ fn main() {
         }
     }
     let url = url::Url::parse(&rest[0]).unwrap_or_else(|_| die(9, "fake-yt-dlp: bad URL"));
+    let url = youtube_stand_in(url, flags);
     let segs: Vec<String> = url
         .path_segments()
         .map(|s| s.map(str::to_string).collect())
@@ -605,11 +699,7 @@ fn main() {
             } else {
                 // log first (with the resume offset), so a test can see this process even if
                 // it is killed while it stalls
-                let ext = if flags.iter().any(|f| f == "--extract-audio") {
-                    "mp3"
-                } else {
-                    "mp4"
-                };
+                let ext = out_ext(flags, query("heights").as_deref());
                 let resumed = std::fs::symlink_metadata(format!("{id}.{ext}.part"))
                     .map(|m| m.len())
                     .unwrap_or(0);

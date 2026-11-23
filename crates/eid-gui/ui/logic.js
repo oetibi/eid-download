@@ -146,11 +146,53 @@ export function pollDelay({ hidden, busy }) {
   return busy ? 500 : 2500;
 }
 
-/** Quality policy (docs/V0.1-CONTRACT.md): never above 2160p, only the known choices. */
-export const QUALITIES = ["360p", "480p", "720p", "1080p", "1440p", "2160p", "best", "audio"];
+/** Quality policy (owner 2026-11-20): 144p to 4320p (8K), tallest first, then best and audio;
+ * only the known choices, nothing taller. */
+export const QUALITIES = ["4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p", "best", "m4a", "audio"];
 export function safeQualities(list) {
   const got = new Set(Array.isArray(list) ? list : []);
   return QUALITIES.filter((q) => got.has(q));
+}
+
+/** v0.2 download menu: format ids from the app's own probe (`299+140`), the protocol's rule. */
+const FORMAT_SPEC = /^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63}(\+[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63})?$/;
+
+/**
+ * v0.2: the probe's exact option for `quality` (`options` for a height, `audio_options` for
+ * m4a/audio), or null. An option whose format is not plain ids is ignored (the quality alone is
+ * sent then).
+ */
+export function optionFor(result, quality) {
+  const list = quality === "m4a" || quality === "audio" ? result?.audio_options : result?.options;
+  if (!Array.isArray(list)) return null;
+  const o = list.find((x) => x && typeof x === "object" && x.quality === quality);
+  if (!o) return null;
+  if (o.format != null && (typeof o.format !== "string" || !FORMAT_SPEC.test(o.format))) return null;
+  if (quality === "m4a" && String(o.format ?? "").includes("+")) return null;
+  return o;
+}
+
+/**
+ * v0.2: the details shown next to a quality, only what the probe gave: frame rate, codec, HDR,
+ * audio (or "no audio"), size (≈, the tool's own numbers). `w`: { fps(n), audio, noaudio,
+ * original, converted, kbps(n), size(s) }.
+ */
+export function optionDetails(o, w, fmtSizeFn) {
+  if (!o) return [];
+  const out = [];
+  const num = (n) => typeof n === "number" && Number.isFinite(n) && n > 0;
+  if (typeof o.original === "boolean") {
+    if (typeof o.codec === "string" && o.codec) out.push(o.codec);
+    out.push(o.original ? w.original : w.converted);
+    if (num(o.kbps)) out.push(w.kbps(Math.round(o.kbps)));
+  } else {
+    if (num(o.fps)) out.push(w.fps(Math.round(o.fps)));
+    if (typeof o.codec === "string" && o.codec) out.push(o.codec);
+    if (typeof o.hdr === "string" && o.hdr) out.push(o.hdr);
+    out.push(o.audio === true ? w.audio : w.noaudio);
+  }
+  if (num(o.size)) out.push(w.size(fmtSizeFn(o.size)));
+  return out.map((s) => String(s).slice(0, 40));
 }
 
 /** Human size with the given unit names [B, KB, MB, GB, TB]. */
@@ -303,6 +345,61 @@ export function videoPage(link) {
   if (seg.length === 1 && seg[0] === "playlist" && has("list")) return "playlist";
   if (seg.length === 2 && ["shorts", "live", "embed", "v"].includes(seg[0])) return "video";
   return null;
+}
+
+/**
+ * v0.2 playlists: the playlist a YouTube link carries, if any. `watch?v=X&list=Y` and
+ * `playlist?list=Y` give `{ listId, playlistUrl }` (canonical `playlist?list=` address, the form
+ * yt-dlp reads as the whole list); `videoUrl` is set when the link names one video. Lists that
+ * are personal or generated (Watch Later `WL`, Liked `LL`/`LM`, Mixes `RD…`) are not offered.
+ * A bare `watch?v=` gives no playlist: it is never guessed (from a title or anything else).
+ */
+export function linkPlaylist(link) {
+  let u;
+  try { u = new URL(String(link ?? "").trim()); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol) || u.username || u.password) return null;
+  const host = u.hostname.toLowerCase().replace(/\.$/, "");
+  const yt = host === "youtu.be" || ["youtube.com", "youtube-nocookie.com"].some((d) => ["", "www.", "m.", "music."].some((p) => host === p + d));
+  if (!yt) return null;
+  const list = u.searchParams.get("list");
+  const offer = !!list && /^[A-Za-z0-9_-]{2,64}$/.test(list) && !["WL", "LL", "LM"].includes(list) && !list.startsWith("RD");
+  const kind = videoPage(link);
+  const out = {};
+  if (kind === "video") {
+    const seg = u.pathname.split("/").filter(Boolean);
+    const v = host === "youtu.be" ? seg[0] : seg[0] === "watch" ? u.searchParams.get("v") : seg[1];
+    if (v && /^[A-Za-z0-9_-]{11}$/.test(v)) out.videoUrl = "https://www.youtube.com/watch?v=" + v;
+  }
+  if (offer) {
+    out.listId = list;
+    out.playlistUrl = "https://www.youtube.com/playlist?list=" + list;
+  }
+  return out.videoUrl || out.playlistUrl ? out : null;
+}
+
+/**
+ * v0.2: a range of playlist items typed by the user: "1-10, 15, 20-25" (also "،" and "–").
+ * `available` is the list of item numbers the playlist has. Returns `{ items: number[] }`
+ * (sorted, only available numbers) or `{ error: "empty" | "syntax" | "none" }`.
+ */
+export function parseRange(text, available) {
+  const have = new Set(available);
+  const t = String(text ?? "").replace(/[،؛;]/g, ",").replace(/[–—]/g, "-").trim();
+  if (!t) return { error: "empty" };
+  const out = new Set();
+  for (const part of t.split(",")) {
+    const p = part.trim();
+    if (!p) continue;
+    const m = /^(\d{1,6})(?:\s*-\s*(\d{1,6}))?$/.exec(p);
+    if (!m) return { error: "syntax" };
+    let a = Number(m[1]);
+    let b = m[2] === undefined ? a : Number(m[2]);
+    if (a > b) [a, b] = [b, a];
+    if (b - a > 100000) return { error: "syntax" };
+    for (let i = a; i <= b; i++) if (have.has(i)) out.add(i);
+  }
+  if (!out.size) return { error: "none" };
+  return { items: [...out].sort((x, y) => x - y) };
 }
 
 /**
